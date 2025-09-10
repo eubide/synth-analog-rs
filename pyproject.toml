@@ -1,0 +1,13 @@
+[project]
+name = "synth"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "keyboard>=0.13.5",
+    "numpy>=2.3.3",
+    "pygame>=2.6.1",
+    "scipy>=1.16.1",
+    "sounddevice>=0.5.2",
+]
