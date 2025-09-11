@@ -65,7 +65,7 @@ impl MidiHandler {
                 0x90 => { // Note On
                     if data2 > 0 {
                         if let Ok(mut synth) = synthesizer.lock() {
-                            synth.note_on(data1);
+                            synth.note_on(data1, data2);
                         }
                         ("Note On".to_string(), format!("Note: {} Vel: {} Ch: {}", Self::note_name(data1), data2, channel))
                     } else {
@@ -83,6 +83,9 @@ impl MidiHandler {
                     ("Note Off".to_string(), format!("Note: {} Vel: {} Ch: {}", Self::note_name(data1), data2, channel))
                 },
                 0xB0 => { // Control Change
+                    if let Ok(mut synth) = synthesizer.lock() {
+                        Self::handle_cc_message(&mut synth, data1, data2);
+                    }
                     ("CC".to_string(), format!("CC: {} Val: {} Ch: {}", data1, data2, channel))
                 },
                 0xC0 => { // Program Change
@@ -121,6 +124,78 @@ impl MidiHandler {
         let octave = (note / 12) as i32 - 1;
         let note_index = note % 12;
         format!("{}{}", notes[note_index as usize], octave)
+    }
+    
+    fn handle_cc_message(synth: &mut Synthesizer, cc_number: u8, cc_value: u8) {
+        let normalized_value = cc_value as f32 / 127.0;
+        
+        match cc_number {
+            // Oscillator Controls
+            1 => synth.osc1.amplitude = normalized_value,
+            2 => synth.osc2.amplitude = normalized_value,
+            3 => synth.osc1.detune = -12.0 + (normalized_value * 24.0),
+            4 => synth.osc2.detune = -12.0 + (normalized_value * 24.0),
+            5 => synth.osc1.pulse_width = 0.1 + (normalized_value * 0.8),
+            6 => synth.osc2.pulse_width = 0.1 + (normalized_value * 0.8),
+            
+            // Mixer Controls
+            7 => synth.mixer.osc1_level = normalized_value,
+            8 => synth.mixer.osc2_level = normalized_value,
+            9 => synth.mixer.noise_level = normalized_value,
+            
+            // Filter Controls
+            16 => synth.filter.cutoff = 20.0 + (normalized_value * 19980.0),
+            17 => synth.filter.resonance = normalized_value * 10.0,
+            18 => synth.filter.envelope_amount = normalized_value,
+            19 => synth.filter.keyboard_tracking = normalized_value,
+            
+            // Filter Envelope
+            20 => synth.filter_envelope.attack = normalized_value * 5.0,
+            21 => synth.filter_envelope.decay = normalized_value * 5.0,
+            22 => synth.filter_envelope.sustain = normalized_value,
+            23 => synth.filter_envelope.release = normalized_value * 5.0,
+            
+            // Amp Envelope
+            24 => synth.amp_envelope.attack = normalized_value * 5.0,
+            25 => synth.amp_envelope.decay = normalized_value * 5.0,
+            26 => synth.amp_envelope.sustain = normalized_value,
+            27 => synth.amp_envelope.release = normalized_value * 5.0,
+            
+            // LFO Controls
+            28 => synth.lfo.frequency = 0.1 + (normalized_value * 19.9),
+            29 => synth.lfo.amplitude = normalized_value,
+            30 => synth.lfo.target_osc1_pitch = normalized_value > 0.5,
+            31 => synth.lfo.target_osc2_pitch = normalized_value > 0.5,
+            32 => synth.lfo.target_filter = normalized_value > 0.5,
+            33 => synth.lfo.target_amplitude = normalized_value > 0.5,
+            
+            // Master Volume
+            34 => synth.master_volume = normalized_value,
+            
+            // Effects
+            40 => synth.effects.reverb_amount = normalized_value,
+            41 => synth.effects.reverb_size = normalized_value,
+            42 => synth.effects.delay_time = 0.01 + (normalized_value * 1.99), // 10ms to 2s
+            43 => synth.effects.delay_feedback = normalized_value * 0.95, // Max 95% to avoid runaway
+            44 => synth.effects.delay_amount = normalized_value,
+            
+            // Arpeggiator
+            50 => synth.arpeggiator.enabled = normalized_value > 0.5,
+            51 => synth.arpeggiator.rate = 60.0 + (normalized_value * 180.0), // 60-240 BPM
+            52 => {
+                let pattern_index = (normalized_value * 3.99) as usize;
+                synth.arpeggiator.pattern = match pattern_index {
+                    0 => crate::synthesizer::ArpPattern::Up,
+                    1 => crate::synthesizer::ArpPattern::Down,
+                    2 => crate::synthesizer::ArpPattern::UpDown,
+                    _ => crate::synthesizer::ArpPattern::Random,
+                };
+            },
+            53 => synth.arpeggiator.octaves = 1 + (normalized_value * 3.0) as u8, // 1-4 octaves
+            54 => synth.arpeggiator.gate_length = 0.1 + (normalized_value * 0.9), // 10%-100%
+            
+            _ => {} // Ignore unmapped CCs
+        }
     }
 }
 

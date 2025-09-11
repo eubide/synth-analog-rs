@@ -1,6 +1,6 @@
 use eframe::egui;
 use std::sync::{Arc, Mutex};
-use crate::synthesizer::{Synthesizer, WaveType};
+use crate::synthesizer::{Synthesizer, WaveType, ArpPattern, LfoWaveform};
 use crate::audio_engine::AudioEngine;
 use crate::midi_handler::MidiHandler;
 
@@ -11,6 +11,8 @@ pub struct SynthApp {
     last_key_times: std::collections::HashMap<egui::Key, std::time::Instant>,
     current_octave: i32,
     show_midi_monitor: bool,
+    current_preset_name: String,
+    new_preset_name: String,
 }
 
 impl SynthApp {
@@ -22,24 +24,29 @@ impl SynthApp {
             last_key_times: std::collections::HashMap::new(),
             current_octave: 4, // C4 octave by default
             show_midi_monitor: false,
+            current_preset_name: String::new(),
+            new_preset_name: String::new(),
         }
     }
 
     fn draw_prophet_oscillator_panel(&mut self, ui: &mut egui::Ui, osc_num: u8) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
         let mut synth = self.synthesizer.lock().unwrap();
         let osc = if osc_num == 1 { &mut synth.osc1 } else { &mut synth.osc2 };
         
         // Frequency controls
         ui.horizontal(|ui| {
-            ui.label("FREQ:");
-            ui.add(egui::Slider::new(&mut osc.detune, -50.0..=50.0)
+            ui.label("frequency:");
+            ui.add(egui::Slider::new(&mut osc.detune, -12.0..=12.0)
                 .step_by(0.1)
-                .text("Fine"));
+                .text("Fine")
+                .min_decimals(1)
+                .max_decimals(1));
         });
         
         // Wave type selector
         ui.horizontal(|ui| {
-            ui.label("WAVE:");
+            ui.label("waveform:");
             egui::ComboBox::from_id_source(format!("wave_{}", osc_num))
                 .selected_text(format!("{:?}", osc.wave_type))
                 .show_ui(ui, |ui| {
@@ -53,7 +60,7 @@ impl SynthApp {
         // Pulse Width (only for square waves)
         if matches!(osc.wave_type, WaveType::Square) {
             ui.horizontal(|ui| {
-                ui.label("PW:");
+                ui.label("pulse width:");
                 ui.add(egui::Slider::new(&mut osc.pulse_width, 0.1..=0.9)
                     .step_by(0.01)
                     .text("Width"));
@@ -62,7 +69,7 @@ impl SynthApp {
         
         // Level control (always available)
         ui.horizontal(|ui| {
-            ui.label("LEVEL:");
+            ui.label("level:");
             ui.add(egui::Slider::new(&mut osc.amplitude, 0.0..=1.0)
                 .step_by(0.01));
         });
@@ -70,31 +77,32 @@ impl SynthApp {
         // Sync control (only for oscillator B)
         if osc_num == 2 {
             ui.horizontal(|ui| {
-                ui.label("SYNC:");
-                ui.checkbox(&mut synth.osc2_sync, "Osc A");
+                ui.label("sync:");
+                ui.checkbox(&mut synth.osc2_sync, "oscillator A");
             });
         }
     }
 
     fn draw_mixer_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
         let mut synth = self.synthesizer.lock().unwrap();
         
         ui.horizontal(|ui| {
-            ui.label("OSC A:");
+            ui.label("oscillator A:");
             ui.add(egui::Slider::new(&mut synth.mixer.osc1_level, 0.0..=1.0)
                 .step_by(0.01)
                 .text("Level"));
         });
         
         ui.horizontal(|ui| {
-            ui.label("OSC B:");
+            ui.label("oscillator B:");
             ui.add(egui::Slider::new(&mut synth.mixer.osc2_level, 0.0..=1.0)
                 .step_by(0.01)
                 .text("Level"));
         });
         
         ui.horizontal(|ui| {
-            ui.label("NOISE:");
+            ui.label("noise:");
             ui.add(egui::Slider::new(&mut synth.mixer.noise_level, 0.0..=1.0)
                 .step_by(0.01)
                 .text("Level"));
@@ -102,103 +110,160 @@ impl SynthApp {
     }
 
     fn draw_prophet_filter_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
         let mut synth = self.synthesizer.lock().unwrap();
         
-        // Cutoff frequency
         ui.horizontal(|ui| {
-            ui.label("CUTOFF:");
-            ui.add(egui::Slider::new(&mut synth.filter.cutoff, 20.0..=20000.0)
+            ui.label("cutoff:");
+            ui.add_sized([120.0, 20.0], egui::Slider::new(&mut synth.filter.cutoff, 20.0..=20000.0)
                 .logarithmic(true)
                 .step_by(1.0)
                 .suffix(" Hz"));
         });
         
-        // Resonance
         ui.horizontal(|ui| {
-            ui.label("RES:");
-            ui.add(egui::Slider::new(&mut synth.filter.resonance, 0.1..=10.0)
-                .step_by(0.1));
+            ui.label("resonance:");
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut synth.filter.resonance, 0.0..=4.0)
+                .step_by(0.05));
+            if synth.filter.resonance >= 3.8 {
+                ui.colored_label(egui::Color32::YELLOW, "Self-osc");
+            }
         });
         
-        // Envelope Amount
         ui.horizontal(|ui| {
-            ui.label("ENV AMT:");
-            ui.add(egui::Slider::new(&mut synth.filter.envelope_amount, -1.0..=1.0)
+            ui.label("envelope:");
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut synth.filter.envelope_amount, -1.0..=1.0)
                 .step_by(0.01));
         });
         
-        // Keyboard tracking
         ui.horizontal(|ui| {
-            ui.label("KBD:");
-            ui.add(egui::Slider::new(&mut synth.filter.keyboard_tracking, 0.0..=1.0)
-                .step_by(0.01)
-                .text("Track"));
+            ui.label("keyboard:");
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut synth.filter.keyboard_tracking, 0.0..=1.0)
+                .step_by(0.01));
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("velocity:");
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut synth.modulation_matrix.velocity_to_cutoff, 0.0..=1.0)
+                .step_by(0.01));
+        });
+        
+        ui.label("FILTER ENVELOPE");
+        ui.horizontal(|ui| {
+            ui.label("A:");
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut synth.filter_envelope.attack, 0.001..=2.0)
+                .logarithmic(true)
+                .step_by(0.001)
+                .suffix(" s"));
+        });
+        ui.horizontal(|ui| {
+            ui.label("D:");
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut synth.filter_envelope.decay, 0.001..=3.0)
+                .logarithmic(true)
+                .step_by(0.001)
+                .suffix(" s"));
+        });
+        ui.horizontal(|ui| {
+            ui.label("S:");
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut synth.filter_envelope.sustain, 0.0..=1.0)
+                .step_by(0.01));
+        });
+        ui.horizontal(|ui| {
+            ui.label("R:");
+            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut synth.filter_envelope.release, 0.001..=2.0)
+                .logarithmic(true)
+                .step_by(0.001)
+                .suffix(" s"));
         });
     }
 
     fn draw_prophet_lfo_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
         let mut synth = self.synthesizer.lock().unwrap();
         
+        // Waveform selector (Prophet-5 style)
         ui.horizontal(|ui| {
-            ui.label("RATE:");
-            ui.add(egui::Slider::new(&mut synth.lfo.frequency, 0.1..=20.0)
-                .step_by(0.1)
+            ui.label("waveform:");
+            egui::ComboBox::from_id_source("lfo_waveform")
+                .selected_text(match synth.lfo.waveform {
+                    LfoWaveform::Triangle => "Triangle",
+                    LfoWaveform::Square => "Square",
+                    LfoWaveform::Sawtooth => "Sawtooth",
+                    LfoWaveform::ReverseSawtooth => "Rev Saw",
+                    LfoWaveform::SampleAndHold => "S&H",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut synth.lfo.waveform, LfoWaveform::Triangle, "Triangle");
+                    ui.selectable_value(&mut synth.lfo.waveform, LfoWaveform::Square, "Square");
+                    ui.selectable_value(&mut synth.lfo.waveform, LfoWaveform::Sawtooth, "Sawtooth");
+                    ui.selectable_value(&mut synth.lfo.waveform, LfoWaveform::ReverseSawtooth, "Reverse Saw");
+                    ui.selectable_value(&mut synth.lfo.waveform, LfoWaveform::SampleAndHold, "Sample & Hold");
+                });
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("rate:");
+            ui.add_sized([90.0, 20.0], egui::Slider::new(&mut synth.lfo.frequency, 0.05..=30.0)
+                .logarithmic(true)
+                .step_by(0.05)
                 .suffix(" Hz"));
         });
         
         ui.horizontal(|ui| {
-            ui.label("AMOUNT:");
-            ui.add(egui::Slider::new(&mut synth.lfo.amplitude, 0.0..=1.0)
+            ui.label("amount:");
+            ui.add_sized([90.0, 20.0], egui::Slider::new(&mut synth.lfo.amplitude, 0.0..=1.0)
                 .step_by(0.01));
         });
         
-        ui.label("DESTINATIONS:");
-        ui.checkbox(&mut synth.lfo.target_osc1_pitch, "OSC A");
-        ui.checkbox(&mut synth.lfo.target_osc2_pitch, "OSC B");
-        ui.checkbox(&mut synth.lfo.target_filter, "FILTER");
-        ui.checkbox(&mut synth.lfo.target_amplitude, "AMP");
+        // Keyboard sync option (authentic Prophet-5 feature)
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut synth.lfo.sync, "keyboard sync");
+            if synth.lfo.sync {
+                ui.colored_label(egui::Color32::LIGHT_GREEN, "(resets on note)");
+            }
+        });
+        
+        ui.separator();
+        ui.colored_label(egui::Color32::from_rgb(255, 200, 100), "modulation destinations");
+        
+        // Modulation routing (Prophet-5 style)
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("filter cutoff:");
+                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut synth.modulation_matrix.lfo_to_cutoff, 0.0..=1.0)
+                    .step_by(0.01));
+            });
+            ui.horizontal(|ui| {
+                ui.label("filter res:");
+                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut synth.modulation_matrix.lfo_to_resonance, 0.0..=1.0)
+                    .step_by(0.01));
+            });
+            ui.horizontal(|ui| {
+                ui.label("osc A pitch:");
+                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut synth.modulation_matrix.lfo_to_osc1_pitch, 0.0..=1.0)
+                    .step_by(0.01));
+            });
+            ui.horizontal(|ui| {
+                ui.label("osc B pitch:");
+                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut synth.modulation_matrix.lfo_to_osc2_pitch, 0.0..=1.0)
+                    .step_by(0.01));
+            });
+            ui.horizontal(|ui| {
+                ui.label("amplitude:");
+                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut synth.modulation_matrix.lfo_to_amplitude, 0.0..=1.0)
+                    .step_by(0.01));
+            });
+        });
     }
 
-    fn draw_filter_envelope_panel(&mut self, ui: &mut egui::Ui) {
-        let mut synth = self.synthesizer.lock().unwrap();
-        
-        ui.horizontal(|ui| {
-            ui.label("A:");
-            ui.add(egui::Slider::new(&mut synth.filter_envelope.attack, 0.001..=5.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
-        });
-        
-        ui.horizontal(|ui| {
-            ui.label("D:");
-            ui.add(egui::Slider::new(&mut synth.filter_envelope.decay, 0.001..=5.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
-        });
-        
-        ui.horizontal(|ui| {
-            ui.label("S:");
-            ui.add(egui::Slider::new(&mut synth.filter_envelope.sustain, 0.0..=1.0)
-                .step_by(0.01));
-        });
-        
-        ui.horizontal(|ui| {
-            ui.label("R:");
-            ui.add(egui::Slider::new(&mut synth.filter_envelope.release, 0.001..=5.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
-        });
-    }
 
     fn draw_amp_envelope_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
         let mut synth = self.synthesizer.lock().unwrap();
         
         ui.horizontal(|ui| {
             ui.label("A:");
-            ui.add(egui::Slider::new(&mut synth.amp_envelope.attack, 0.001..=5.0)
+            ui.add(egui::Slider::new(&mut synth.amp_envelope.attack, 0.001..=2.0)
                 .logarithmic(true)
                 .step_by(0.001)
                 .suffix(" s"));
@@ -206,7 +271,7 @@ impl SynthApp {
         
         ui.horizontal(|ui| {
             ui.label("D:");
-            ui.add(egui::Slider::new(&mut synth.amp_envelope.decay, 0.001..=5.0)
+            ui.add(egui::Slider::new(&mut synth.amp_envelope.decay, 0.001..=3.0)
                 .logarithmic(true)
                 .step_by(0.001)
                 .suffix(" s"));
@@ -229,31 +294,229 @@ impl SynthApp {
 
 
     fn draw_master_panel(&mut self, ui: &mut egui::Ui) {
-        ui.group(|ui| {
-            ui.label("Master");
-            
-            let mut synth = self.synthesizer.lock().unwrap();
-            
-            ui.horizontal(|ui| {
-                ui.label("Volume:");
-                ui.add(egui::Slider::new(&mut synth.master_volume, 0.0..=1.0).step_by(0.01));
-            });
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+        let mut synth = self.synthesizer.lock().unwrap();
+        
+        ui.horizontal(|ui| {
+            ui.label("volume:");
+            ui.add(egui::Slider::new(&mut synth.master_volume, 0.0..=1.0).step_by(0.01));
         });
+        
+        ui.colored_label(egui::Color32::from_rgb(255, 150, 150), "velocity sensitivity");
+        
+        ui.horizontal(|ui| {
+            ui.label("→ volume:");
+            ui.add(egui::Slider::new(&mut synth.modulation_matrix.velocity_to_amplitude, 0.0..=1.0)
+                .step_by(0.01));
+        });
+    }
+
+
+    fn draw_effects_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+        
+        let mut synth = self.synthesizer.lock().unwrap();
+        
+        ui.label("reverb");
+        ui.horizontal(|ui| {
+            ui.label("amount:");
+            ui.add(egui::Slider::new(&mut synth.effects.reverb_amount, 0.0..=1.0)
+                .step_by(0.01));
+        });
+        ui.horizontal(|ui| {
+            ui.label("size:");
+            ui.add(egui::Slider::new(&mut synth.effects.reverb_size, 0.0..=1.0)
+                .step_by(0.01));
+        });
+        
+        ui.label("delay");
+        ui.horizontal(|ui| {
+            ui.label("time:");
+            ui.add(egui::Slider::new(&mut synth.effects.delay_time, 0.01..=2.0)
+                .step_by(0.01)
+                .suffix(" s"));
+        });
+        ui.horizontal(|ui| {
+            ui.label("feedback:");
+            ui.add(egui::Slider::new(&mut synth.effects.delay_feedback, 0.0..=0.95)
+                .step_by(0.01));
+        });
+        ui.horizontal(|ui| {
+            ui.label("amount:");
+            ui.add(egui::Slider::new(&mut synth.effects.delay_amount, 0.0..=1.0)
+                .step_by(0.01));
+        });
+    }
+
+    fn draw_arpeggiator_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+        let mut synth = self.synthesizer.lock().unwrap();
+        
+        ui.checkbox(&mut synth.arpeggiator.enabled, "enable");
+        
+        ui.horizontal(|ui| {
+            ui.label("rate:");
+            ui.add(egui::Slider::new(&mut synth.arpeggiator.rate, 60.0..=240.0)
+                .step_by(1.0)
+                .suffix(" BPM"));
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("pattern:");
+            let pattern_text = match synth.arpeggiator.pattern {
+                ArpPattern::Up => "Up",
+                ArpPattern::Down => "Down", 
+                ArpPattern::UpDown => "Up-Down",
+                ArpPattern::Random => "Random",
+            };
+            
+            egui::ComboBox::from_label("")
+                .selected_text(pattern_text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut synth.arpeggiator.pattern, ArpPattern::Up, "Up");
+                    ui.selectable_value(&mut synth.arpeggiator.pattern, ArpPattern::Down, "Down");
+                    ui.selectable_value(&mut synth.arpeggiator.pattern, ArpPattern::UpDown, "Up-Down");
+                    ui.selectable_value(&mut synth.arpeggiator.pattern, ArpPattern::Random, "Random");
+                });
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("octaves:");
+            let mut octaves_f32 = synth.arpeggiator.octaves as f32;
+            ui.add(egui::Slider::new(&mut octaves_f32, 1.0..=4.0)
+                .step_by(1.0));
+            synth.arpeggiator.octaves = octaves_f32 as u8;
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("gate:");
+            ui.add(egui::Slider::new(&mut synth.arpeggiator.gate_length, 0.1..=1.0)
+                .step_by(0.01));
+        });
+    }
+
+    fn draw_preset_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+        
+        // Show current preset status
+        ui.horizontal(|ui| {
+            ui.label("current:");
+            if self.current_preset_name.is_empty() {
+                ui.colored_label(egui::Color32::GRAY, "no preset loaded");
+            } else {
+                ui.colored_label(egui::Color32::GREEN, &self.current_preset_name);
+            }
+        });
+        
+        ui.separator();
+        
+        // Create new preset
+        ui.horizontal(|ui| {
+            ui.label("new name:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.new_preset_name)
+                    .hint_text("Enter name...")
+                    .desired_width(80.0)
+            );
+            
+            let save_enabled = !self.new_preset_name.is_empty();
+            if ui.add_enabled(save_enabled, egui::Button::new("Save")).clicked() {
+                let synth = self.synthesizer.lock().unwrap();
+                if let Err(e) = synth.save_preset(&self.new_preset_name) {
+                    println!("Error saving preset: {}", e);
+                } else {
+                    println!("Preset '{}' saved!", self.new_preset_name);
+                    self.current_preset_name = self.new_preset_name.clone();
+                    self.new_preset_name.clear();
+                }
+            }
+        });
+        
+        ui.horizontal(|ui| {
+            if ui.button("save default").clicked() {
+                let synth = self.synthesizer.lock().unwrap();
+                if let Err(e) = synth.save_preset("default") {
+                    println!("Error saving default: {}", e);
+                } else {
+                    println!("Default preset saved!");
+                    self.current_preset_name = "default".to_string();
+                }
+            }
+            
+            if ui.button("load default").clicked() {
+                let mut synth = self.synthesizer.lock().unwrap();
+                if let Err(e) = synth.load_preset("default") {
+                    println!("Error loading default: {}", e);
+                } else {
+                    println!("Default preset loaded!");
+                    self.current_preset_name = "default".to_string();
+                }
+            }
+        });
+        
+        if ui.button("create classic presets").clicked() {
+            let mut synth = self.synthesizer.lock().unwrap();
+            if let Err(e) = synth.create_all_classic_presets() {
+                println!("Error creating classic presets: {}", e);
+            } else {
+                println!("All classic presets created successfully!");
+            }
+        }
+        
+        ui.separator();
+        
+        // Show all presets in a scrollable area
+        let presets = crate::synthesizer::Synthesizer::list_presets();
+        if !presets.is_empty() {
+            ui.label("saved presets");
+            
+            egui::ScrollArea::vertical()
+                .max_height(100.0)
+                .show(ui, |ui| {
+                    for preset in presets.iter() {
+                        let is_current = preset == &self.current_preset_name;
+                        let button_text = if is_current {
+                            format!("► {}", preset)
+                        } else {
+                            preset.clone()
+                        };
+                        
+                        let button = egui::Button::new(button_text);
+                        let button = if is_current {
+                            button.fill(egui::Color32::from_rgb(100, 150, 100))
+                        } else {
+                            button
+                        };
+                        
+                        if ui.add_sized([ui.available_width(), 18.0], button).clicked() {
+                            let mut synth = self.synthesizer.lock().unwrap();
+                            if let Err(e) = synth.load_preset(preset) {
+                                println!("Error loading preset {}: {}", preset, e);
+                            } else {
+                                println!("Preset '{}' loaded!", preset);
+                                self.current_preset_name = preset.clone();
+                            }
+                        }
+                    }
+                });
+        } else {
+            ui.label("no saved presets yet");
+        }
     }
 
     fn draw_piano_keyboard(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label(format!("Octave: {}", self.current_octave));
-                ui.label("Use ↑↓ arrows to change octave");
+                ui.label("use ↑↓ arrows to change octave");
             });
-            ui.label("Keys: A W S E D F T G Y H U J K O L P Ñ (1.5 octaves)");
+            ui.label("keys: A W S E D F T G Y H U J K O L P Ñ (1.5 octaves)");
             
             let key_width = 25.0;
             let key_height = 80.0;
             let white_keys = ["A", "S", "D", "F", "G", "H", "J", "K", "L", "Ñ"];
             let black_keys = ["W", "E", "T", "Y", "U", "O", "P"];
-            let black_positions = [0.7, 1.7, 3.7, 4.7, 5.7, 7.7, 8.7]; // Relative to white keys
+            let black_positions = [0.7, 1.7, 3.7, 4.7, 5.7, 6.7, 7.7]; // C#, D#, F#, G#, A#, C#(next), D#(next)
             
             ui.horizontal(|ui| {
                 let start_x = ui.cursor().min.x;
@@ -300,7 +563,7 @@ impl SynthApp {
                     
                     if response.clicked() {
                         let mut synth = self.synthesizer.lock().unwrap();
-                        synth.note_on(midi_note as u8);
+                        synth.note_on(midi_note as u8, 100);
                     }
                     
                     if response.drag_stopped() {
@@ -351,7 +614,7 @@ impl SynthApp {
                     
                     if response.clicked() {
                         let mut synth = self.synthesizer.lock().unwrap();
-                        synth.note_on(midi_note as u8);
+                        synth.note_on(midi_note as u8, 100);
                     }
                     
                     if response.drag_stopped() {
@@ -414,7 +677,7 @@ impl eframe::App for SynthApp {
                     if should_trigger {
                         self.last_key_times.insert(key, now);
                         let mut synth = self.synthesizer.lock().unwrap();
-                        synth.note_on(midi_note as u8);
+                        synth.note_on(midi_note as u8, 100);
                     }
                 }
                 
@@ -429,83 +692,101 @@ impl eframe::App for SynthApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Prophet-5 Style Synthesizer");
-                ui.add_space(20.0);
+                ui.add_space(10.0);
                 if self._midi_handler.is_some() {
-                    ui.colored_label(egui::Color32::GREEN, "🎹 MIDI Connected");
-                    if ui.button("MIDI Monitor").clicked() {
+                    ui.colored_label(egui::Color32::GREEN, "MIDI connected");
+                    if ui.button("MIDI monitor").clicked() {
                         self.show_midi_monitor = !self.show_midi_monitor;
                     }
                 } else {
-                    ui.colored_label(egui::Color32::RED, "🎹 No MIDI");
+                    ui.colored_label(egui::Color32::RED, "no MIDI");
                 }
             });
             
-            // Top row: Oscillators and Mixer
+            // First row: Oscillators, Mixer, Master
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.group(|ui| {
-                        ui.label("OSCILLATOR A");
+                        ui.colored_label(egui::Color32::from_rgb(255, 200, 100), "OSCILLATOR A");
                         self.draw_prophet_oscillator_panel(ui, 1);
                     });
                 });
                 
                 ui.vertical(|ui| {
                     ui.group(|ui| {
-                        ui.label("OSCILLATOR B");
+                        ui.colored_label(egui::Color32::from_rgb(255, 200, 100), "OSCILLATOR B");
                         self.draw_prophet_oscillator_panel(ui, 2);
                     });
                 });
                 
                 ui.vertical(|ui| {
                     ui.group(|ui| {
-                        ui.label("MIXER");
+                        ui.colored_label(egui::Color32::from_rgb(150, 255, 150), "MIXER");
                         self.draw_mixer_panel(ui);
-                    });
-                });
-            });
-            
-            ui.add_space(15.0);
-            
-            // Middle row: Filter and LFO
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.label("FILTER");
-                        self.draw_prophet_filter_panel(ui);
-                        ui.add_space(10.0);
-                        ui.label("FILTER ENVELOPE");
-                        self.draw_filter_envelope_panel(ui);
                     });
                 });
                 
                 ui.vertical(|ui| {
                     ui.group(|ui| {
-                        ui.label("LFO");
-                        self.draw_prophet_lfo_panel(ui);
+                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "MASTER");
+                        self.draw_master_panel(ui);
                     });
                 });
             });
             
-            ui.add_space(15.0);
+            ui.add_space(10.0);
             
-            // Bottom row: Amp Envelope and Master
+            // Second row: Filter, LFO, Amp Envelope, Effects
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.group(|ui| {
-                        ui.label("AMPLIFIER ENVELOPE");
+                        ui.colored_label(egui::Color32::from_rgb(100, 200, 255), "FILTER");
+                        self.draw_prophet_filter_panel(ui);
+                    });
+                });
+                
+                ui.vertical(|ui| {
+                    ui.group(|ui| {
+                        ui.colored_label(egui::Color32::from_rgb(255, 150, 255), "LFO");
+                        self.draw_prophet_lfo_panel(ui);
+                    });
+                });
+                
+                ui.vertical(|ui| {
+                    ui.group(|ui| {
+                        ui.colored_label(egui::Color32::from_rgb(255, 180, 120), "AMPLIFIER ENVELOPE");
                         self.draw_amp_envelope_panel(ui);
                     });
                 });
                 
                 ui.vertical(|ui| {
                     ui.group(|ui| {
-                        ui.label("MASTER");
-                        self.draw_master_panel(ui);
+                        ui.colored_label(egui::Color32::from_rgb(150, 255, 150), "EFFECTS");
+                        self.draw_effects_panel(ui);
                     });
                 });
             });
             
-            ui.add_space(20.0);
+            ui.add_space(10.0);
+            
+            // Third row: Arpeggiator, Presets  
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.group(|ui| {
+                        ui.colored_label(egui::Color32::from_rgb(255, 150, 255), "ARPEGGIATOR");
+                        self.draw_arpeggiator_panel(ui);
+                    });
+                });
+                
+                ui.vertical(|ui| {
+                    ui.group(|ui| {
+                        ui.colored_label(egui::Color32::from_rgb(255, 200, 150), "PRESETS");
+                        self.draw_preset_panel(ui);
+                    });
+                });
+            });
+            
+            ui.add_space(10.0);
             
             self.draw_piano_keyboard(ui);
         });
@@ -524,8 +805,8 @@ impl eframe::App for SynthApp {
 impl SynthApp {
     fn draw_midi_monitor(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("Recent MIDI Messages:");
-            if ui.button("Clear").clicked() {
+            ui.label("recent MIDI messages:");
+            if ui.button("clear").clicked() {
                 if let Some(ref midi_handler) = self._midi_handler {
                     if let Ok(mut history) = midi_handler.message_history.lock() {
                         history.clear();
@@ -569,13 +850,13 @@ impl SynthApp {
                         }
                         
                         if history.is_empty() {
-                            ui.label("No MIDI messages received yet...");
-                            ui.label("Connect a MIDI device and play some notes!");
+                            ui.label("no MIDI messages received yet...");
+                            ui.label("connect a MIDI device and play some notes!");
                         }
                     });
             }
         } else {
-            ui.label("No MIDI handler available");
+            ui.label("no MIDI handler available");
         }
     }
 }
