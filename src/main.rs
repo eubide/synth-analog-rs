@@ -20,7 +20,15 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     let synth = Arc::new(Mutex::new(Synthesizer::new()));
-    let audio_engine = AudioEngine::new(synth.clone());
+    let audio_engine = match AudioEngine::new(synth.clone()) {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("Failed to initialize audio engine: {}", e);
+            eprintln!("Please check your audio device configuration.");
+            eprintln!("Audio initialization failed: {}", e);
+            std::process::exit(1);
+        }
+    };
     
     // Initialize MIDI input
     let _midi_handler = match MidiHandler::new(synth.clone()) {

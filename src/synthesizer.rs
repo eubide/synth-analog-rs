@@ -2,6 +2,10 @@ use std::f32::consts::PI;
 use std::fs;
 use std::path::Path;
 
+// Phase accumulator constants to prevent drift
+const PHASE_SCALE: u64 = 1u64 << 32; // 32-bit fractional phase
+const PHASE_MASK: u64 = PHASE_SCALE - 1;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WaveType {
     Sine,
@@ -120,8 +124,8 @@ pub struct Voice {
     pub frequency: f32,
     pub note: u8,
     pub velocity: f32,
-    pub phase1: f32,
-    pub phase2: f32,
+    pub phase1_accumulator: u64,  // Integer phase accumulator to prevent drift
+    pub phase2_accumulator: u64,
     pub envelope_state: EnvelopeState,
     pub envelope_time: f32,
     pub envelope_value: f32,
@@ -157,6 +161,11 @@ pub struct LadderFilterState {
     pub delay4: f32,
     // Feedback amount for resonance
     pub feedback: f32,
+    // DC blocking filter state
+    pub dc_block_x1: f32,
+    pub dc_block_x2: f32,
+    pub dc_block_y1: f32,
+    pub dc_block_y2: f32,
 }
 
 pub struct Synthesizer {
@@ -174,7 +183,7 @@ pub struct Synthesizer {
     pub master_volume: f32,
     pub voices: Vec<Voice>,
     pub sample_rate: f32,
-    pub lfo_phase: f32,
+    pub lfo_phase_accumulator: u64, // Integer phase accumulator to prevent drift
     pub lfo_sample_hold_value: f32,  // Current sample & hold value
     pub lfo_last_sample_time: f32,   // Time since last sample update
     pub max_polyphony: usize,
@@ -290,8 +299,8 @@ impl Voice {
             frequency,
             note,
             velocity,
-            phase1: 0.0,
-            phase2: 0.0,
+            phase1_accumulator: 0,
+            phase2_accumulator: 0,
             envelope_state: EnvelopeState::Attack,
             envelope_time: 0.0,
             envelope_value: 0.0,
@@ -308,6 +317,10 @@ impl Voice {
                 delay3: 0.0,
                 delay4: 0.0,
                 feedback: 0.0,
+                dc_block_x1: 0.0,
+                dc_block_x2: 0.0,
+                dc_block_y1: 0.0,
+                dc_block_y2: 0.0,
             },
             is_active: true,
             sustain_time: 0.0,
@@ -360,7 +373,7 @@ impl Synthesizer {
             master_volume: 0.5,
             voices: Vec::new(),
             sample_rate,
-            lfo_phase: 0.0,
+            lfo_phase_accumulator: 0,
             lfo_sample_hold_value: 0.0,
             lfo_last_sample_time: 0.0,
             max_polyphony: 8,
@@ -378,7 +391,7 @@ impl Synthesizer {
         if let Err(e) = synthesizer.create_all_classic_presets() {
             println!("Warning: Could not create classic presets: {}", e);
         } else {
-            println!("✓ Authentic vintage analog presets loaded successfully!");
+            println!("[OK] Authentic vintage analog presets loaded successfully!");
         }
 
         synthesizer
@@ -403,7 +416,7 @@ impl Synthesizer {
         
         // Reset LFO phase if keyboard sync is enabled
         if self.lfo.sync {
-            self.lfo_phase = 0.0;
+            self.lfo_phase_accumulator = 0;
             self.lfo_last_sample_time = 0.0;
             // Generate new sample & hold value for consistency
             self.lfo_sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
@@ -574,9 +587,9 @@ impl Synthesizer {
             // Update arpeggiator
             self.update_arpeggiator(dt);
             
-            // Update LFO with proper phase wrapping
-            self.lfo_phase = (self.lfo_phase + lfo_frequency * dt) % 1.0;
-            if self.lfo_phase < 0.0 { self.lfo_phase += 1.0; }
+            // Update LFO using integer phase accumulator to prevent drift
+            let lfo_phase_increment = ((lfo_frequency / self.sample_rate) * PHASE_SCALE as f32) as u64;
+            self.lfo_phase_accumulator = self.lfo_phase_accumulator.wrapping_add(lfo_phase_increment);
             
             // Update sample & hold if needed (at ~100Hz rate)
             self.lfo_last_sample_time += dt;
@@ -586,7 +599,9 @@ impl Synthesizer {
             }
             
             // Generate LFO value using the selected waveform
-            let lfo_value = Self::generate_lfo_waveform(lfo_waveform, self.lfo_phase, self.lfo_sample_hold_value) * lfo_amplitude;
+            // Convert accumulator to phase (0.0 to 1.0)
+            let lfo_phase = (self.lfo_phase_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
+            let lfo_value = Self::generate_lfo_waveform(lfo_waveform, lfo_phase, self.lfo_sample_hold_value) * lfo_amplitude;
             
             // Process all active voices
             for voice in &mut self.voices {
@@ -602,23 +617,29 @@ impl Synthesizer {
                 freq1 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc1_pitch * 0.1);
                 freq2 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc2_pitch * 0.1);
                 
-                // Update phases with proper wrapping to prevent drift
-                voice.phase1 = (voice.phase1 + freq1 * dt) % 1.0;
-                voice.phase2 = (voice.phase2 + freq2 * dt) % 1.0;
+                // Update phases using integer accumulators to prevent drift
+                let phase1_increment = ((freq1 / self.sample_rate) * PHASE_SCALE as f32) as u64;
+                let phase2_increment = ((freq2 / self.sample_rate) * PHASE_SCALE as f32) as u64;
                 
-                // Ensure phases stay in valid range
-                if voice.phase1 < 0.0 { voice.phase1 += 1.0; }
-                if voice.phase2 < 0.0 { voice.phase2 += 1.0; }
+                voice.phase1_accumulator = voice.phase1_accumulator.wrapping_add(phase1_increment);
+                voice.phase2_accumulator = voice.phase2_accumulator.wrapping_add(phase2_increment);
+                
+                // Convert accumulators to phase values (0.0 to 1.0)
+                let phase1 = (voice.phase1_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
+                let mut phase2 = (voice.phase2_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
                 
                 // Oscillator sync: if enabled, reset osc2 phase when osc1 completes a cycle
-                let prev_phase1 = voice.phase1 - freq1 * dt;
-                if osc2_sync && prev_phase1 < 0.0 && voice.phase1 >= 0.0 {
-                    voice.phase2 = 0.0;
+                let prev_phase1_accumulator = voice.phase1_accumulator.wrapping_sub(phase1_increment);
+                let prev_phase1 = (prev_phase1_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
+                
+                if osc2_sync && prev_phase1 > phase1 { // Wrapped around (cycle completed)
+                    voice.phase2_accumulator = 0;
+                    phase2 = 0.0;
                 }
                 
-                // Generate oscillator outputs
-                let osc1_out = Self::generate_oscillator_static(osc1_wave_type, voice.phase1, osc1_pulse_width) * osc1_amplitude;
-                let osc2_out = Self::generate_oscillator_static(osc2_wave_type, voice.phase2, osc2_pulse_width) * osc2_amplitude;
+                // Generate oscillator outputs using calculated phases
+                let osc1_out = Self::generate_oscillator_static(osc1_wave_type, phase1, osc1_pulse_width) * osc1_amplitude;
+                let osc2_out = Self::generate_oscillator_static(osc2_wave_type, phase2, osc2_pulse_width) * osc2_amplitude;
                 
                 // Mix oscillators with individual levels and add noise
                 let noise = if mixer_noise_level > 0.0 {
@@ -649,7 +670,8 @@ impl Synthesizer {
                 let final_cutoff = modulated_cutoff.clamp(20.0, 20000.0);
                 
                 let lfo_resonance_mod = lfo_value * modulation_matrix.lfo_to_resonance * 2.0;
-                let final_resonance = (filter_resonance + lfo_resonance_mod).clamp(0.0, 4.0);
+                // Safe resonance limiting to prevent runaway feedback
+                let final_resonance = (filter_resonance + lfo_resonance_mod).clamp(0.0, 3.95); // Slightly below 4.0 for safety
                 
                 // Apply ladder filter (24dB/octave vintage analog style)
                 mixed = Self::apply_ladder_filter_static(
@@ -740,9 +762,12 @@ impl Synthesizer {
         let fc = (cutoff / sample_rate).min(0.49); // Limit to Nyquist
         let f = fc * 2.0;
         
-        // Calculate resonance feedback (0-4 range, 4 = self-oscillation)
-        let res = resonance.clamp(0.0, 4.0);
+        // Calculate resonance feedback with improved stability
+        let res = resonance.clamp(0.0, 3.95); // Safe upper limit
         let feedback = res * (1.0 - 0.15 * f * f);
+        
+        // Additional stability check
+        let feedback = if feedback > 0.98 { 0.98 } else { feedback };
         
         // Input with feedback (creates resonance and self-oscillation)
         let input_with_feedback = input - state.feedback * feedback;
@@ -780,15 +805,26 @@ impl Synthesizer {
         // Store feedback for next sample
         state.feedback = stage4_out;
         
+        // DC blocking to prevent offset accumulation
+        let dc_block_coeff = 0.995; // High-pass at ~1.6Hz at 44.1kHz
+        state.dc_block_x1 = state.dc_block_x2;
+        state.dc_block_x2 = stage4_out;
+        state.dc_block_y1 = state.dc_block_y2;
+        state.dc_block_y2 = state.dc_block_x2 - state.dc_block_x1 + dc_block_coeff * state.dc_block_y1;
+        
+        let dc_blocked_output = state.dc_block_y2;
+        
         // Prevent denormal numbers
         if state.stage1.abs() < 1e-10 { state.stage1 = 0.0; }
         if state.stage2.abs() < 1e-10 { state.stage2 = 0.0; }
         if state.stage3.abs() < 1e-10 { state.stage3 = 0.0; }
         if state.stage4.abs() < 1e-10 { state.stage4 = 0.0; }
+        if state.dc_block_y1.abs() < 1e-10 { state.dc_block_y1 = 0.0; }
+        if state.dc_block_y2.abs() < 1e-10 { state.dc_block_y2 = 0.0; }
         
         // Output with slight compensation for high resonance volume boost
         let compensation = 1.0 + res * 0.1;
-        stage4_out / compensation
+        dc_blocked_output / compensation
     }
 
     fn process_envelope_static(
