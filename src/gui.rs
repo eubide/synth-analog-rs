@@ -11,6 +11,7 @@ pub struct SynthApp {
     last_key_times: std::collections::HashMap<egui::Key, std::time::Instant>,
     current_octave: i32,
     show_midi_monitor: bool,
+    show_presets_window: bool,
     current_preset_name: String,
     new_preset_name: String,
 }
@@ -24,35 +25,39 @@ impl SynthApp {
             last_key_times: std::collections::HashMap::new(),
             current_octave: 4, // C4 octave by default
             show_midi_monitor: false,
+            show_presets_window: false,
             current_preset_name: String::new(),
             new_preset_name: String::new(),
         }
     }
 
-    fn draw_prophet_oscillator_panel(&mut self, ui: &mut egui::Ui, osc_num: u8) {
-        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+    fn draw_vintage_oscillator_panel(&mut self, ui: &mut egui::Ui, osc_num: u8) {
+        ui.spacing_mut().item_spacing = egui::vec2(1.0, 1.0);
         let mut synth = self.synthesizer.lock().unwrap();
         let osc = if osc_num == 1 { &mut synth.osc1 } else { &mut synth.osc2 };
         
         // Frequency controls
         ui.horizontal(|ui| {
-            ui.label("frequency:");
-            ui.add(egui::Slider::new(&mut osc.detune, -12.0..=12.0)
+            ui.label("freq:");
+            ui.add_sized([70.0, 16.0], egui::Slider::new(&mut osc.detune, -12.0..=12.0)
                 .step_by(0.1)
-                .text("Fine")
-                .min_decimals(1)
-                .max_decimals(1));
+                .suffix(" st"));
         });
         
         // Wave type selector
         ui.horizontal(|ui| {
-            ui.label("waveform:");
+            ui.label("wave:");
             egui::ComboBox::from_id_source(format!("wave_{}", osc_num))
-                .selected_text(format!("{:?}", osc.wave_type))
+                .selected_text(match osc.wave_type {
+                    WaveType::Sawtooth => "Saw",
+                    WaveType::Triangle => "Tri",
+                    WaveType::Square => "Sqr",
+                    WaveType::Sine => "Sin",
+                })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut osc.wave_type, WaveType::Sawtooth, "Sawtooth");
                     ui.selectable_value(&mut osc.wave_type, WaveType::Triangle, "Triangle");
-                    ui.selectable_value(&mut osc.wave_type, WaveType::Square, "Square/Pulse");
+                    ui.selectable_value(&mut osc.wave_type, WaveType::Square, "Square");
                     ui.selectable_value(&mut osc.wave_type, WaveType::Sine, "Sine");
                 });
         });
@@ -60,17 +65,16 @@ impl SynthApp {
         // Pulse Width (only for square waves)
         if matches!(osc.wave_type, WaveType::Square) {
             ui.horizontal(|ui| {
-                ui.label("pulse width:");
-                ui.add(egui::Slider::new(&mut osc.pulse_width, 0.1..=0.9)
-                    .step_by(0.01)
-                    .text("Width"));
+                ui.label("pw:");
+                ui.add_sized([70.0, 16.0], egui::Slider::new(&mut osc.pulse_width, 0.1..=0.9)
+                    .step_by(0.01));
             });
         }
         
         // Level control (always available)
         ui.horizontal(|ui| {
             ui.label("level:");
-            ui.add(egui::Slider::new(&mut osc.amplitude, 0.0..=1.0)
+            ui.add_sized([70.0, 16.0], egui::Slider::new(&mut osc.amplitude, 0.0..=1.0)
                 .step_by(0.01));
         });
         
@@ -126,7 +130,7 @@ impl SynthApp {
             ui.add_sized([100.0, 20.0], egui::Slider::new(&mut synth.filter.resonance, 0.0..=4.0)
                 .step_by(0.05));
             if synth.filter.resonance >= 3.8 {
-                ui.colored_label(egui::Color32::YELLOW, "Self-osc");
+                ui.label("Self-osc");
             }
         });
         
@@ -177,11 +181,11 @@ impl SynthApp {
         });
     }
 
-    fn draw_prophet_lfo_panel(&mut self, ui: &mut egui::Ui) {
+    fn draw_vintage_lfo_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
         let mut synth = self.synthesizer.lock().unwrap();
         
-        // Waveform selector (Prophet-5 style)
+        // Waveform selector (vintage analog style)
         ui.horizontal(|ui| {
             ui.label("waveform:");
             egui::ComboBox::from_id_source("lfo_waveform")
@@ -215,18 +219,18 @@ impl SynthApp {
                 .step_by(0.01));
         });
         
-        // Keyboard sync option (authentic Prophet-5 feature)
+        // Keyboard sync option (authentic vintage analog feature)
         ui.horizontal(|ui| {
             ui.checkbox(&mut synth.lfo.sync, "keyboard sync");
             if synth.lfo.sync {
-                ui.colored_label(egui::Color32::LIGHT_GREEN, "(resets on note)");
+                ui.label("(resets on note)");
             }
         });
         
         ui.separator();
-        ui.colored_label(egui::Color32::from_rgb(255, 200, 100), "modulation destinations");
+        ui.label(egui::RichText::new("modulation destinations").strong());
         
-        // Modulation routing (Prophet-5 style)
+        // Modulation routing (vintage analog style)
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label("filter cutoff:");
@@ -292,6 +296,40 @@ impl SynthApp {
         });
     }
 
+    fn draw_filter_envelope_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+        let mut synth = self.synthesizer.lock().unwrap();
+        
+        ui.horizontal(|ui| {
+            ui.label("A:");
+            ui.add(egui::Slider::new(&mut synth.filter_envelope.attack, 0.001..=2.0)
+                .logarithmic(true)
+                .step_by(0.001)
+                .suffix(" s"));
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("D:");
+            ui.add(egui::Slider::new(&mut synth.filter_envelope.decay, 0.001..=3.0)
+                .logarithmic(true)
+                .step_by(0.001)
+                .suffix(" s"));
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("S:");
+            ui.add(egui::Slider::new(&mut synth.filter_envelope.sustain, 0.0..=1.0)
+                .step_by(0.01));
+        });
+        
+        ui.horizontal(|ui| {
+            ui.label("R:");
+            ui.add(egui::Slider::new(&mut synth.filter_envelope.release, 0.001..=5.0)
+                .logarithmic(true)
+                .step_by(0.001)
+                .suffix(" s"));
+        });
+    }
 
     fn draw_master_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
@@ -302,7 +340,7 @@ impl SynthApp {
             ui.add(egui::Slider::new(&mut synth.master_volume, 0.0..=1.0).step_by(0.01));
         });
         
-        ui.colored_label(egui::Color32::from_rgb(255, 150, 150), "velocity sensitivity");
+        ui.label("velocity sensitivity");
         
         ui.horizontal(|ui| {
             ui.label("→ volume:");
@@ -505,15 +543,18 @@ impl SynthApp {
     }
 
     fn draw_piano_keyboard(&mut self, ui: &mut egui::Ui) {
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!("Octave: {}", self.current_octave));
-                ui.label("use ↑↓ arrows to change octave");
-            });
-            ui.label("keys: A W S E D F T G Y H U J K O L P Ñ (1.5 octaves)");
-            
-            let key_width = 25.0;
-            let key_height = 80.0;
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("OCTAVE: {}", self.current_octave))
+                        .size(12.0)
+                        .strong());
+                    ui.label("(use ↑↓ arrows)");
+                });
+                ui.label("Computer keys: A W S E D F T G Y H U J K O L P Ñ");
+                
+                let key_width = 30.0;
+                let key_height = 90.0;
             let white_keys = ["A", "S", "D", "F", "G", "H", "J", "K", "L", "Ñ"];
             let black_keys = ["W", "E", "T", "Y", "U", "O", "P"];
             let black_positions = [0.7, 1.7, 3.7, 4.7, 5.7, 6.7, 7.7]; // C#, D#, F#, G#, A#, C#(next), D#(next)
@@ -623,6 +664,7 @@ impl SynthApp {
                     }
                 }
             });
+            });
         });
     }
 }
@@ -690,105 +732,163 @@ impl eframe::App for SynthApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Compact Vintage Analog Style Header
             ui.horizontal(|ui| {
-                ui.heading("Prophet-5 Style Synthesizer");
-                ui.add_space(10.0);
-                if self._midi_handler.is_some() {
-                    ui.colored_label(egui::Color32::GREEN, "MIDI connected");
-                    if ui.button("MIDI monitor").clicked() {
-                        self.show_midi_monitor = !self.show_midi_monitor;
+                ui.label(egui::RichText::new("PROPHET-5 SYNTHESIZER")
+                    .size(18.0)
+                    .strong());
+                
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self._midi_handler.is_some() {
+                        if ui.small_button("🎹 MIDI").clicked() {
+                            self.show_midi_monitor = !self.show_midi_monitor;
+                        }
+                    } else {
+                        let _ = ui.small_button("❌ NO MIDI");
                     }
-                } else {
-                    ui.colored_label(egui::Color32::RED, "no MIDI");
-                }
-            });
-            
-            // First row: Oscillators, Mixer, Master
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 200, 100), "OSCILLATOR A");
-                        self.draw_prophet_oscillator_panel(ui, 1);
-                    });
-                });
-                
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 200, 100), "OSCILLATOR B");
-                        self.draw_prophet_oscillator_panel(ui, 2);
-                    });
-                });
-                
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(150, 255, 150), "MIXER");
-                        self.draw_mixer_panel(ui);
-                    });
-                });
-                
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), "MASTER");
-                        self.draw_master_panel(ui);
-                    });
+                    
+                    if ui.small_button("🎵 Presets").clicked() {
+                        self.show_presets_window = !self.show_presets_window;
+                    }
                 });
             });
+            ui.separator();
             
-            ui.add_space(10.0);
-            
-            // Second row: Filter, LFO, Amp Envelope, Effects
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(100, 200, 255), "FILTER");
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                
+                // CLEAN 4-COLUMN LAYOUT - All vertical organization
+                ui.columns(4, |columns| {
+                    // COLUMN 1 - Sound Generation A
+                    columns[0].group(|ui| {
+                        ui.set_min_width(185.0);
+                        ui.label(egui::RichText::new("OSCILLATOR A")
+                            .size(11.0)
+                            .strong());
+                        self.draw_vintage_oscillator_panel(ui, 1);
+                    });
+                    
+                    columns[0].add_space(2.0);
+                    
+                    columns[0].group(|ui| {
+                        ui.set_min_width(185.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("FILTER")
+                                .size(11.0)
+                                .strong());
+                            ui.label(egui::RichText::new("24dB")
+                                .size(9.0));
+                        });
                         self.draw_prophet_filter_panel(ui);
                     });
-                });
-                
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 150, 255), "LFO");
-                        self.draw_prophet_lfo_panel(ui);
+                    
+                    // COLUMN 2 - Sound Generation B
+                    columns[1].group(|ui| {
+                        ui.set_min_width(185.0);
+                        ui.label(egui::RichText::new("OSCILLATOR B")
+                            .size(11.0)
+                            .strong());
+                        self.draw_vintage_oscillator_panel(ui, 2);
                     });
-                });
-                
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 180, 120), "AMPLIFIER ENVELOPE");
+                    
+                    columns[1].add_space(2.0);
+                    
+                    columns[1].group(|ui| {
+                        ui.set_min_width(185.0);
+                        ui.label(egui::RichText::new("LFO")
+                            .size(11.0)
+                            .strong());
+                        self.draw_vintage_lfo_panel(ui);
+                    });
+                    
+                    // COLUMN 3 - Envelopes & Mix
+                    columns[2].group(|ui| {
+                        ui.set_min_width(150.0);
+                        ui.label(egui::RichText::new("AMP ENV")
+                            .size(11.0)
+                            .strong());
                         self.draw_amp_envelope_panel(ui);
                     });
-                });
-                
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(150, 255, 150), "EFFECTS");
+                    
+                    columns[2].add_space(2.0);
+                    
+                    columns[2].group(|ui| {
+                        ui.set_min_width(150.0);
+                        ui.label(egui::RichText::new("FILTER ENV")
+                            .size(11.0)
+                            .strong());
+                        self.draw_filter_envelope_panel(ui);
+                    });
+                    
+                    columns[2].add_space(2.0);
+                    
+                    columns[2].group(|ui| {
+                        ui.set_min_width(150.0);
+                        ui.label(egui::RichText::new("MIXER")
+                            .size(11.0)
+                            .strong());
+                        self.draw_mixer_panel(ui);
+                    });
+                    
+                    // COLUMN 4 - Performance & Utilities
+                    columns[3].group(|ui| {
+                        ui.set_min_width(125.0);
+                        ui.label(egui::RichText::new("CURRENT PRESET")
+                            .size(11.0)
+                            .strong());
+                        ui.label(format!("{}", if self.current_preset_name.is_empty() { 
+                            "Default".to_string() 
+                        } else { 
+                            self.current_preset_name.clone() 
+                        }));
+                    });
+                    
+                    columns[3].add_space(2.0);
+                    
+                    columns[3].group(|ui| {
+                        ui.set_min_width(125.0);
+                        ui.label(egui::RichText::new("MASTER")
+                            .size(11.0)
+                            .strong());
+                        self.draw_master_panel(ui);
+                    });
+                    
+                    columns[3].add_space(2.0);
+                    
+                    columns[3].group(|ui| {
+                        ui.set_min_width(125.0);
+                        ui.label(egui::RichText::new("EFFECTS")
+                            .size(11.0)
+                            .strong());
                         self.draw_effects_panel(ui);
                     });
-                });
-            });
-            
-            ui.add_space(10.0);
-            
-            // Third row: Arpeggiator, Presets  
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 150, 255), "ARPEGGIATOR");
+                    
+                    columns[3].add_space(2.0);
+                    
+                    columns[3].group(|ui| {
+                        ui.set_min_width(125.0);
+                        ui.label(egui::RichText::new("ARP")
+                            .size(11.0)
+                            .strong());
                         self.draw_arpeggiator_panel(ui);
                     });
+                    
+                    columns[3].add_space(2.0);
+                    
+                    // Empty space where preset info was
+                    columns[3].add_space(2.0);
                 });
                 
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 200, 150), "PRESETS");
-                        self.draw_preset_panel(ui);
-                    });
+                ui.add_space(8.0);
+                
+                // KEYBOARD SECTION - Compact
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("KEYBOARD")
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(200, 200, 200))
+                        .strong());
+                    self.draw_piano_keyboard(ui);
                 });
             });
-            
-            ui.add_space(10.0);
-            
-            self.draw_piano_keyboard(ui);
         });
 
         // MIDI Monitor Window
@@ -798,6 +898,18 @@ impl eframe::App for SynthApp {
                 .show(ctx, |ui| {
                     self.draw_midi_monitor(ui);
                 });
+        }
+        
+        // Presets Window
+        if self.show_presets_window {
+            let mut show_presets_window = self.show_presets_window;
+            egui::Window::new("🎵 Preset Manager")
+                .default_size([350.0, 400.0])
+                .open(&mut show_presets_window)
+                .show(ctx, |ui| {
+                    self.draw_preset_panel(ui);
+                });
+            self.show_presets_window = show_presets_window;
         }
     }
 }

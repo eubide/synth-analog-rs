@@ -1,10 +1,10 @@
-# Rust Prophet-5 Synthesizer
+# Vintage Analog Synthesizer
 
-A high-fidelity software synthesizer inspired by the classic Sequential Circuits Prophet-5, built in Rust with real-time audio processing and MIDI support.
+A high-fidelity software synthesizer inspired by classic 1970s analog synthesizers, built in Rust with real-time audio processing and MIDI support.
 
 ## Features
 
-### Prophet-5 Inspired Sound Engine
+### Vintage Analog Sound Engine
 - **Dual Oscillators** with sync, detune, and classic waveforms (Saw, Square, Triangle, Sine)
 - **Authentic 24dB/octave Ladder Filter** with self-oscillation capability
 - **Dual ADSR Envelopes** for amplitude and filter modulation
@@ -19,6 +19,9 @@ A high-fidelity software synthesizer inspired by the classic Sequential Circuits
 - **Preset System** with 20 built-in classic synthesizer sounds
 - **Modulation Matrix** for complex sound design
 - **Self-Oscillating Filter** at high resonance settings
+- **Classic Analog GUI** with proper visual hierarchy and organization
+- **Real-time Waveform Display** for visual feedback
+- **MIDI Activity Indicators** for connection status
 
 ## Installation & Requirements
 
@@ -84,7 +87,7 @@ Octave Controls:
 - **Sustain**: Hold level while key is pressed
 - **Release**: Time to fade to silence after key release
 
-#### LFO & Modulation (Prophet-5 Style)
+#### LFO & Modulation (Classic Analog Style)
 - **Waveform**: Choose from Triangle, Square, Sawtooth, Reverse Sawtooth, or Sample & Hold
 - **Rate**: LFO frequency (0.05 to 30 Hz, logarithmic)
 - **Amount**: Global LFO modulation depth
@@ -180,7 +183,7 @@ Contributions are welcome! Please see the [TODO.md](TODO.md) file for planned fe
 
 ### Priority Features to Implement
 1. Multiple LFO waveforms (Triangle, Sawtooth, Square, Sample & Hold)
-2. Poly-Mod section with authentic Prophet-5 routing
+2. Poly-Mod section with authentic vintage analog routing
 3. Glide/Portamento with adjustable time
 4. Extended MIDI CC support for all parameters
 5. Unison mode for thick lead sounds
@@ -191,7 +194,7 @@ This project is open source and available under the MIT License.
 
 ## Acknowledgments
 
-- **Sequential Circuits Prophet-5**: The legendary synthesizer that inspired this project
+- **Classic 1970s Analog Synthesizers**: The legendary instruments that inspired this project
 - **Antti Huovilainen**: For the improved Moog ladder filter model
 - **CPAL Community**: For the excellent cross-platform audio library
 - **egui**: For the immediate mode GUI framework

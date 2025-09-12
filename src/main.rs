@@ -14,7 +14,7 @@ use midi_handler::MidiHandler;
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 600.0])
+            .with_inner_size([1100.0, 600.0])
             .with_title("Rust Synthesizer"),
         ..Default::default()
     };

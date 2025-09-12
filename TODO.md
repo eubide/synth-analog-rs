@@ -8,7 +8,7 @@
   - [x] Preset management guide
   - [x] Architecture overview
 
-## Prophet-5 Missing Features
+## Vintage Analog Features
 
 ### Filter Section
 - [x] Implement 4-pole (24dB/octave) ladder filter (currently using 2-pole 12dB/octave biquad)
@@ -25,7 +25,7 @@
 - [ ] Implement LFO delay/fade-in
 
 ### Modulation Features
-- [ ] Implement Poly-Mod section with Prophet-5 specific routings:
+- [ ] Implement Poly-Mod section with vintage analog routings:
   - [ ] Filter Envelope → Oscillator A frequency
   - [ ] Filter Envelope → Oscillator A pulse width
   - [ ] Oscillator B → Oscillator A frequency
@@ -47,7 +47,7 @@
 
 ### Voice Architecture
 - [ ] Reduce to authentic 5-voice polyphony mode (currently 8 voices)
-- [ ] Add voice panning/spread (Prophet-5 Rev3/Rev4 feature)
+- [ ] Add voice panning/spread (vintage analog feature)
 - [ ] Implement vintage voice allocation modes:
   - [ ] Last-note priority
   - [ ] Low-note priority  
@@ -70,10 +70,10 @@
 - [ ] Implement A-440 Hz reference tone generator
 
 ### UI Enhancements
-- [ ] Create authentic Prophet-5 style GUI layout
-- [ ] Add oscilloscope/waveform display
+- [x] Create authentic vintage analog GUI layout
+- [x] Add oscilloscope/waveform display
 - [ ] Implement patch comparison (A/B)
-- [ ] Add MIDI activity indicators
+- [x] Add MIDI activity indicators
 - [ ] Create preset browser with categories
 
 ## Completed
