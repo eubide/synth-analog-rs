@@ -226,7 +226,7 @@ impl Default for LfoParams {
         Self {
             frequency: 2.0,
             amplitude: 0.1,
-            waveform: LfoWaveform::Triangle,  // Prophet-5 default
+            waveform: LfoWaveform::Triangle,  // Vintage analog default
             sync: false,
             target_osc1_pitch: false,
             target_osc2_pitch: false,
@@ -345,7 +345,7 @@ impl Synthesizer {
             (sample_rate * 0.073) as usize, // 73ms
         ];
         
-        Self {
+        let mut synthesizer = Self {
             osc1: OscillatorParams::default(),
             osc2: OscillatorParams::default(),
             osc2_sync: false,
@@ -372,7 +372,16 @@ impl Synthesizer {
             arp_step: 0,
             arp_timer: 0.0,
             arp_note_timer: 0.0,
+        };
+
+        // Auto-create authentic vintage analog presets on startup
+        if let Err(e) = synthesizer.create_all_classic_presets() {
+            println!("Warning: Could not create classic presets: {}", e);
+        } else {
+            println!("✓ Authentic vintage analog presets loaded successfully!");
         }
+
+        synthesizer
     }
 
     pub fn note_on(&mut self, note: u8, velocity: u8) {
@@ -642,7 +651,7 @@ impl Synthesizer {
                 let lfo_resonance_mod = lfo_value * modulation_matrix.lfo_to_resonance * 2.0;
                 let final_resonance = (filter_resonance + lfo_resonance_mod).clamp(0.0, 4.0);
                 
-                // Apply ladder filter (24dB/octave Prophet-5 style)
+                // Apply ladder filter (24dB/octave vintage analog style)
                 mixed = Self::apply_ladder_filter_static(
                     mixed,
                     &mut voice.filter_state,
@@ -725,7 +734,7 @@ impl Synthesizer {
         sample_rate: f32
     ) -> f32 {
         // Moog ladder filter implementation based on Huovilainen's improved model
-        // This provides authentic Prophet-5 filter sound with self-oscillation capability
+        // This provides authentic vintage analog filter sound with self-oscillation capability
         
         // Convert cutoff frequency to filter coefficient
         let fc = (cutoff / sample_rate).min(0.49); // Limit to Nyquist
@@ -1380,13 +1389,33 @@ impl Synthesizer {
         self.create_noise_sweep()?;
         self.create_zap_sound()?;
         
+        // Vintage Analog Classics
+        self.create_jump_brass()?;
+        self.create_cars_lead()?;
+        self.create_prophet_sync_lead()?;
+        self.create_new_order_bass()?;
+        self.create_berlin_school()?;
+        self.create_prophet_strings()?;
+        
         println!("All classic presets created successfully!");
         Ok(())
     }
     
     // Bass Sounds
     fn create_moog_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Square;
@@ -1409,7 +1438,19 @@ impl Synthesizer {
     }
     
     fn create_acid_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
@@ -1432,7 +1473,19 @@ impl Synthesizer {
     }
     
     fn create_sub_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Square;
         self.osc1.amplitude = 1.0;
         self.osc1.detune = -24.0;
@@ -1447,7 +1500,19 @@ impl Synthesizer {
     }
     
     fn create_wobble_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
@@ -1471,7 +1536,19 @@ impl Synthesizer {
     
     // Lead Sounds
     fn create_supersaw_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
@@ -1496,7 +1573,19 @@ impl Synthesizer {
     }
     
     fn create_pluck_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Triangle;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
@@ -1515,7 +1604,19 @@ impl Synthesizer {
     }
     
     fn create_screaming_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
@@ -1538,7 +1639,19 @@ impl Synthesizer {
     }
     
     fn create_vintage_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Square;
@@ -1564,7 +1677,19 @@ impl Synthesizer {
     
     // Pads & Strings
     fn create_warm_pad(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Triangle;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sine;
@@ -1589,7 +1714,19 @@ impl Synthesizer {
     }
     
     fn create_string_ensemble(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
@@ -1617,7 +1754,19 @@ impl Synthesizer {
     }
     
     fn create_choir_pad(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sine;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Triangle;
@@ -1646,7 +1795,19 @@ impl Synthesizer {
     }
     
     fn create_glass_pad(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sine;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sine;
@@ -1677,7 +1838,19 @@ impl Synthesizer {
     
     // Brass & Wind
     fn create_brass_stab(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Square;
@@ -1700,7 +1873,19 @@ impl Synthesizer {
     }
     
     fn create_trumpet_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
@@ -1723,7 +1908,19 @@ impl Synthesizer {
     }
     
     fn create_flute(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sine;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Triangle;
@@ -1752,7 +1949,19 @@ impl Synthesizer {
     }
     
     fn create_sax_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Triangle;
@@ -1782,7 +1991,19 @@ impl Synthesizer {
     
     // Effects & Special
     fn create_arp_sequence(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Square;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
@@ -1808,7 +2029,19 @@ impl Synthesizer {
     }
     
     fn create_sweep_fx(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
@@ -1829,7 +2062,19 @@ impl Synthesizer {
     }
     
     fn create_noise_sweep(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.mixer.noise_level = 1.0;
         self.filter.cutoff = 100.0;
         self.filter.resonance = 2.0;
@@ -1847,7 +2092,19 @@ impl Synthesizer {
     }
     
     fn create_zap_sound(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        *self = Synthesizer::new();
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
         self.osc1.wave_type = WaveType::Square;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
@@ -1869,6 +2126,247 @@ impl Synthesizer {
         self.modulation_matrix.lfo_to_osc1_pitch = 0.8;
         self.effects.delay_amount = 0.4;
         self.save_preset("Zap Sound")
+    }
+    
+    // Vintage Analog Presets
+    fn create_jump_brass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
+        // Van Halen "Jump" brass stab - authentic vintage analog sound
+        self.osc1.wave_type = WaveType::Sawtooth;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Square;
+        self.osc2.amplitude = 0.8;
+        self.osc2.detune = 7.0; // Classic vintage detune
+        self.mixer.osc1_level = 0.9;
+        self.mixer.osc2_level = 0.7;
+        self.filter.cutoff = 2800.0;
+        self.filter.resonance = 3.2; // High resonance for characteristic bite
+        self.filter.envelope_amount = 0.8; // Strong filter modulation
+        self.filter_envelope.attack = 0.01; // Sharp attack
+        self.filter_envelope.decay = 0.15; // Short decay
+        self.filter_envelope.sustain = 0.2; // Low sustain
+        self.filter_envelope.release = 0.1; // Quick release
+        self.amp_envelope.attack = 0.005; // Very sharp attack
+        self.amp_envelope.decay = 0.12;
+        self.amp_envelope.sustain = 0.3;
+        self.amp_envelope.release = 0.15;
+        self.modulation_matrix.velocity_to_cutoff = 0.6; // Velocity sensitive filter
+        self.save_preset("Jump Brass")
+    }
+    
+    fn create_cars_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
+        // Gary Numan "Cars" sync lead - classic vintage analog sync
+        self.osc1.wave_type = WaveType::Sawtooth;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 0.9;
+        self.osc2.detune = 12.0; // Octave up for sync effect
+        self.osc2_sync = true; // Oscillator sync enabled
+        self.mixer.osc1_level = 0.8;
+        self.mixer.osc2_level = 0.6;
+        self.filter.cutoff = 6500.0; // Bright filter
+        self.filter.resonance = 1.8; // Medium resonance
+        self.filter.envelope_amount = 0.4;
+        self.filter_envelope.attack = 0.08; // Medium attack
+        self.filter_envelope.decay = 0.6;
+        self.filter_envelope.sustain = 0.8; // Sustain-heavy envelope
+        self.filter_envelope.release = 1.2;
+        self.amp_envelope.attack = 0.05;
+        self.amp_envelope.decay = 0.3;
+        self.amp_envelope.sustain = 0.9;
+        self.amp_envelope.release = 1.0;
+        // Characteristic sync harmonics come from oscillator sync
+        self.save_preset("Cars Lead")
+    }
+    
+    fn create_prophet_sync_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
+        // Classic vintage sync lead with LFO sweep
+        self.osc1.wave_type = WaveType::Sawtooth;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 0.8;
+        self.osc2.detune = 24.0; // Two octaves up
+        self.osc2_sync = true; // Both oscillators with sync
+        self.mixer.osc1_level = 0.7;
+        self.mixer.osc2_level = 0.7;
+        self.filter.cutoff = 4000.0;
+        self.filter.resonance = 2.8;
+        self.filter.envelope_amount = 0.5;
+        self.filter_envelope.attack = 0.3;
+        self.filter_envelope.decay = 0.8;
+        self.filter_envelope.sustain = 0.7;
+        self.filter_envelope.release = 1.5;
+        self.amp_envelope.attack = 0.2;
+        self.amp_envelope.decay = 0.4;
+        self.amp_envelope.sustain = 0.9;
+        self.amp_envelope.release = 1.8;
+        // Filter sweep with LFO - classic vintage technique
+        self.lfo.frequency = 0.4; // Slow LFO
+        self.lfo.amplitude = 0.6;
+        self.lfo.target_filter = true;
+        self.modulation_matrix.lfo_to_cutoff = 0.7;
+        self.save_preset("Vintage Sync Lead")
+    }
+    
+    fn create_new_order_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
+        // "Blue Monday" style bass - vintage analog classic
+        self.osc1.wave_type = WaveType::Square;
+        self.osc1.amplitude = 1.0;
+        self.osc1.pulse_width = 0.3; // Narrow pulse for characteristic sound
+        self.mixer.osc1_level = 1.0;
+        self.filter.cutoff = 450.0; // Low filter cutoff
+        self.filter.resonance = 2.2;
+        self.filter.envelope_amount = 0.6;
+        self.filter_envelope.attack = 0.005; // Very quick attack
+        self.filter_envelope.decay = 0.08;
+        self.filter_envelope.sustain = 0.2;
+        self.filter_envelope.release = 0.06; // Quick release
+        self.amp_envelope.attack = 0.001; // Punchy attack
+        self.amp_envelope.decay = 0.05;
+        self.amp_envelope.sustain = 0.8;
+        self.amp_envelope.release = 0.1; // Quick release for punchiness
+        self.modulation_matrix.velocity_to_cutoff = 0.4;
+        self.save_preset("New Order Bass")
+    }
+    
+    fn create_berlin_school(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
+        // Tangerine Dream style sequence - vintage analog Berlin School
+        self.osc1.wave_type = WaveType::Triangle;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 0.6;
+        self.osc2.detune = -5.0; // Slight detune
+        self.mixer.osc1_level = 0.8;
+        self.mixer.osc2_level = 0.5;
+        self.filter.cutoff = 2200.0; // Moderate filter
+        self.filter.resonance = 1.5;
+        self.filter.envelope_amount = 0.4;
+        self.filter_envelope.attack = 0.08;
+        self.filter_envelope.decay = 0.4;
+        self.filter_envelope.sustain = 0.6;
+        self.filter_envelope.release = 0.3;
+        self.amp_envelope.attack = 0.05; // Sequence-friendly envelope
+        self.amp_envelope.decay = 0.2;
+        self.amp_envelope.sustain = 0.7;
+        self.amp_envelope.release = 0.4;
+        // Slow LFO modulation - typical of Berlin School
+        self.lfo.frequency = 0.25; // Very slow
+        self.lfo.amplitude = 0.4;
+        self.lfo.target_filter = true;
+        self.modulation_matrix.lfo_to_cutoff = 0.3;
+        self.effects.delay_amount = 0.2; // Subtle delay
+        self.effects.delay_time = 0.375; // Dotted eighth note
+        self.save_preset("Berlin School")
+    }
+    
+    fn create_prophet_strings(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Reset to defaults without infinite recursion
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
+        // Lush vintage analog string ensemble
+        self.osc1.wave_type = WaveType::Sawtooth;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 0.8;
+        self.osc2.detune = 2.5; // Very slight detune for richness
+        self.mixer.osc1_level = 0.8;
+        self.mixer.osc2_level = 0.7;
+        self.filter.cutoff = 4500.0; // Warm filter setting
+        self.filter.resonance = 1.2;
+        self.filter.envelope_amount = 0.3;
+        self.filter_envelope.attack = 1.8; // Slow attack for strings
+        self.filter_envelope.decay = 1.2;
+        self.filter_envelope.sustain = 0.8;
+        self.filter_envelope.release = 2.5;
+        self.amp_envelope.attack = 2.0; // Very slow attack
+        self.amp_envelope.decay = 0.8;
+        self.amp_envelope.sustain = 0.95; // High sustain
+        self.amp_envelope.release = 3.0; // Long release
+        // Subtle chorus-like modulation
+        self.lfo.frequency = 0.3;
+        self.lfo.amplitude = 0.15;
+        self.lfo.target_osc2_pitch = true;
+        self.modulation_matrix.lfo_to_osc2_pitch = 0.1;
+        // Vintage analog string effects
+        self.effects.reverb_amount = 0.7; // Lush reverb
+        self.effects.reverb_size = 0.9;
+        self.effects.delay_amount = 0.15; // Subtle delay for depth
+        self.effects.delay_time = 0.4;
+        self.save_preset("Vintage Strings")
     }
 
 }
