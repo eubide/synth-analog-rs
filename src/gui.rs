@@ -343,7 +343,7 @@ impl SynthApp {
         ui.label("velocity sensitivity");
         
         ui.horizontal(|ui| {
-            ui.label("→ volume:");
+            ui.label("-> volume:");
             ui.add(egui::Slider::new(&mut synth.modulation_matrix.velocity_to_amplitude, 0.0..=1.0)
                 .step_by(0.01));
         });
@@ -514,7 +514,7 @@ impl SynthApp {
                     for preset in presets.iter() {
                         let is_current = preset == &self.current_preset_name;
                         let button_text = if is_current {
-                            format!("► {}", preset)
+                            format!("> {}", preset)
                         } else {
                             preset.clone()
                         };
@@ -542,128 +542,85 @@ impl SynthApp {
         }
     }
 
-    fn draw_piano_keyboard(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("OCTAVE: {}", self.current_octave))
-                        .size(12.0)
-                        .strong());
-                    ui.label("(use ↑↓ arrows)");
-                });
-                ui.label("Computer keys: A W S E D F T G Y H U J K O L P Ñ");
-                
-                let key_width = 30.0;
-                let key_height = 90.0;
-            let white_keys = ["A", "S", "D", "F", "G", "H", "J", "K", "L", "Ñ"];
-            let black_keys = ["W", "E", "T", "Y", "U", "O", "P"];
-            let black_positions = [0.7, 1.7, 3.7, 4.7, 5.7, 6.7, 7.7]; // C#, D#, F#, G#, A#, C#(next), D#(next)
-            
+    fn draw_keyboard_legend(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                let start_x = ui.cursor().min.x;
-                
-                // Draw white keys first
-                for (i, &key_label) in white_keys.iter().enumerate() {
-                    let note_offset = match i {
-                        0 => 0,  // A -> C
-                        1 => 2,  // S -> D  
-                        2 => 4,  // D -> E
-                        3 => 5,  // F -> F
-                        4 => 7,  // G -> G
-                        5 => 9,  // H -> A
-                        6 => 11, // J -> B
-                        7 => 12, // K -> C (next octave)
-                        8 => 14, // L -> D (next octave)
-                        9 => 16, // Ñ -> E (next octave)
-                        _ => 0,
-                    };
-                    let midi_note = self.current_octave * 12 + note_offset;
-                    
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::Vec2::new(key_width, key_height),
-                        egui::Sense::click()
-                    );
-                    
-                    let color = if response.is_pointer_button_down_on() {
-                        egui::Color32::LIGHT_GRAY
-                    } else {
-                        egui::Color32::WHITE
-                    };
-                    
-                    ui.painter().rect_filled(rect, egui::Rounding::ZERO, color);
-                    ui.painter().rect_stroke(rect, egui::Rounding::ZERO, egui::Stroke::new(1.0, egui::Color32::BLACK));
-                    
-                    // Draw key label
-                    ui.painter().text(
-                        rect.center() + egui::Vec2::new(0.0, key_height * 0.3),
-                        egui::Align2::CENTER_CENTER,
-                        key_label,
-                        egui::FontId::default(),
-                        egui::Color32::BLACK
-                    );
-                    
-                    if response.clicked() {
-                        let mut synth = self.synthesizer.lock().unwrap();
-                        synth.note_on(midi_note as u8, 100);
-                    }
-                    
-                    if response.drag_stopped() {
-                        let mut synth = self.synthesizer.lock().unwrap();
-                        synth.note_off(midi_note as u8);
-                    }
-                }
-                
-                // Draw black keys on top
-                for (i, &key_label) in black_keys.iter().enumerate() {
-                    let note_offset = match i {
-                        0 => 1,  // W -> C#
-                        1 => 3,  // E -> D#
-                        2 => 6,  // T -> F#
-                        3 => 8,  // Y -> G#
-                        4 => 10, // U -> A#
-                        5 => 13, // O -> C# (next octave)
-                        6 => 15, // P -> D# (next octave)
-                        _ => 0,
-                    };
-                    let midi_note = self.current_octave * 12 + note_offset;
-                    let x_pos = start_x + black_positions[i] * key_width - key_width * 0.3;
-                    
-                    let black_rect = egui::Rect::from_min_size(
-                        egui::Pos2::new(x_pos, ui.cursor().min.y),
-                        egui::Vec2::new(key_width * 0.6, key_height * 0.6)
-                    );
-                    
-                    let response = ui.allocate_rect(black_rect, egui::Sense::click());
-                    
-                    let color = if response.is_pointer_button_down_on() {
-                        egui::Color32::DARK_GRAY
-                    } else {
-                        egui::Color32::BLACK
-                    };
-                    
-                    ui.painter().rect_filled(black_rect, egui::Rounding::ZERO, color);
-                    ui.painter().rect_stroke(black_rect, egui::Rounding::ZERO, egui::Stroke::new(1.0, egui::Color32::GRAY));
-                    
-                    // Draw key label
-                    ui.painter().text(
-                        black_rect.center() + egui::Vec2::new(0.0, key_height * 0.2),
-                        egui::Align2::CENTER_CENTER,
-                        key_label,
-                        egui::FontId::default(),
-                        egui::Color32::WHITE
-                    );
-                    
-                    if response.clicked() {
-                        let mut synth = self.synthesizer.lock().unwrap();
-                        synth.note_on(midi_note as u8, 100);
-                    }
-                    
-                    if response.drag_stopped() {
-                        let mut synth = self.synthesizer.lock().unwrap();
-                        synth.note_off(midi_note as u8);
-                    }
-                }
+                ui.label(egui::RichText::new(format!("OCTAVE: {}", self.current_octave))
+                    .size(14.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(255, 255, 100)));
+                ui.label(egui::RichText::new("(UP/DOWN arrows to change)")
+                    .size(10.0)
+                    .color(egui::Color32::GRAY));
             });
+            
+            ui.add_space(8.0);
+            
+            // Keyboard mapping legend
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("WHITE KEYS:")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::WHITE));
+                    ui.horizontal(|ui| {
+                        ui.label("A=C");
+                        ui.label("S=D");
+                        ui.label("D=E");
+                        ui.label("F=F");
+                        ui.label("G=G");
+                        ui.label("H=A");
+                        ui.label("J=B");
+                        ui.label("K=C+");
+                        ui.label("L=D+");
+                        ui.label("Ñ=E+");
+                    });
+                });
+                
+                ui.separator();
+                
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("BLACK KEYS:")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::LIGHT_GRAY));
+                    ui.horizontal(|ui| {
+                        ui.label("W=C#");
+                        ui.label("E=D#");
+                        ui.label("T=F#");
+                        ui.label("Y=G#");
+                        ui.label("U=A#");
+                        ui.label("O=C#+");
+                        ui.label("P=D#+");
+                    });
+                });
+            });
+            
+            ui.add_space(6.0);
+            
+            // Controls legend
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("CONTROLS:")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(100, 255, 100)));
+                    ui.label("↑↓ = Change octave");
+                    ui.label("Hold key = Sustain note");
+                    ui.label("Release key = Note off");
+                });
+                
+                ui.separator();
+                
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("RANGE:")
+                        .size(11.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(255, 200, 100)));
+                    ui.label("Current: 1.5 octaves");
+                    ui.label("Total: C0 to B8");
+                    ui.label("Default: Octave 4");
+                });
             });
         });
     }
@@ -744,7 +701,7 @@ impl eframe::App for SynthApp {
                             self.show_midi_monitor = !self.show_midi_monitor;
                         }
                     } else {
-                        let _ = ui.small_button("❌ NO MIDI");
+                        let _ = ui.small_button("NO MIDI");
                     }
                     
                     if ui.small_button("🎵 Presets").clicked() {
@@ -880,13 +837,13 @@ impl eframe::App for SynthApp {
                 
                 ui.add_space(8.0);
                 
-                // KEYBOARD SECTION - Compact
+                // KEYBOARD LEGEND SECTION - Compact
                 ui.group(|ui| {
                     ui.label(egui::RichText::new("KEYBOARD")
                         .size(12.0)
                         .color(egui::Color32::from_rgb(200, 200, 200))
                         .strong());
-                    self.draw_piano_keyboard(ui);
+                    self.draw_keyboard_legend(ui);
                 });
             });
         });
