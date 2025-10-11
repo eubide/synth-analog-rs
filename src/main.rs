@@ -5,6 +5,8 @@ mod synthesizer;
 mod audio_engine;
 mod gui;
 mod midi_handler;
+mod optimization;
+mod lock_free;
 
 use synthesizer::Synthesizer;
 use audio_engine::AudioEngine;
@@ -12,6 +14,11 @@ use gui::SynthApp;
 use midi_handler::MidiHandler;
 
 fn main() -> Result<(), eframe::Error> {
+    // Initialize logging system
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    log::info!("Starting Analog Synthesizer");
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 600.0])
@@ -21,24 +28,26 @@ fn main() -> Result<(), eframe::Error> {
 
     let synth = Arc::new(Mutex::new(Synthesizer::new()));
     let audio_engine = match AudioEngine::new(synth.clone()) {
-        Ok(engine) => engine,
+        Ok(engine) => {
+            log::info!("Audio engine initialized successfully");
+            engine
+        },
         Err(e) => {
-            eprintln!("Failed to initialize audio engine: {}", e);
-            eprintln!("Please check your audio device configuration.");
-            eprintln!("Audio initialization failed: {}", e);
+            log::error!("Failed to initialize audio engine: {}", e);
+            log::error!("Please check your audio device configuration.");
             std::process::exit(1);
         }
     };
-    
+
     // Initialize MIDI input
     let _midi_handler = match MidiHandler::new(synth.clone()) {
         Ok(handler) => {
-            println!("MIDI input initialized successfully");
+            log::info!("MIDI input initialized successfully");
             Some(handler)
         },
         Err(e) => {
-            println!("Failed to initialize MIDI input: {}", e);
-            println!("Continuing without MIDI support...");
+            log::warn!("Failed to initialize MIDI input: {}", e);
+            log::warn!("Continuing without MIDI support...");
             None
         }
     };

@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use crate::synthesizer::Synthesizer;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct MidiMessage {
     pub timestamp: std::time::Instant,
     pub message_type: String,
@@ -12,6 +13,7 @@ pub struct MidiMessage {
 
 pub struct MidiHandler {
     _connection: Option<midir::MidiInputConnection<()>>,
+    #[allow(dead_code)]
     pub message_history: Arc<Mutex<VecDeque<MidiMessage>>>,
 }
 
