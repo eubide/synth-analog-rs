@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// Lock-free triple buffer for real-time parameter updates
 /// GUI writes to one buffer, audio reads from another, third is for swapping
@@ -37,11 +37,14 @@ impl<T: Clone> TripleBuffer<T> {
 
     /// Lock-free read for audio thread (single reader assumed)
     pub fn read(&self) -> &T {
-        if self.new_data.compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            let swap_idx = self.swap_index.swap(
-                self.read_index.load(Ordering::Relaxed),
-                Ordering::AcqRel,
-            );
+        if self
+            .new_data
+            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            let swap_idx = self
+                .swap_index
+                .swap(self.read_index.load(Ordering::Relaxed), Ordering::AcqRel);
             self.read_index.store(swap_idx, Ordering::Release);
         }
         let read_idx = self.read_index.load(Ordering::Acquire);
@@ -139,8 +142,8 @@ impl Default for SynthParameters {
             // Oscillators – waveform 3 = Sawtooth (Prophet-5 default)
             osc1_waveform: 3,
             osc2_waveform: 3,
-            osc1_level: 0.5,
-            osc2_level: 0.5,
+            osc1_level: 1.0,
+            osc2_level: 0.8,
             osc1_detune: 0.0,
             osc2_detune: 0.0,
             osc1_pulse_width: 0.5,
@@ -148,31 +151,31 @@ impl Default for SynthParameters {
             osc2_sync: false,
 
             // Mixer
-            mixer_osc1_level: 0.5,
-            mixer_osc2_level: 0.5,
+            mixer_osc1_level: 0.8,
+            mixer_osc2_level: 0.6,
             noise_level: 0.0,
 
-            // Filter
-            filter_cutoff: 1000.0,
+            // Filter – open enough to hear full spectrum
+            filter_cutoff: 5000.0,
             filter_resonance: 1.0,
             filter_envelope_amount: 0.0,
             filter_keyboard_tracking: 0.0,
 
-            // Amp envelope
-            amp_attack: 0.1,
+            // Amp envelope – snappy response
+            amp_attack: 0.01,
             amp_decay: 0.3,
-            amp_sustain: 0.7,
-            amp_release: 0.5,
+            amp_sustain: 0.8,
+            amp_release: 0.3,
 
             // Filter envelope
-            filter_attack: 0.1,
+            filter_attack: 0.01,
             filter_decay: 0.3,
             filter_sustain: 0.7,
-            filter_release: 0.5,
+            filter_release: 0.3,
 
             // LFO – waveform 0 = Triangle
             lfo_rate: 2.0,
-            lfo_amount: 0.1,
+            lfo_amount: 0.0,
             lfo_waveform: 0,
             lfo_sync: false,
             lfo_target_osc1_pitch: false,
@@ -204,30 +207,20 @@ impl Default for SynthParameters {
             arp_gate_length: 0.8,
 
             // Global
-            master_volume: 0.5,
+            master_volume: 0.7,
         }
     }
 }
 
 /// Lock-free synthesizer state for real-time audio processing
-#[allow(dead_code)]
 pub struct LockFreeSynth {
     pub params: TripleBuffer<SynthParameters>,
-
-    // Atomic values for simple controls
-    pub panic_requested: AtomicBool,
-    pub sustain_pedal: AtomicBool,
-    pub mono_mode: AtomicBool,
 }
 
-#[allow(dead_code)]
 impl LockFreeSynth {
     pub fn new() -> Self {
         Self {
             params: TripleBuffer::new(SynthParameters::default()),
-            panic_requested: AtomicBool::new(false),
-            sustain_pedal: AtomicBool::new(false),
-            mono_mode: AtomicBool::new(false),
         }
     }
 
@@ -239,38 +232,6 @@ impl LockFreeSynth {
     /// Get current parameters (audio thread)
     pub fn get_params(&self) -> &SynthParameters {
         self.params.read()
-    }
-
-    /// Request panic (from any thread)
-    pub fn request_panic(&self) {
-        self.panic_requested.store(true, Ordering::Release);
-    }
-
-    /// Check and clear panic request (audio thread)
-    pub fn check_panic_request(&self) -> bool {
-        self.panic_requested
-            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    /// Set sustain pedal (from any thread)
-    pub fn set_sustain_pedal(&self, pressed: bool) {
-        self.sustain_pedal.store(pressed, Ordering::Release);
-    }
-
-    /// Get sustain pedal state (audio thread)
-    pub fn get_sustain_pedal(&self) -> bool {
-        self.sustain_pedal.load(Ordering::Acquire)
-    }
-
-    /// Set mono mode (from any thread)
-    pub fn set_mono_mode(&self, mono: bool) {
-        self.mono_mode.store(mono, Ordering::Release);
-    }
-
-    /// Get mono mode state (audio thread)
-    pub fn is_mono_mode(&self) -> bool {
-        self.mono_mode.load(Ordering::Acquire)
     }
 }
 
@@ -321,23 +282,23 @@ mod tests {
         let params = SynthParameters::default();
         assert_eq!(params.osc1_waveform, 3);
         assert_eq!(params.osc2_waveform, 3);
-        assert_eq!(params.osc1_level, 0.5);
-        assert_eq!(params.osc2_level, 0.5);
+        assert_eq!(params.osc1_level, 1.0);
+        assert_eq!(params.osc2_level, 0.8);
         assert_eq!(params.osc1_detune, 0.0);
         assert_eq!(params.osc2_detune, 0.0);
         assert_eq!(params.osc1_pulse_width, 0.5);
         assert_eq!(params.osc2_pulse_width, 0.5);
         assert!(!params.osc2_sync);
         assert_eq!(params.noise_level, 0.0);
-        assert_eq!(params.filter_cutoff, 1000.0);
+        assert_eq!(params.filter_cutoff, 5000.0);
         assert_eq!(params.filter_resonance, 1.0);
         assert_eq!(params.filter_envelope_amount, 0.0);
         assert_eq!(params.filter_keyboard_tracking, 0.0);
-        assert!((params.amp_attack - 0.1).abs() < 0.001);
+        assert!((params.amp_attack - 0.01).abs() < 0.001);
         assert!((params.amp_decay - 0.3).abs() < 0.001);
-        assert!((params.amp_sustain - 0.7).abs() < 0.001);
-        assert!((params.amp_release - 0.5).abs() < 0.001);
-        assert_eq!(params.master_volume, 0.5);
+        assert!((params.amp_sustain - 0.8).abs() < 0.001);
+        assert!((params.amp_release - 0.3).abs() < 0.001);
+        assert_eq!(params.master_volume, 0.7);
         assert_eq!(params.lfo_waveform, 0);
         assert!(!params.lfo_sync);
         assert_eq!(params.velocity_to_amplitude, 0.5);
@@ -355,33 +316,39 @@ mod tests {
     #[test]
     fn test_triple_buffer_write_read() {
         let buf = TripleBuffer::new(SynthParameters::default());
-        let params = SynthParameters { master_volume: 0.42, ..SynthParameters::default() };
+        let params = SynthParameters {
+            master_volume: 0.42,
+            ..SynthParameters::default()
+        };
         buf.write(params);
         let read = buf.read();
         assert_eq!(read.master_volume, 0.42);
     }
 
     #[test]
-    fn test_lock_free_synth_panic_request() {
-        let synth = LockFreeSynth::new();
-        assert!(!synth.check_panic_request());
-        synth.request_panic();
-        assert!(synth.check_panic_request());
-        assert!(!synth.check_panic_request());
-    }
-
-    #[test]
     fn test_midi_event_queue() {
         let queue = MidiEventQueue::new();
-        queue.push(MidiEvent::NoteOn { note: 60, velocity: 100 });
+        queue.push(MidiEvent::NoteOn {
+            note: 60,
+            velocity: 100,
+        });
         queue.push(MidiEvent::NoteOff { note: 60 });
         queue.push(MidiEvent::SustainPedal { pressed: true });
 
         let events = queue.drain();
         assert_eq!(events.len(), 3);
-        assert!(matches!(events[0], MidiEvent::NoteOn { note: 60, velocity: 100 }));
+        assert!(matches!(
+            events[0],
+            MidiEvent::NoteOn {
+                note: 60,
+                velocity: 100
+            }
+        ));
         assert!(matches!(events[1], MidiEvent::NoteOff { note: 60 }));
-        assert!(matches!(events[2], MidiEvent::SustainPedal { pressed: true }));
+        assert!(matches!(
+            events[2],
+            MidiEvent::SustainPedal { pressed: true }
+        ));
 
         let events = queue.drain();
         assert!(events.is_empty());

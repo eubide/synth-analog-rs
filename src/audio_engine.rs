@@ -1,8 +1,8 @@
+use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue};
+use crate::synthesizer::Synthesizer;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, Stream, StreamConfig};
 use std::sync::Arc;
-use crate::synthesizer::Synthesizer;
-use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue};
 
 pub struct AudioEngine {
     _stream: Stream,
@@ -14,22 +14,49 @@ impl AudioEngine {
         midi_events: Arc<MidiEventQueue>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
-        let device = host.default_output_device()
+        let device = host
+            .default_output_device()
             .ok_or("No output device available")?;
-        let config = device.default_output_config()
+        let config = device
+            .default_output_config()
             .map_err(|e| format!("No default output config: {}", e))?;
 
         let sample_rate = config.sample_rate().0;
-        log::info!("Audio engine initialized with {} Hz sample rate", sample_rate);
+        log::info!(
+            "Audio engine initialized with {} Hz sample rate",
+            sample_rate
+        );
 
         let stream = match config.sample_format() {
-            SampleFormat::F32 => Self::run::<f32>(&device, &config.into(), lock_free_synth, midi_events, sample_rate)?,
-            SampleFormat::I16 => Self::run::<i16>(&device, &config.into(), lock_free_synth, midi_events, sample_rate)?,
-            SampleFormat::U16 => Self::run::<u16>(&device, &config.into(), lock_free_synth, midi_events, sample_rate)?,
-            sample_format => return Err(format!("Unsupported sample format: {:?}", sample_format).into()),
+            SampleFormat::F32 => Self::run::<f32>(
+                &device,
+                &config.into(),
+                lock_free_synth,
+                midi_events,
+                sample_rate,
+            )?,
+            SampleFormat::I16 => Self::run::<i16>(
+                &device,
+                &config.into(),
+                lock_free_synth,
+                midi_events,
+                sample_rate,
+            )?,
+            SampleFormat::U16 => Self::run::<u16>(
+                &device,
+                &config.into(),
+                lock_free_synth,
+                midi_events,
+                sample_rate,
+            )?,
+            sample_format => {
+                return Err(format!("Unsupported sample format: {:?}", sample_format).into());
+            }
         };
 
-        stream.play().map_err(|e| format!("Failed to play stream: {}", e))?;
+        stream
+            .play()
+            .map_err(|e| format!("Failed to play stream: {}", e))?;
 
         Ok(Self { _stream: stream })
     }
