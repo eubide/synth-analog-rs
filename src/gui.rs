@@ -1,9 +1,9 @@
+use crate::audio_engine::AudioEngine;
+use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue, SynthParameters};
+use crate::midi_handler::MidiHandler;
+use crate::synthesizer::{ArpPattern, LfoWaveform, Synthesizer, WaveType};
 use eframe::egui;
 use std::sync::Arc;
-use crate::lock_free::{LockFreeSynth, SynthParameters, MidiEvent, MidiEventQueue};
-use crate::synthesizer::{WaveType, ArpPattern, LfoWaveform, Synthesizer};
-use crate::audio_engine::AudioEngine;
-use crate::midi_handler::MidiHandler;
 
 pub struct SynthApp {
     lock_free_synth: Arc<LockFreeSynth>,
@@ -33,7 +33,7 @@ impl SynthApp {
             _audio_engine: audio_engine,
             _midi_handler: midi_handler,
             last_key_times: std::collections::HashMap::new(),
-            current_octave: 4, // C4 octave by default
+            current_octave: 3, // C3 octave by default
             show_midi_monitor: false,
             show_presets_window: false,
             current_preset_name: String::new(),
@@ -46,19 +46,30 @@ impl SynthApp {
         ui.spacing_mut().item_spacing = egui::vec2(1.0, 1.0);
 
         let (waveform, detune, pulse_width, amplitude) = if osc_num == 1 {
-            (&mut self.params.osc1_waveform, &mut self.params.osc1_detune,
-             &mut self.params.osc1_pulse_width, &mut self.params.osc1_level)
+            (
+                &mut self.params.osc1_waveform,
+                &mut self.params.osc1_detune,
+                &mut self.params.osc1_pulse_width,
+                &mut self.params.osc1_level,
+            )
         } else {
-            (&mut self.params.osc2_waveform, &mut self.params.osc2_detune,
-             &mut self.params.osc2_pulse_width, &mut self.params.osc2_level)
+            (
+                &mut self.params.osc2_waveform,
+                &mut self.params.osc2_detune,
+                &mut self.params.osc2_pulse_width,
+                &mut self.params.osc2_level,
+            )
         };
 
         // Frequency controls
         ui.horizontal(|ui| {
             ui.label("freq:");
-            ui.add_sized([70.0, 16.0], egui::Slider::new(detune, -12.0..=12.0)
-                .step_by(0.1)
-                .suffix(" st"));
+            ui.add_sized(
+                [70.0, 16.0],
+                egui::Slider::new(detune, -12.0..=12.0)
+                    .step_by(0.1)
+                    .suffix(" st"),
+            );
         });
 
         // Wave type selector
@@ -85,16 +96,20 @@ impl SynthApp {
         if wave_type == WaveType::Square {
             ui.horizontal(|ui| {
                 ui.label("pw:");
-                ui.add_sized([70.0, 16.0], egui::Slider::new(pulse_width, 0.1..=0.9)
-                    .step_by(0.01));
+                ui.add_sized(
+                    [70.0, 16.0],
+                    egui::Slider::new(pulse_width, 0.1..=0.9).step_by(0.01),
+                );
             });
         }
 
         // Level control (always available)
         ui.horizontal(|ui| {
             ui.label("level:");
-            ui.add_sized([70.0, 16.0], egui::Slider::new(amplitude, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add_sized(
+                [70.0, 16.0],
+                egui::Slider::new(amplitude, 0.0..=1.0).step_by(0.01),
+            );
         });
 
         // Sync control (only for oscillator B)
@@ -111,23 +126,29 @@ impl SynthApp {
 
         ui.horizontal(|ui| {
             ui.label("oscillator A:");
-            ui.add(egui::Slider::new(&mut self.params.mixer_osc1_level, 0.0..=1.0)
-                .step_by(0.01)
-                .text("Level"));
+            ui.add(
+                egui::Slider::new(&mut self.params.mixer_osc1_level, 0.0..=1.0)
+                    .step_by(0.01)
+                    .text("Level"),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("oscillator B:");
-            ui.add(egui::Slider::new(&mut self.params.mixer_osc2_level, 0.0..=1.0)
-                .step_by(0.01)
-                .text("Level"));
+            ui.add(
+                egui::Slider::new(&mut self.params.mixer_osc2_level, 0.0..=1.0)
+                    .step_by(0.01)
+                    .text("Level"),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("noise:");
-            ui.add(egui::Slider::new(&mut self.params.noise_level, 0.0..=1.0)
-                .step_by(0.01)
-                .text("Level"));
+            ui.add(
+                egui::Slider::new(&mut self.params.noise_level, 0.0..=1.0)
+                    .step_by(0.01)
+                    .text("Level"),
+            );
         });
     }
 
@@ -136,16 +157,21 @@ impl SynthApp {
 
         ui.horizontal(|ui| {
             ui.label("cutoff:");
-            ui.add_sized([120.0, 20.0], egui::Slider::new(&mut self.params.filter_cutoff, 20.0..=20000.0)
-                .logarithmic(true)
-                .step_by(1.0)
-                .suffix(" Hz"));
+            ui.add_sized(
+                [120.0, 20.0],
+                egui::Slider::new(&mut self.params.filter_cutoff, 20.0..=20000.0)
+                    .logarithmic(true)
+                    .step_by(1.0)
+                    .suffix(" Hz"),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("resonance:");
-            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.params.filter_resonance, 0.0..=4.0)
-                .step_by(0.05));
+            ui.add_sized(
+                [100.0, 20.0],
+                egui::Slider::new(&mut self.params.filter_resonance, 0.0..=4.0).step_by(0.05),
+            );
             if self.params.filter_resonance >= 3.8 {
                 ui.label("Self-osc");
             }
@@ -153,48 +179,67 @@ impl SynthApp {
 
         ui.horizontal(|ui| {
             ui.label("envelope:");
-            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.params.filter_envelope_amount, -1.0..=1.0)
-                .step_by(0.01));
+            ui.add_sized(
+                [100.0, 20.0],
+                egui::Slider::new(&mut self.params.filter_envelope_amount, -1.0..=1.0)
+                    .step_by(0.01),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("keyboard:");
-            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.params.filter_keyboard_tracking, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add_sized(
+                [100.0, 20.0],
+                egui::Slider::new(&mut self.params.filter_keyboard_tracking, 0.0..=1.0)
+                    .step_by(0.01),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("velocity:");
-            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.params.velocity_to_cutoff, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add_sized(
+                [100.0, 20.0],
+                egui::Slider::new(&mut self.params.velocity_to_cutoff, 0.0..=1.0).step_by(0.01),
+            );
         });
 
         ui.label("FILTER ENVELOPE");
         ui.horizontal(|ui| {
             ui.label("A:");
-            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.params.filter_attack, 0.001..=2.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
+            ui.add_sized(
+                [100.0, 20.0],
+                egui::Slider::new(&mut self.params.filter_attack, 0.001..=2.0)
+                    .logarithmic(true)
+                    .step_by(0.001)
+                    .suffix(" s"),
+            );
         });
         ui.horizontal(|ui| {
             ui.label("D:");
-            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.params.filter_decay, 0.001..=3.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
+            ui.add_sized(
+                [100.0, 20.0],
+                egui::Slider::new(&mut self.params.filter_decay, 0.001..=3.0)
+                    .logarithmic(true)
+                    .step_by(0.001)
+                    .suffix(" s"),
+            );
         });
         ui.horizontal(|ui| {
             ui.label("S:");
-            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.params.filter_sustain, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add_sized(
+                [100.0, 20.0],
+                egui::Slider::new(&mut self.params.filter_sustain, 0.0..=1.0).step_by(0.01),
+            );
         });
         ui.horizontal(|ui| {
             ui.label("R:");
-            ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.params.filter_release, 0.001..=2.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
+            ui.add_sized(
+                [100.0, 20.0],
+                egui::Slider::new(&mut self.params.filter_release, 0.001..=2.0)
+                    .logarithmic(true)
+                    .step_by(0.001)
+                    .suffix(" s"),
+            );
         });
     }
 
@@ -217,24 +262,37 @@ impl SynthApp {
                     ui.selectable_value(&mut lfo_waveform, LfoWaveform::Triangle, "Triangle");
                     ui.selectable_value(&mut lfo_waveform, LfoWaveform::Square, "Square");
                     ui.selectable_value(&mut lfo_waveform, LfoWaveform::Sawtooth, "Sawtooth");
-                    ui.selectable_value(&mut lfo_waveform, LfoWaveform::ReverseSawtooth, "Reverse Saw");
-                    ui.selectable_value(&mut lfo_waveform, LfoWaveform::SampleAndHold, "Sample & Hold");
+                    ui.selectable_value(
+                        &mut lfo_waveform,
+                        LfoWaveform::ReverseSawtooth,
+                        "Reverse Saw",
+                    );
+                    ui.selectable_value(
+                        &mut lfo_waveform,
+                        LfoWaveform::SampleAndHold,
+                        "Sample & Hold",
+                    );
                 });
         });
         self.params.lfo_waveform = Synthesizer::lfo_waveform_to_u8_pub(lfo_waveform);
 
         ui.horizontal(|ui| {
             ui.label("rate:");
-            ui.add_sized([90.0, 20.0], egui::Slider::new(&mut self.params.lfo_rate, 0.05..=30.0)
-                .logarithmic(true)
-                .step_by(0.05)
-                .suffix(" Hz"));
+            ui.add_sized(
+                [90.0, 20.0],
+                egui::Slider::new(&mut self.params.lfo_rate, 0.05..=30.0)
+                    .logarithmic(true)
+                    .step_by(0.05)
+                    .suffix(" Hz"),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("amount:");
-            ui.add_sized([90.0, 20.0], egui::Slider::new(&mut self.params.lfo_amount, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add_sized(
+                [90.0, 20.0],
+                egui::Slider::new(&mut self.params.lfo_amount, 0.0..=1.0).step_by(0.01),
+            );
         });
 
         // Keyboard sync option (authentic vintage analog feature)
@@ -252,64 +310,78 @@ impl SynthApp {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label("filter cutoff:");
-                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut self.params.lfo_to_cutoff, 0.0..=1.0)
-                    .step_by(0.01));
+                ui.add_sized(
+                    [70.0, 18.0],
+                    egui::Slider::new(&mut self.params.lfo_to_cutoff, 0.0..=1.0).step_by(0.01),
+                );
             });
             ui.horizontal(|ui| {
                 ui.label("filter res:");
-                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut self.params.lfo_to_resonance, 0.0..=1.0)
-                    .step_by(0.01));
+                ui.add_sized(
+                    [70.0, 18.0],
+                    egui::Slider::new(&mut self.params.lfo_to_resonance, 0.0..=1.0).step_by(0.01),
+                );
             });
             ui.horizontal(|ui| {
                 ui.label("osc A pitch:");
-                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut self.params.lfo_to_osc1_pitch, 0.0..=1.0)
-                    .step_by(0.01));
+                ui.add_sized(
+                    [70.0, 18.0],
+                    egui::Slider::new(&mut self.params.lfo_to_osc1_pitch, 0.0..=1.0).step_by(0.01),
+                );
             });
             ui.horizontal(|ui| {
                 ui.label("osc B pitch:");
-                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut self.params.lfo_to_osc2_pitch, 0.0..=1.0)
-                    .step_by(0.01));
+                ui.add_sized(
+                    [70.0, 18.0],
+                    egui::Slider::new(&mut self.params.lfo_to_osc2_pitch, 0.0..=1.0).step_by(0.01),
+                );
             });
             ui.horizontal(|ui| {
                 ui.label("amplitude:");
-                ui.add_sized([70.0, 18.0], egui::Slider::new(&mut self.params.lfo_to_amplitude, 0.0..=1.0)
-                    .step_by(0.01));
+                ui.add_sized(
+                    [70.0, 18.0],
+                    egui::Slider::new(&mut self.params.lfo_to_amplitude, 0.0..=1.0).step_by(0.01),
+                );
             });
         });
     }
-
 
     fn draw_amp_envelope_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
         ui.horizontal(|ui| {
             ui.label("A:");
-            ui.add(egui::Slider::new(&mut self.params.amp_attack, 0.001..=2.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
+            ui.add(
+                egui::Slider::new(&mut self.params.amp_attack, 0.001..=2.0)
+                    .logarithmic(true)
+                    .step_by(0.001)
+                    .suffix(" s"),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("D:");
-            ui.add(egui::Slider::new(&mut self.params.amp_decay, 0.001..=3.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
+            ui.add(
+                egui::Slider::new(&mut self.params.amp_decay, 0.001..=3.0)
+                    .logarithmic(true)
+                    .step_by(0.001)
+                    .suffix(" s"),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("S:");
-            ui.add(egui::Slider::new(&mut self.params.amp_sustain, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add(egui::Slider::new(&mut self.params.amp_sustain, 0.0..=1.0).step_by(0.01));
         });
 
         ui.horizontal(|ui| {
             ui.label("R:");
-            ui.add(egui::Slider::new(&mut self.params.amp_release, 0.001..=5.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
+            ui.add(
+                egui::Slider::new(&mut self.params.amp_release, 0.001..=5.0)
+                    .logarithmic(true)
+                    .step_by(0.001)
+                    .suffix(" s"),
+            );
         });
     }
 
@@ -318,32 +390,37 @@ impl SynthApp {
 
         ui.horizontal(|ui| {
             ui.label("A:");
-            ui.add(egui::Slider::new(&mut self.params.filter_attack, 0.001..=2.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
+            ui.add(
+                egui::Slider::new(&mut self.params.filter_attack, 0.001..=2.0)
+                    .logarithmic(true)
+                    .step_by(0.001)
+                    .suffix(" s"),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("D:");
-            ui.add(egui::Slider::new(&mut self.params.filter_decay, 0.001..=3.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
+            ui.add(
+                egui::Slider::new(&mut self.params.filter_decay, 0.001..=3.0)
+                    .logarithmic(true)
+                    .step_by(0.001)
+                    .suffix(" s"),
+            );
         });
 
         ui.horizontal(|ui| {
             ui.label("S:");
-            ui.add(egui::Slider::new(&mut self.params.filter_sustain, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add(egui::Slider::new(&mut self.params.filter_sustain, 0.0..=1.0).step_by(0.01));
         });
 
         ui.horizontal(|ui| {
             ui.label("R:");
-            ui.add(egui::Slider::new(&mut self.params.filter_release, 0.001..=5.0)
-                .logarithmic(true)
-                .step_by(0.001)
-                .suffix(" s"));
+            ui.add(
+                egui::Slider::new(&mut self.params.filter_release, 0.001..=5.0)
+                    .logarithmic(true)
+                    .step_by(0.001)
+                    .suffix(" s"),
+            );
         });
     }
 
@@ -359,11 +436,11 @@ impl SynthApp {
 
         ui.horizontal(|ui| {
             ui.label("-> volume:");
-            ui.add(egui::Slider::new(&mut self.params.velocity_to_amplitude, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add(
+                egui::Slider::new(&mut self.params.velocity_to_amplitude, 0.0..=1.0).step_by(0.01),
+            );
         });
     }
-
 
     fn draw_effects_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
@@ -371,31 +448,29 @@ impl SynthApp {
         ui.label("reverb");
         ui.horizontal(|ui| {
             ui.label("amount:");
-            ui.add(egui::Slider::new(&mut self.params.reverb_amount, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add(egui::Slider::new(&mut self.params.reverb_amount, 0.0..=1.0).step_by(0.01));
         });
         ui.horizontal(|ui| {
             ui.label("size:");
-            ui.add(egui::Slider::new(&mut self.params.reverb_size, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add(egui::Slider::new(&mut self.params.reverb_size, 0.0..=1.0).step_by(0.01));
         });
 
         ui.label("delay");
         ui.horizontal(|ui| {
             ui.label("time:");
-            ui.add(egui::Slider::new(&mut self.params.delay_time, 0.01..=2.0)
-                .step_by(0.01)
-                .suffix(" s"));
+            ui.add(
+                egui::Slider::new(&mut self.params.delay_time, 0.01..=2.0)
+                    .step_by(0.01)
+                    .suffix(" s"),
+            );
         });
         ui.horizontal(|ui| {
             ui.label("feedback:");
-            ui.add(egui::Slider::new(&mut self.params.delay_feedback, 0.0..=0.95)
-                .step_by(0.01));
+            ui.add(egui::Slider::new(&mut self.params.delay_feedback, 0.0..=0.95).step_by(0.01));
         });
         ui.horizontal(|ui| {
             ui.label("amount:");
-            ui.add(egui::Slider::new(&mut self.params.delay_amount, 0.0..=1.0)
-                .step_by(0.01));
+            ui.add(egui::Slider::new(&mut self.params.delay_amount, 0.0..=1.0).step_by(0.01));
         });
     }
 
@@ -406,9 +481,11 @@ impl SynthApp {
 
         ui.horizontal(|ui| {
             ui.label("rate:");
-            ui.add(egui::Slider::new(&mut self.params.arp_rate, 60.0..=240.0)
-                .step_by(1.0)
-                .suffix(" BPM"));
+            ui.add(
+                egui::Slider::new(&mut self.params.arp_rate, 60.0..=240.0)
+                    .step_by(1.0)
+                    .suffix(" BPM"),
+            );
         });
 
         ui.horizontal(|ui| {
@@ -435,15 +512,13 @@ impl SynthApp {
         ui.horizontal(|ui| {
             ui.label("octaves:");
             let mut octaves_f32 = self.params.arp_octaves as f32;
-            ui.add(egui::Slider::new(&mut octaves_f32, 1.0..=4.0)
-                .step_by(1.0));
+            ui.add(egui::Slider::new(&mut octaves_f32, 1.0..=4.0).step_by(1.0));
             self.params.arp_octaves = octaves_f32 as u8;
         });
 
         ui.horizontal(|ui| {
             ui.label("gate:");
-            ui.add(egui::Slider::new(&mut self.params.arp_gate_length, 0.1..=1.0)
-                .step_by(0.01));
+            ui.add(egui::Slider::new(&mut self.params.arp_gate_length, 0.1..=1.0).step_by(0.01));
         });
     }
 
@@ -468,11 +543,14 @@ impl SynthApp {
             ui.add(
                 egui::TextEdit::singleline(&mut self.new_preset_name)
                     .hint_text("Enter name...")
-                    .desired_width(80.0)
+                    .desired_width(80.0),
             );
 
             let save_enabled = !self.new_preset_name.is_empty();
-            if ui.add_enabled(save_enabled, egui::Button::new("Save")).clicked() {
+            if ui
+                .add_enabled(save_enabled, egui::Button::new("Save"))
+                .clicked()
+            {
                 let mut temp_synth = Synthesizer::new();
                 temp_synth.apply_params(&self.params);
                 if let Err(e) = temp_synth.save_preset(&self.new_preset_name) {
@@ -563,13 +641,17 @@ impl SynthApp {
     fn draw_keyboard_legend(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("OCTAVE: {}", self.current_octave))
-                    .size(14.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(255, 255, 100)));
-                ui.label(egui::RichText::new("(UP/DOWN arrows to change)")
-                    .size(10.0)
-                    .color(egui::Color32::GRAY));
+                ui.label(
+                    egui::RichText::new(format!("OCTAVE: {}", self.current_octave))
+                        .size(14.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(255, 255, 100)),
+                );
+                ui.label(
+                    egui::RichText::new("(UP/DOWN arrows to change)")
+                        .size(10.0)
+                        .color(egui::Color32::GRAY),
+                );
             });
 
             ui.add_space(8.0);
@@ -577,40 +659,54 @@ impl SynthApp {
             // Keyboard mapping legend
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("WHITE KEYS:")
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::WHITE));
+                    ui.label(
+                        egui::RichText::new("LOWER (Z-M):")
+                            .size(11.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
                     ui.horizontal(|ui| {
-                        ui.label("A=C");
-                        ui.label("S=D");
-                        ui.label("D=E");
-                        ui.label("F=F");
-                        ui.label("G=G");
-                        ui.label("H=A");
-                        ui.label("J=B");
-                        ui.label("K=C+");
-                        ui.label("L=D+");
-                        ui.label("N=E+");
+                        ui.label("Z=C");
+                        ui.label("X=D");
+                        ui.label("C=E");
+                        ui.label("V=F");
+                        ui.label("B=G");
+                        ui.label("N=A");
+                        ui.label("M=B");
                     });
+                    ui.label(
+                        egui::RichText::new("  S=C# D=D# G=F# H=G# J=A#")
+                            .size(10.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
                 });
 
                 ui.separator();
 
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("BLACK KEYS:")
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::LIGHT_GRAY));
+                    ui.label(
+                        egui::RichText::new("UPPER (Q-P):")
+                            .size(11.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
                     ui.horizontal(|ui| {
-                        ui.label("W=C#");
-                        ui.label("E=D#");
-                        ui.label("T=F#");
-                        ui.label("Y=G#");
-                        ui.label("U=A#");
-                        ui.label("O=C#+");
-                        ui.label("P=D#+");
+                        ui.label("Q=C");
+                        ui.label("W=D");
+                        ui.label("E=E");
+                        ui.label("R=F");
+                        ui.label("T=G");
+                        ui.label("Y=A");
+                        ui.label("U=B");
+                        ui.label("I=C+");
+                        ui.label("O=D+");
+                        ui.label("P=E+");
                     });
+                    ui.label(
+                        egui::RichText::new("  2=C# 3=D# 5=F# 6=G# 7=A# 9=C#+ 0=D#+")
+                            .size(10.0)
+                            .color(egui::Color32::LIGHT_GRAY),
+                    );
                 });
             });
 
@@ -619,10 +715,12 @@ impl SynthApp {
             // Controls legend
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("CONTROLS:")
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(100, 255, 100)));
+                    ui.label(
+                        egui::RichText::new("CONTROLS:")
+                            .size(11.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(100, 255, 100)),
+                    );
                     ui.label("Up/Down = Change octave");
                     ui.label("Hold key = Sustain note");
                     ui.label("Release key = Note off");
@@ -631,13 +729,15 @@ impl SynthApp {
                 ui.separator();
 
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("RANGE:")
-                        .size(11.0)
-                        .strong()
-                        .color(egui::Color32::from_rgb(255, 200, 100)));
-                    ui.label("Current: 1.5 octaves");
+                    ui.label(
+                        egui::RichText::new("RANGE:")
+                            .size(11.0)
+                            .strong()
+                            .color(egui::Color32::from_rgb(255, 200, 100)),
+                    );
+                    ui.label("Current: 2.5 octaves");
                     ui.label("Total: C0 to B8");
-                    ui.label("Default: Octave 4");
+                    ui.label("Default: Octave 3");
                 });
             });
         });
@@ -659,25 +759,40 @@ impl eframe::App for SynthApp {
                 self.current_octave = (self.current_octave - 1).clamp(0, 8);
             }
 
-            // Map keyboard keys to note offsets (1.5 octaves: A to semicolon)
+            // Lower octave: Z-M row (white keys) + S,D,G,H,J (black keys)
+            // Upper octave: Q-P row (white keys) + 2,3,5,6,7 (black keys)
             let key_map = [
-                (egui::Key::A, 0),   // C
-                (egui::Key::W, 1),   // C#
-                (egui::Key::S, 2),   // D
-                (egui::Key::E, 3),   // D#
-                (egui::Key::D, 4),   // E
-                (egui::Key::F, 5),   // F
-                (egui::Key::T, 6),   // F#
-                (egui::Key::G, 7),   // G
-                (egui::Key::Y, 8),   // G#
-                (egui::Key::H, 9),   // A
-                (egui::Key::U, 10),  // A#
-                (egui::Key::J, 11),  // B
-                (egui::Key::K, 12),  // C (next octave)
-                (egui::Key::O, 13),  // C# (next octave)
-                (egui::Key::L, 14),  // D (next octave)
-                (egui::Key::P, 15),  // D# (next octave)
-                (egui::Key::Semicolon, 16), // E (next octave)
+                // Lower octave (Z row)
+                (egui::Key::Z, 0),  // C
+                (egui::Key::S, 1),  // C#
+                (egui::Key::X, 2),  // D
+                (egui::Key::D, 3),  // D#
+                (egui::Key::C, 4),  // E
+                (egui::Key::V, 5),  // F
+                (egui::Key::G, 6),  // F#
+                (egui::Key::B, 7),  // G
+                (egui::Key::H, 8),  // G#
+                (egui::Key::N, 9),  // A
+                (egui::Key::J, 10), // A#
+                (egui::Key::M, 11), // B
+                // Upper octave (Q row)
+                (egui::Key::Q, 12),    // C
+                (egui::Key::Num2, 13), // C#
+                (egui::Key::W, 14),    // D
+                (egui::Key::Num3, 15), // D#
+                (egui::Key::E, 16),    // E
+                (egui::Key::R, 17),    // F
+                (egui::Key::Num5, 18), // F#
+                (egui::Key::T, 19),    // G
+                (egui::Key::Num6, 20), // G#
+                (egui::Key::Y, 21),    // A
+                (egui::Key::Num7, 22), // A#
+                (egui::Key::U, 23),    // B
+                (egui::Key::I, 24),    // C (next)
+                (egui::Key::Num9, 25), // C# (next)
+                (egui::Key::O, 26),    // D (next)
+                (egui::Key::Num0, 27), // D# (next)
+                (egui::Key::P, 28),    // E (next)
             ];
 
             let now = std::time::Instant::now();
@@ -715,9 +830,11 @@ impl eframe::App for SynthApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             // Compact Vintage Analog Style Header
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("PROPHET-5 SYNTHESIZER")
-                    .size(18.0)
-                    .strong());
+                ui.label(
+                    egui::RichText::new("PROPHET-5 SYNTHESIZER")
+                        .size(18.0)
+                        .strong(),
+                );
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self._midi_handler.is_some() {
@@ -736,15 +853,12 @@ impl eframe::App for SynthApp {
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-
                 // CLEAN 4-COLUMN LAYOUT - All vertical organization
                 ui.columns(4, |columns| {
                     // COLUMN 1 - Sound Generation A
                     columns[0].group(|ui| {
                         ui.set_min_width(185.0);
-                        ui.label(egui::RichText::new("OSCILLATOR A")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("OSCILLATOR A").size(11.0).strong());
                         self.draw_vintage_oscillator_panel(ui, 1);
                     });
 
@@ -753,11 +867,8 @@ impl eframe::App for SynthApp {
                     columns[0].group(|ui| {
                         ui.set_min_width(185.0);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("FILTER")
-                                .size(11.0)
-                                .strong());
-                            ui.label(egui::RichText::new("24dB")
-                                .size(9.0));
+                            ui.label(egui::RichText::new("FILTER").size(11.0).strong());
+                            ui.label(egui::RichText::new("24dB").size(9.0));
                         });
                         self.draw_prophet_filter_panel(ui);
                     });
@@ -765,9 +876,7 @@ impl eframe::App for SynthApp {
                     // COLUMN 2 - Sound Generation B
                     columns[1].group(|ui| {
                         ui.set_min_width(185.0);
-                        ui.label(egui::RichText::new("OSCILLATOR B")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("OSCILLATOR B").size(11.0).strong());
                         self.draw_vintage_oscillator_panel(ui, 2);
                     });
 
@@ -775,18 +884,14 @@ impl eframe::App for SynthApp {
 
                     columns[1].group(|ui| {
                         ui.set_min_width(185.0);
-                        ui.label(egui::RichText::new("LFO")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("LFO").size(11.0).strong());
                         self.draw_vintage_lfo_panel(ui);
                     });
 
                     // COLUMN 3 - Envelopes & Mix
                     columns[2].group(|ui| {
                         ui.set_min_width(150.0);
-                        ui.label(egui::RichText::new("AMP ENV")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("AMP ENV").size(11.0).strong());
                         self.draw_amp_envelope_panel(ui);
                     });
 
@@ -794,9 +899,7 @@ impl eframe::App for SynthApp {
 
                     columns[2].group(|ui| {
                         ui.set_min_width(150.0);
-                        ui.label(egui::RichText::new("FILTER ENV")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("FILTER ENV").size(11.0).strong());
                         self.draw_filter_envelope_panel(ui);
                     });
 
@@ -804,18 +907,14 @@ impl eframe::App for SynthApp {
 
                     columns[2].group(|ui| {
                         ui.set_min_width(150.0);
-                        ui.label(egui::RichText::new("MIXER")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("MIXER").size(11.0).strong());
                         self.draw_mixer_panel(ui);
                     });
 
                     // COLUMN 4 - Performance & Utilities
                     columns[3].group(|ui| {
                         ui.set_min_width(125.0);
-                        ui.label(egui::RichText::new("CURRENT PRESET")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("CURRENT PRESET").size(11.0).strong());
                         ui.label(if self.current_preset_name.is_empty() {
                             "Default"
                         } else {
@@ -827,9 +926,7 @@ impl eframe::App for SynthApp {
 
                     columns[3].group(|ui| {
                         ui.set_min_width(125.0);
-                        ui.label(egui::RichText::new("MASTER")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("MASTER").size(11.0).strong());
                         self.draw_master_panel(ui);
                     });
 
@@ -837,9 +934,7 @@ impl eframe::App for SynthApp {
 
                     columns[3].group(|ui| {
                         ui.set_min_width(125.0);
-                        ui.label(egui::RichText::new("EFFECTS")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("EFFECTS").size(11.0).strong());
                         self.draw_effects_panel(ui);
                     });
 
@@ -847,9 +942,7 @@ impl eframe::App for SynthApp {
 
                     columns[3].group(|ui| {
                         ui.set_min_width(125.0);
-                        ui.label(egui::RichText::new("ARP")
-                            .size(11.0)
-                            .strong());
+                        ui.label(egui::RichText::new("ARP").size(11.0).strong());
                         self.draw_arpeggiator_panel(ui);
                     });
 
@@ -863,10 +956,12 @@ impl eframe::App for SynthApp {
 
                 // KEYBOARD LEGEND SECTION - Compact
                 ui.group(|ui| {
-                    ui.label(egui::RichText::new("KEYBOARD")
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(200, 200, 200))
-                        .strong());
+                    ui.label(
+                        egui::RichText::new("KEYBOARD")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(200, 200, 200))
+                            .strong(),
+                    );
                     self.draw_keyboard_legend(ui);
                 });
             });
@@ -902,12 +997,11 @@ impl SynthApp {
     fn draw_midi_monitor(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("recent MIDI messages:");
-            if ui.button("clear").clicked() {
-                if let Some(ref midi_handler) = self._midi_handler {
-                    if let Ok(mut history) = midi_handler.message_history.lock() {
-                        history.clear();
-                    }
-                }
+            if ui.button("clear").clicked()
+                && let Some(ref midi_handler) = self._midi_handler
+                && let Ok(mut history) = midi_handler.message_history.lock()
+            {
+                history.clear();
             }
         });
 
@@ -919,7 +1013,8 @@ impl SynthApp {
                     .max_height(250.0)
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        for msg in history.iter().rev().take(20) { // Show last 20 messages
+                        for msg in history.iter().rev().take(20) {
+                            // Show last 20 messages
                             let elapsed = msg.timestamp.elapsed().as_millis();
                             let time_color = if elapsed < 100 {
                                 egui::Color32::GREEN
