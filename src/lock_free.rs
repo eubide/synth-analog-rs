@@ -1,52 +1,56 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::UnsafeCell;
 
 /// Lock-free triple buffer for real-time parameter updates
 /// GUI writes to one buffer, audio reads from another, third is for swapping
-#[allow(dead_code)]
+/// Single-writer, single-reader assumed.
 pub struct TripleBuffer<T: Clone> {
-    buffers: [T; 3],
+    buffers: UnsafeCell<[T; 3]>,
     write_index: AtomicUsize,
     read_index: AtomicUsize,
-    swap_requested: AtomicBool,
+    swap_index: AtomicUsize,
+    new_data: AtomicBool,
 }
 
 impl<T: Clone> TripleBuffer<T> {
     pub fn new(initial_value: T) -> Self {
         Self {
-            buffers: [initial_value.clone(), initial_value.clone(), initial_value],
+            buffers: UnsafeCell::new([initial_value.clone(), initial_value.clone(), initial_value]),
             write_index: AtomicUsize::new(0),
             read_index: AtomicUsize::new(1),
-            swap_requested: AtomicBool::new(false),
+            swap_index: AtomicUsize::new(2),
+            new_data: AtomicBool::new(false),
         }
     }
 
-    /// Non-blocking write for GUI thread
-    pub fn write(&mut self, data: T) {
+    /// Write new data (GUI thread only - single writer assumed)
+    pub fn write(&self, data: T) {
         let write_idx = self.write_index.load(Ordering::Relaxed);
-        self.buffers[write_idx] = data;
-        self.swap_requested.store(true, Ordering::Release);
+        unsafe {
+            (*self.buffers.get())[write_idx] = data;
+        }
+        // Swap write and swap buffers
+        let swap_idx = self.swap_index.swap(write_idx, Ordering::AcqRel);
+        self.write_index.store(swap_idx, Ordering::Release);
+        self.new_data.store(true, Ordering::Release);
     }
 
-    /// Lock-free read for audio thread
+    /// Lock-free read for audio thread (single reader assumed)
     pub fn read(&self) -> &T {
-        // Check if GUI requested a swap
-        if self
-            .swap_requested
-            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            // Swap read and write buffers
-            let old_read = self.read_index.load(Ordering::Relaxed);
-            let old_write = self.write_index.load(Ordering::Relaxed);
-
-            self.read_index.store(old_write, Ordering::Relaxed);
-            self.write_index.store(old_read, Ordering::Relaxed);
+        if self.new_data.compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            let swap_idx = self.swap_index.swap(
+                self.read_index.load(Ordering::Relaxed),
+                Ordering::AcqRel,
+            );
+            self.read_index.store(swap_idx, Ordering::Release);
         }
-
-        let read_idx = self.read_index.load(Ordering::Relaxed);
-        &self.buffers[read_idx]
+        let read_idx = self.read_index.load(Ordering::Acquire);
+        unsafe { &(*self.buffers.get())[read_idx] }
     }
 }
+
+unsafe impl<T: Clone + Send> Send for TripleBuffer<T> {}
+unsafe impl<T: Clone + Send> Sync for TripleBuffer<T> {}
 
 /// Real-time safe analog synthesizer parameters
 ///
@@ -206,7 +210,6 @@ impl Default for SynthParameters {
 }
 
 /// Lock-free synthesizer state for real-time audio processing
-#[allow(dead_code)]
 pub struct LockFreeSynth {
     pub params: TripleBuffer<SynthParameters>,
 
@@ -227,7 +230,7 @@ impl LockFreeSynth {
     }
 
     /// Update parameters (GUI thread)
-    pub fn set_params(&mut self, params: SynthParameters) {
+    pub fn set_params(&self, params: SynthParameters) {
         self.params.write(params);
     }
 
@@ -307,9 +310,6 @@ impl MidiEventQueue {
     }
 }
 
-unsafe impl<T: Clone + Send> Send for TripleBuffer<T> {}
-unsafe impl<T: Clone + Send> Sync for TripleBuffer<T> {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_triple_buffer_write_read() {
-        let mut buf = TripleBuffer::new(SynthParameters::default());
+        let buf = TripleBuffer::new(SynthParameters::default());
         let mut params = SynthParameters::default();
         params.master_volume = 0.42;
         buf.write(params);
