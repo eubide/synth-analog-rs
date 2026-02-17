@@ -1,17 +1,18 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Sample, SampleFormat, Stream, StreamConfig};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use cpal::{Sample, SampleFormat, Stream, StreamConfig};
+use std::sync::Arc;
 use crate::synthesizer::Synthesizer;
+use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue};
 
 pub struct AudioEngine {
     _stream: Stream,
-    _buffer: Arc<Mutex<Vec<f32>>>, // Pre-allocated buffer to avoid allocations
-    _underrun_counter: Arc<AtomicUsize>,
 }
 
 impl AudioEngine {
-    pub fn new(synthesizer: Arc<Mutex<Synthesizer>>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        lock_free_synth: Arc<LockFreeSynth>,
+        midi_events: Arc<MidiEventQueue>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
         let device = host.default_output_device()
             .ok_or("No output device available")?;
@@ -21,40 +22,36 @@ impl AudioEngine {
         let sample_rate = config.sample_rate().0;
         log::info!("Audio engine initialized with {} Hz sample rate", sample_rate);
 
-        // Pre-allocate buffer with maximum expected size (e.g., 1024 frames)
-        let buffer = Arc::new(Mutex::new(vec![0.0f32; 1024]));
-        let buffer_clone = buffer.clone();
-
-        let underrun_counter = Arc::new(AtomicUsize::new(0));
-        let underrun_clone = underrun_counter.clone();
-
         let stream = match config.sample_format() {
-            SampleFormat::F32 => Self::run::<f32>(&device, &config.into(), synthesizer, buffer_clone, underrun_clone)?,
-            SampleFormat::I16 => Self::run::<i16>(&device, &config.into(), synthesizer, buffer_clone, underrun_clone)?,
-            SampleFormat::U16 => Self::run::<u16>(&device, &config.into(), synthesizer, buffer_clone, underrun_clone)?,
+            SampleFormat::F32 => Self::run::<f32>(&device, &config.into(), lock_free_synth, midi_events, sample_rate)?,
+            SampleFormat::I16 => Self::run::<i16>(&device, &config.into(), lock_free_synth, midi_events, sample_rate)?,
+            SampleFormat::U16 => Self::run::<u16>(&device, &config.into(), lock_free_synth, midi_events, sample_rate)?,
             sample_format => return Err(format!("Unsupported sample format: {:?}", sample_format).into()),
         };
 
         stream.play().map_err(|e| format!("Failed to play stream: {}", e))?;
 
-        Ok(Self {
-            _stream: stream,
-            _buffer: buffer,
-            _underrun_counter: underrun_counter,
-        })
+        Ok(Self { _stream: stream })
     }
 
     fn run<T>(
-        device: &Device,
+        device: &cpal::Device,
         config: &StreamConfig,
-        synthesizer: Arc<Mutex<Synthesizer>>,
-        buffer: Arc<Mutex<Vec<f32>>>,
-        underrun_counter: Arc<AtomicUsize>,
+        lock_free_synth: Arc<LockFreeSynth>,
+        midi_events: Arc<MidiEventQueue>,
+        sample_rate: u32,
     ) -> Result<Stream, Box<dyn std::error::Error>>
     where
         T: Sample + cpal::SizedSample + cpal::FromSample<f32>,
     {
         let channels = config.channels as usize;
+
+        // Synthesizer lives exclusively in the audio thread
+        let mut synthesizer = Synthesizer::new();
+        synthesizer.sample_rate = sample_rate as f32;
+
+        // Pre-allocated mono buffer
+        let mut mono_buffer = vec![0.0f32; 1024];
 
         let err_fn = |err| log::error!("Audio stream error: {}", err);
 
@@ -62,7 +59,51 @@ impl AudioEngine {
             .build_output_stream(
                 config,
                 move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                    Self::write_data(data, channels, &synthesizer, &buffer, &underrun_counter)
+                    // 1. Process MIDI events
+                    for event in midi_events.drain() {
+                        match event {
+                            MidiEvent::NoteOn { note, velocity } => {
+                                synthesizer.note_on(note, velocity);
+                            }
+                            MidiEvent::NoteOff { note } => {
+                                synthesizer.note_off(note);
+                            }
+                            MidiEvent::SustainPedal { pressed: _pressed } => {
+                                // Sustain pedal - future enhancement
+                            }
+                        }
+                    }
+
+                    // 2. Apply parameters from GUI/MIDI (lock-free read)
+                    let params = lock_free_synth.get_params();
+                    synthesizer.apply_params(params);
+
+                    // 3. Process audio
+                    let frames = data.len() / channels;
+                    if mono_buffer.len() < frames {
+                        mono_buffer.resize(frames, 0.0);
+                    }
+                    for sample in mono_buffer.iter_mut().take(frames) {
+                        *sample = 0.0;
+                    }
+
+                    synthesizer.process_block(&mut mono_buffer[..frames]);
+
+                    // 4. Apply limiting
+                    for sample in mono_buffer.iter_mut().take(frames) {
+                        *sample = sample.clamp(-1.0, 1.0);
+                        *sample = Self::soft_limiter(*sample);
+                    }
+
+                    // 5. Convert mono to multi-channel
+                    for (frame_idx, &sample) in mono_buffer.iter().take(frames).enumerate() {
+                        for channel in 0..channels {
+                            let output_idx = frame_idx * channels + channel;
+                            if output_idx < data.len() {
+                                data[output_idx] = T::from_sample(sample);
+                            }
+                        }
+                    }
                 },
                 err_fn,
                 None,
@@ -72,68 +113,6 @@ impl AudioEngine {
         Ok(stream)
     }
 
-    fn write_data<T>(
-        output: &mut [T],
-        channels: usize,
-        synthesizer: &Arc<Mutex<Synthesizer>>,
-        buffer: &Arc<Mutex<Vec<f32>>>,
-        underrun_counter: &Arc<AtomicUsize>,
-    )
-    where
-        T: Sample + cpal::FromSample<f32>,
-    {
-        // Try to acquire locks with timeout to prevent blocking
-        let synth_result = synthesizer.try_lock();
-        let buffer_result = buffer.try_lock();
-
-        match (synth_result, buffer_result) {
-            (Ok(mut synth), Ok(mut mono_buffer)) => {
-                let frames = output.len() / channels;
-
-                // Resize pre-allocated buffer if needed (rare case)
-                if mono_buffer.len() < frames {
-                    mono_buffer.resize(frames, 0.0);
-                }
-
-                // Clear buffer and process audio
-                for sample in mono_buffer.iter_mut().take(frames) {
-                    *sample = 0.0;
-                }
-
-                synth.process_block(&mut mono_buffer[..frames]);
-
-                // Apply double limiting strategy for safety
-                for sample in mono_buffer.iter_mut().take(frames) {
-                    *sample = sample.clamp(-1.0, 1.0); // Hard limiter (first pass)
-                    *sample = Self::soft_limiter(*sample); // Soft limiter for better sound (second pass)
-                }
-
-                // Convert mono to multi-channel and write to output
-                for (frame_idx, &sample) in mono_buffer.iter().take(frames).enumerate() {
-                    for channel in 0..channels {
-                        let output_idx = frame_idx * channels + channel;
-                        if output_idx < output.len() {
-                            output[output_idx] = T::from_sample(sample);
-                        }
-                    }
-                }
-            },
-            _ => {
-                // Track underruns and log periodically
-                let underrun_count = underrun_counter.fetch_add(1, Ordering::Relaxed);
-                if underrun_count % 500 == 0 && underrun_count > 0 {
-                    log::warn!("AUDIO WARNING: {} buffer underruns detected", underrun_count);
-                }
-
-                // If we can't acquire locks, output silence to prevent audio glitches
-                for sample in output.iter_mut() {
-                    *sample = T::from_sample(0.0);
-                }
-            }
-        }
-    }
-    
-    // Soft limiter to prevent harsh clipping while maintaining audio integrity
     fn soft_limiter(x: f32) -> f32 {
         if x.abs() <= 0.8 {
             x
