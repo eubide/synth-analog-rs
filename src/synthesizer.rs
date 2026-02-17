@@ -2,6 +2,8 @@ use std::f32::consts::PI;
 use std::fs;
 use std::path::Path;
 
+use crate::optimization::OPTIMIZATION_TABLES;
+
 // Phase accumulator constants to prevent drift
 const PHASE_SCALE: u64 = 1u64 << 32; // 32-bit fractional phase
 const PHASE_MASK: u64 = PHASE_SCALE - 1;
@@ -512,8 +514,7 @@ impl Synthesizer {
     }
 
     pub fn note_to_frequency(note: u8) -> f32 {
-        // A4 = 69, 440 Hz
-        440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0)
+        OPTIMIZATION_TABLES.get_midi_frequency(note)
     }
     
     fn generate_lfo_waveform(waveform: LfoWaveform, phase: f32, sample_hold_value: f32) -> f32 {
@@ -725,7 +726,7 @@ impl Synthesizer {
     fn generate_oscillator_static(wave_type: WaveType, phase: f32, pulse_width: f32) -> f32 {
         let phase = phase % 1.0;
         match wave_type {
-            WaveType::Sine => (phase * 2.0 * PI).sin(),
+            WaveType::Sine => OPTIMIZATION_TABLES.fast_sin(phase * 2.0 * PI),
             WaveType::Square => {
                 // Pulse wave with variable width
                 if phase < pulse_width { 1.0 } else { -1.0 }
@@ -738,10 +739,10 @@ impl Synthesizer {
                 }
             },
             WaveType::Sawtooth => {
-                // Band-limited sawtooth using sin harmonics
+                // Band-limited sawtooth using sin harmonics (lookup table)
                 let mut output = 0.0;
                 for n in 1..=8 {
-                    output += (n as f32 * phase * 2.0 * PI).sin() / n as f32;
+                    output += OPTIMIZATION_TABLES.fast_sin(n as f32 * phase * 2.0 * PI) / n as f32;
                 }
                 -2.0 * output / PI
             },
@@ -2625,5 +2626,31 @@ mod tests {
         synth.apply_params(&params);
         assert!(!synth.voices.is_empty());
         assert!(synth.voices.iter().any(|v| v.note == 60 && v.is_active));
+    }
+
+    #[test]
+    fn test_note_to_frequency_matches_optimization_table() {
+        let freq = Synthesizer::note_to_frequency(69);
+        assert!((freq - 440.0).abs() < 0.01);
+        let freq = Synthesizer::note_to_frequency(60);
+        assert!((freq - 261.63).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_oscillator_sine_output_range() {
+        for i in 0..100 {
+            let phase = i as f32 / 100.0;
+            let output = Synthesizer::generate_oscillator_static(WaveType::Sine, phase, 0.5);
+            assert!(output >= -1.01 && output <= 1.01, "Sine at phase {} = {}", phase, output);
+        }
+    }
+
+    #[test]
+    fn test_oscillator_sawtooth_output_range() {
+        for i in 0..100 {
+            let phase = i as f32 / 100.0;
+            let output = Synthesizer::generate_oscillator_static(WaveType::Sawtooth, phase, 0.5);
+            assert!(output >= -1.5 && output <= 1.5, "Saw at phase {} = {}", phase, output);
+        }
     }
 }

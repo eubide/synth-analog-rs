@@ -1,7 +1,6 @@
 use std::f32::consts::PI;
 
 // Analog synthesizer lookup tables for performance optimization
-#[allow(dead_code)]
 pub struct OptimizationTables {
     sine_table: [f32; 4096],
     exp_table: [f32; 256],
@@ -144,6 +143,5 @@ impl OptimizationTables {
 
 // Global optimization tables instance
 lazy_static::lazy_static! {
-    #[allow(dead_code)]
     pub static ref OPTIMIZATION_TABLES: OptimizationTables = OptimizationTables::new();
 }
