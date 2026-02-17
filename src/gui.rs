@@ -816,11 +816,11 @@ impl eframe::App for SynthApp {
                         ui.label(egui::RichText::new("CURRENT PRESET")
                             .size(11.0)
                             .strong());
-                        ui.label(format!("{}", if self.current_preset_name.is_empty() {
-                            "Default".to_string()
+                        ui.label(if self.current_preset_name.is_empty() {
+                            "Default"
                         } else {
-                            self.current_preset_name.clone()
-                        }));
+                            &self.current_preset_name
+                        });
                     });
 
                     columns[3].add_space(2.0);

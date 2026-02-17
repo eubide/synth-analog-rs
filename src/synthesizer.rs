@@ -2580,8 +2580,6 @@ impl Synthesizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lock_free::SynthParameters;
-
     #[test]
     fn test_to_synth_params_roundtrip() {
         let synth = Synthesizer::new();

@@ -104,6 +104,7 @@ impl OptimizationTables {
     }
 
     // Fast exponential lookup for envelope values
+    #[allow(dead_code)]
     pub fn fast_exp(&self, value: f32) -> f32 {
         let clamped = value.clamp(0.0, 1.0);
         let index = (clamped * 255.0) as usize;
@@ -120,6 +121,7 @@ impl OptimizationTables {
     }
 
     // Get pre-calculated voice scaling factor for polyphony
+    #[allow(dead_code)]
     pub fn get_voice_scale(&self, voice_count: usize) -> f32 {
         if voice_count <= 16 {
             self.voice_scale_table[voice_count]
@@ -130,6 +132,7 @@ impl OptimizationTables {
     }
 
     // Convert envelope time (0.0-1.0) to time multiplier for sample-based processing
+    #[allow(dead_code)]
     pub fn envelope_time_to_multiplier(&self, time: f32, sample_rate: f32) -> f32 {
         if time == 0.0 {
             0.0001 // Very fast

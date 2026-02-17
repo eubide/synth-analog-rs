@@ -210,6 +210,7 @@ impl Default for SynthParameters {
 }
 
 /// Lock-free synthesizer state for real-time audio processing
+#[allow(dead_code)]
 pub struct LockFreeSynth {
     pub params: TripleBuffer<SynthParameters>,
 
@@ -219,6 +220,7 @@ pub struct LockFreeSynth {
     pub mono_mode: AtomicBool,
 }
 
+#[allow(dead_code)]
 impl LockFreeSynth {
     pub fn new() -> Self {
         Self {
@@ -353,8 +355,7 @@ mod tests {
     #[test]
     fn test_triple_buffer_write_read() {
         let buf = TripleBuffer::new(SynthParameters::default());
-        let mut params = SynthParameters::default();
-        params.master_volume = 0.42;
+        let params = SynthParameters { master_volume: 0.42, ..SynthParameters::default() };
         buf.write(params);
         let read = buf.read();
         assert_eq!(read.master_volume, 0.42);
