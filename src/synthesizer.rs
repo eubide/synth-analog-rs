@@ -2405,4 +2405,225 @@ impl Synthesizer {
         self.save_preset("Vintage Strings")
     }
 
+    /// Extract current parameters as a flat SynthParameters struct
+    pub fn to_synth_params(&self) -> crate::lock_free::SynthParameters {
+        crate::lock_free::SynthParameters {
+            osc1_waveform: Self::wave_type_to_u8_pub(self.osc1.wave_type),
+            osc2_waveform: Self::wave_type_to_u8_pub(self.osc2.wave_type),
+            osc1_level: self.osc1.amplitude,
+            osc2_level: self.osc2.amplitude,
+            osc1_detune: self.osc1.detune,
+            osc2_detune: self.osc2.detune,
+            osc1_pulse_width: self.osc1.pulse_width,
+            osc2_pulse_width: self.osc2.pulse_width,
+            osc2_sync: self.osc2_sync,
+            mixer_osc1_level: self.mixer.osc1_level,
+            mixer_osc2_level: self.mixer.osc2_level,
+            noise_level: self.mixer.noise_level,
+            filter_cutoff: self.filter.cutoff,
+            filter_resonance: self.filter.resonance,
+            filter_envelope_amount: self.filter.envelope_amount,
+            filter_keyboard_tracking: self.filter.keyboard_tracking,
+            amp_attack: self.amp_envelope.attack,
+            amp_decay: self.amp_envelope.decay,
+            amp_sustain: self.amp_envelope.sustain,
+            amp_release: self.amp_envelope.release,
+            filter_attack: self.filter_envelope.attack,
+            filter_decay: self.filter_envelope.decay,
+            filter_sustain: self.filter_envelope.sustain,
+            filter_release: self.filter_envelope.release,
+            lfo_rate: self.lfo.frequency,
+            lfo_amount: self.lfo.amplitude,
+            lfo_waveform: Self::lfo_waveform_to_u8_pub(self.lfo.waveform),
+            lfo_sync: self.lfo.sync,
+            lfo_target_osc1_pitch: self.lfo.target_osc1_pitch,
+            lfo_target_osc2_pitch: self.lfo.target_osc2_pitch,
+            lfo_target_filter: self.lfo.target_filter,
+            lfo_target_amplitude: self.lfo.target_amplitude,
+            lfo_to_cutoff: self.modulation_matrix.lfo_to_cutoff,
+            lfo_to_resonance: self.modulation_matrix.lfo_to_resonance,
+            lfo_to_osc1_pitch: self.modulation_matrix.lfo_to_osc1_pitch,
+            lfo_to_osc2_pitch: self.modulation_matrix.lfo_to_osc2_pitch,
+            lfo_to_amplitude: self.modulation_matrix.lfo_to_amplitude,
+            velocity_to_cutoff: self.modulation_matrix.velocity_to_cutoff,
+            velocity_to_amplitude: self.modulation_matrix.velocity_to_amplitude,
+            reverb_amount: self.effects.reverb_amount,
+            reverb_size: self.effects.reverb_size,
+            delay_time: self.effects.delay_time,
+            delay_feedback: self.effects.delay_feedback,
+            delay_amount: self.effects.delay_amount,
+            arp_enabled: self.arpeggiator.enabled,
+            arp_rate: self.arpeggiator.rate,
+            arp_pattern: Self::arp_pattern_to_u8_pub(self.arpeggiator.pattern),
+            arp_octaves: self.arpeggiator.octaves,
+            arp_gate_length: self.arpeggiator.gate_length,
+            master_volume: self.master_volume,
+        }
+    }
+
+    /// Apply flat SynthParameters to the synthesizer's nested structures
+    /// Does NOT touch voice state, buffers, or LFO phase
+    pub fn apply_params(&mut self, params: &crate::lock_free::SynthParameters) {
+        self.osc1.wave_type = Self::u8_to_wave_type_pub(params.osc1_waveform);
+        self.osc2.wave_type = Self::u8_to_wave_type_pub(params.osc2_waveform);
+        self.osc1.amplitude = params.osc1_level;
+        self.osc2.amplitude = params.osc2_level;
+        self.osc1.detune = params.osc1_detune;
+        self.osc2.detune = params.osc2_detune;
+        self.osc1.pulse_width = params.osc1_pulse_width;
+        self.osc2.pulse_width = params.osc2_pulse_width;
+        self.osc2_sync = params.osc2_sync;
+        self.mixer.osc1_level = params.mixer_osc1_level;
+        self.mixer.osc2_level = params.mixer_osc2_level;
+        self.mixer.noise_level = params.noise_level;
+        self.filter.cutoff = params.filter_cutoff;
+        self.filter.resonance = params.filter_resonance;
+        self.filter.envelope_amount = params.filter_envelope_amount;
+        self.filter.keyboard_tracking = params.filter_keyboard_tracking;
+        self.amp_envelope.attack = params.amp_attack;
+        self.amp_envelope.decay = params.amp_decay;
+        self.amp_envelope.sustain = params.amp_sustain;
+        self.amp_envelope.release = params.amp_release;
+        self.filter_envelope.attack = params.filter_attack;
+        self.filter_envelope.decay = params.filter_decay;
+        self.filter_envelope.sustain = params.filter_sustain;
+        self.filter_envelope.release = params.filter_release;
+        self.lfo.frequency = params.lfo_rate;
+        self.lfo.amplitude = params.lfo_amount;
+        self.lfo.waveform = Self::u8_to_lfo_waveform_pub(params.lfo_waveform);
+        self.lfo.sync = params.lfo_sync;
+        self.lfo.target_osc1_pitch = params.lfo_target_osc1_pitch;
+        self.lfo.target_osc2_pitch = params.lfo_target_osc2_pitch;
+        self.lfo.target_filter = params.lfo_target_filter;
+        self.lfo.target_amplitude = params.lfo_target_amplitude;
+        self.modulation_matrix.lfo_to_cutoff = params.lfo_to_cutoff;
+        self.modulation_matrix.lfo_to_resonance = params.lfo_to_resonance;
+        self.modulation_matrix.lfo_to_osc1_pitch = params.lfo_to_osc1_pitch;
+        self.modulation_matrix.lfo_to_osc2_pitch = params.lfo_to_osc2_pitch;
+        self.modulation_matrix.lfo_to_amplitude = params.lfo_to_amplitude;
+        self.modulation_matrix.velocity_to_cutoff = params.velocity_to_cutoff;
+        self.modulation_matrix.velocity_to_amplitude = params.velocity_to_amplitude;
+        self.effects.reverb_amount = params.reverb_amount;
+        self.effects.reverb_size = params.reverb_size;
+        self.effects.delay_time = params.delay_time;
+        self.effects.delay_feedback = params.delay_feedback;
+        self.effects.delay_amount = params.delay_amount;
+        self.arpeggiator.enabled = params.arp_enabled;
+        self.arpeggiator.rate = params.arp_rate;
+        self.arpeggiator.pattern = Self::u8_to_arp_pattern_pub(params.arp_pattern);
+        self.arpeggiator.octaves = params.arp_octaves;
+        self.arpeggiator.gate_length = params.arp_gate_length;
+        self.master_volume = params.master_volume;
+    }
+
+    pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {
+        match wt {
+            WaveType::Sine => 0,
+            WaveType::Square => 1,
+            WaveType::Triangle => 2,
+            WaveType::Sawtooth => 3,
+        }
+    }
+
+    pub fn u8_to_wave_type_pub(v: u8) -> WaveType {
+        match v {
+            0 => WaveType::Sine,
+            1 => WaveType::Square,
+            2 => WaveType::Triangle,
+            3 => WaveType::Sawtooth,
+            _ => WaveType::Sawtooth,
+        }
+    }
+
+    pub fn lfo_waveform_to_u8_pub(wf: LfoWaveform) -> u8 {
+        match wf {
+            LfoWaveform::Triangle => 0,
+            LfoWaveform::Square => 1,
+            LfoWaveform::Sawtooth => 2,
+            LfoWaveform::ReverseSawtooth => 3,
+            LfoWaveform::SampleAndHold => 4,
+        }
+    }
+
+    pub fn u8_to_lfo_waveform_pub(v: u8) -> LfoWaveform {
+        match v {
+            0 => LfoWaveform::Triangle,
+            1 => LfoWaveform::Square,
+            2 => LfoWaveform::Sawtooth,
+            3 => LfoWaveform::ReverseSawtooth,
+            4 => LfoWaveform::SampleAndHold,
+            _ => LfoWaveform::Triangle,
+        }
+    }
+
+    pub fn arp_pattern_to_u8_pub(p: ArpPattern) -> u8 {
+        match p {
+            ArpPattern::Up => 0,
+            ArpPattern::Down => 1,
+            ArpPattern::UpDown => 2,
+            ArpPattern::Random => 3,
+        }
+    }
+
+    pub fn u8_to_arp_pattern_pub(v: u8) -> ArpPattern {
+        match v {
+            0 => ArpPattern::Up,
+            1 => ArpPattern::Down,
+            2 => ArpPattern::UpDown,
+            3 => ArpPattern::Random,
+            _ => ArpPattern::Up,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lock_free::SynthParameters;
+
+    #[test]
+    fn test_to_synth_params_roundtrip() {
+        let synth = Synthesizer::new();
+        let params = synth.to_synth_params();
+        assert_eq!(params.master_volume, synth.master_volume);
+        assert_eq!(params.filter_cutoff, synth.filter.cutoff);
+        assert_eq!(params.filter_resonance, synth.filter.resonance);
+        assert_eq!(params.osc1_detune, synth.osc1.detune);
+        assert_eq!(params.amp_attack, synth.amp_envelope.attack);
+        assert_eq!(params.lfo_rate, synth.lfo.frequency);
+        assert_eq!(params.reverb_amount, synth.effects.reverb_amount);
+        assert!(!params.arp_enabled);
+    }
+
+    #[test]
+    fn test_apply_params_updates_synthesizer() {
+        let mut synth = Synthesizer::new();
+        let mut params = synth.to_synth_params();
+        params.master_volume = 0.9;
+        params.filter_cutoff = 5000.0;
+        params.osc1_waveform = 0; // Sine
+        params.arp_enabled = true;
+        params.arp_rate = 180.0;
+        params.lfo_sync = true;
+        params.delay_amount = 0.5;
+        synth.apply_params(&params);
+        assert_eq!(synth.master_volume, 0.9);
+        assert_eq!(synth.filter.cutoff, 5000.0);
+        assert_eq!(synth.osc1.wave_type, WaveType::Sine);
+        assert!(synth.arpeggiator.enabled);
+        assert_eq!(synth.arpeggiator.rate, 180.0);
+        assert!(synth.lfo.sync);
+        assert_eq!(synth.effects.delay_amount, 0.5);
+    }
+
+    #[test]
+    fn test_apply_params_preserves_voice_state() {
+        let mut synth = Synthesizer::new();
+        synth.note_on(60, 100);
+        assert!(!synth.voices.is_empty());
+        let params = synth.to_synth_params();
+        synth.apply_params(&params);
+        assert!(!synth.voices.is_empty());
+        assert!(synth.voices.iter().any(|v| v.note == 60 && v.is_active));
+    }
 }
