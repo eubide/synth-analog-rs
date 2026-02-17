@@ -269,6 +269,44 @@ impl LockFreeSynth {
     }
 }
 
+/// Discrete MIDI events that need guaranteed delivery (not continuous params)
+#[derive(Debug, Clone)]
+pub enum MidiEvent {
+    NoteOn { note: u8, velocity: u8 },
+    NoteOff { note: u8 },
+    SustainPedal { pressed: bool },
+}
+
+/// Lightweight event queue for MIDI note events
+/// Uses Mutex because note events are infrequent (human-speed, not audio-rate)
+pub struct MidiEventQueue {
+    events: std::sync::Mutex<Vec<MidiEvent>>,
+}
+
+impl MidiEventQueue {
+    pub fn new() -> Self {
+        Self {
+            events: std::sync::Mutex::new(Vec::with_capacity(32)),
+        }
+    }
+
+    /// Push an event (called from MIDI/GUI thread)
+    pub fn push(&self, event: MidiEvent) {
+        if let Ok(mut events) = self.events.lock() {
+            events.push(event);
+        }
+    }
+
+    /// Drain all events (called from audio thread at start of each block)
+    pub fn drain(&self) -> Vec<MidiEvent> {
+        if let Ok(mut events) = self.events.lock() {
+            std::mem::take(&mut *events)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 unsafe impl<T: Clone + Send> Send for TripleBuffer<T> {}
 unsafe impl<T: Clone + Send> Sync for TripleBuffer<T> {}
 
@@ -329,5 +367,22 @@ mod tests {
         synth.request_panic();
         assert!(synth.check_panic_request());
         assert!(!synth.check_panic_request());
+    }
+
+    #[test]
+    fn test_midi_event_queue() {
+        let queue = MidiEventQueue::new();
+        queue.push(MidiEvent::NoteOn { note: 60, velocity: 100 });
+        queue.push(MidiEvent::NoteOff { note: 60 });
+        queue.push(MidiEvent::SustainPedal { pressed: true });
+
+        let events = queue.drain();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], MidiEvent::NoteOn { note: 60, velocity: 100 }));
+        assert!(matches!(events[1], MidiEvent::NoteOff { note: 60 }));
+        assert!(matches!(events[2], MidiEvent::SustainPedal { pressed: true }));
+
+        let events = queue.drain();
+        assert!(events.is_empty());
     }
 }
