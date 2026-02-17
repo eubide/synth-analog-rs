@@ -49,74 +49,158 @@ impl<T: Clone> TripleBuffer<T> {
 }
 
 /// Real-time safe analog synthesizer parameters
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
+///
+/// Covers ALL parameters from the Synthesizer engine so this struct can serve
+/// as the single data payload for lock-free parameter passing between the GUI
+/// and audio threads.
+#[derive(Debug, Clone, Copy)]
 pub struct SynthParameters {
-    // Global controls
-    pub master_volume: f32,
-    pub master_tune: f32,
-
     // Oscillator parameters
-    pub osc1_waveform: u8, // 0=sine, 1=saw, 2=square, 3=triangle
+    // Waveforms: 0=Sine, 1=Square, 2=Triangle, 3=Sawtooth
+    pub osc1_waveform: u8,
     pub osc2_waveform: u8,
     pub osc1_level: f32,
     pub osc2_level: f32,
     pub osc1_detune: f32,
     pub osc2_detune: f32,
-    pub osc_mix: f32,
+    pub osc1_pulse_width: f32,
+    pub osc2_pulse_width: f32,
+    pub osc2_sync: bool,
+
+    // Mixer
+    pub mixer_osc1_level: f32,
+    pub mixer_osc2_level: f32,
+    pub noise_level: f32,
 
     // Filter parameters
     pub filter_cutoff: f32,
     pub filter_resonance: f32,
     pub filter_envelope_amount: f32,
+    pub filter_keyboard_tracking: f32,
 
-    // Envelope parameters
+    // Amp envelope
     pub amp_attack: f32,
     pub amp_decay: f32,
     pub amp_sustain: f32,
     pub amp_release: f32,
 
+    // Filter envelope
     pub filter_attack: f32,
     pub filter_decay: f32,
     pub filter_sustain: f32,
     pub filter_release: f32,
 
     // LFO parameters
+    // Waveforms: 0=Triangle, 1=Square, 2=Sawtooth, 3=ReverseSawtooth, 4=SampleAndHold
     pub lfo_rate: f32,
     pub lfo_amount: f32,
+    pub lfo_waveform: u8,
+    pub lfo_sync: bool,
+    pub lfo_target_osc1_pitch: bool,
+    pub lfo_target_osc2_pitch: bool,
+    pub lfo_target_filter: bool,
+    pub lfo_target_amplitude: bool,
+
+    // Modulation matrix
+    pub lfo_to_cutoff: f32,
+    pub lfo_to_resonance: f32,
+    pub lfo_to_osc1_pitch: f32,
+    pub lfo_to_osc2_pitch: f32,
+    pub lfo_to_amplitude: f32,
+    pub velocity_to_cutoff: f32,
+    pub velocity_to_amplitude: f32,
 
     // Effects
     pub reverb_amount: f32,
+    pub reverb_size: f32,
+    pub delay_time: f32,
+    pub delay_feedback: f32,
     pub delay_amount: f32,
+
+    // Arpeggiator
+    // Patterns: 0=Up, 1=Down, 2=UpDown, 3=Random
+    pub arp_enabled: bool,
+    pub arp_rate: f32,
+    pub arp_pattern: u8,
+    pub arp_octaves: u8,
+    pub arp_gate_length: f32,
+
+    // Global controls
+    pub master_volume: f32,
 }
 
 impl Default for SynthParameters {
     fn default() -> Self {
         Self {
-            master_volume: 0.7,
-            master_tune: 0.0,
-            osc1_waveform: 1, // Saw
-            osc2_waveform: 1, // Saw
+            // Oscillators – waveform 3 = Sawtooth (Prophet-5 default)
+            osc1_waveform: 3,
+            osc2_waveform: 3,
             osc1_level: 0.5,
             osc2_level: 0.5,
             osc1_detune: 0.0,
-            osc2_detune: 0.02, // Slight detune for richness
-            osc_mix: 0.5,
+            osc2_detune: 0.0,
+            osc1_pulse_width: 0.5,
+            osc2_pulse_width: 0.5,
+            osc2_sync: false,
+
+            // Mixer
+            mixer_osc1_level: 0.5,
+            mixer_osc2_level: 0.5,
+            noise_level: 0.0,
+
+            // Filter
             filter_cutoff: 1000.0,
-            filter_resonance: 0.5,
-            filter_envelope_amount: 0.5,
-            amp_attack: 0.01,
+            filter_resonance: 1.0,
+            filter_envelope_amount: 0.0,
+            filter_keyboard_tracking: 0.0,
+
+            // Amp envelope
+            amp_attack: 0.1,
             amp_decay: 0.3,
             amp_sustain: 0.7,
             amp_release: 0.5,
-            filter_attack: 0.01,
-            filter_decay: 0.5,
-            filter_sustain: 0.5,
-            filter_release: 1.0,
-            lfo_rate: 5.0,
-            lfo_amount: 0.0,
-            reverb_amount: 0.2,
+
+            // Filter envelope
+            filter_attack: 0.1,
+            filter_decay: 0.3,
+            filter_sustain: 0.7,
+            filter_release: 0.5,
+
+            // LFO – waveform 0 = Triangle
+            lfo_rate: 2.0,
+            lfo_amount: 0.1,
+            lfo_waveform: 0,
+            lfo_sync: false,
+            lfo_target_osc1_pitch: false,
+            lfo_target_osc2_pitch: false,
+            lfo_target_filter: false,
+            lfo_target_amplitude: false,
+
+            // Modulation matrix
+            lfo_to_cutoff: 0.0,
+            lfo_to_resonance: 0.0,
+            lfo_to_osc1_pitch: 0.0,
+            lfo_to_osc2_pitch: 0.0,
+            lfo_to_amplitude: 0.0,
+            velocity_to_cutoff: 0.0,
+            velocity_to_amplitude: 0.5,
+
+            // Effects
+            reverb_amount: 0.0,
+            reverb_size: 0.5,
+            delay_time: 0.25,
+            delay_feedback: 0.3,
             delay_amount: 0.0,
+
+            // Arpeggiator
+            arp_enabled: false,
+            arp_rate: 120.0,
+            arp_pattern: 0,
+            arp_octaves: 1,
+            arp_gate_length: 0.8,
+
+            // Global
+            master_volume: 0.5,
         }
     }
 }
@@ -187,3 +271,63 @@ impl LockFreeSynth {
 
 unsafe impl<T: Clone + Send> Send for TripleBuffer<T> {}
 unsafe impl<T: Clone + Send> Sync for TripleBuffer<T> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_synth_parameters_default_matches_synthesizer_defaults() {
+        let params = SynthParameters::default();
+        assert_eq!(params.osc1_waveform, 3);
+        assert_eq!(params.osc2_waveform, 3);
+        assert_eq!(params.osc1_level, 0.5);
+        assert_eq!(params.osc2_level, 0.5);
+        assert_eq!(params.osc1_detune, 0.0);
+        assert_eq!(params.osc2_detune, 0.0);
+        assert_eq!(params.osc1_pulse_width, 0.5);
+        assert_eq!(params.osc2_pulse_width, 0.5);
+        assert!(!params.osc2_sync);
+        assert_eq!(params.noise_level, 0.0);
+        assert_eq!(params.filter_cutoff, 1000.0);
+        assert_eq!(params.filter_resonance, 1.0);
+        assert_eq!(params.filter_envelope_amount, 0.0);
+        assert_eq!(params.filter_keyboard_tracking, 0.0);
+        assert!((params.amp_attack - 0.1).abs() < 0.001);
+        assert!((params.amp_decay - 0.3).abs() < 0.001);
+        assert!((params.amp_sustain - 0.7).abs() < 0.001);
+        assert!((params.amp_release - 0.5).abs() < 0.001);
+        assert_eq!(params.master_volume, 0.5);
+        assert_eq!(params.lfo_waveform, 0);
+        assert!(!params.lfo_sync);
+        assert_eq!(params.velocity_to_amplitude, 0.5);
+        assert!(!params.arp_enabled);
+        assert_eq!(params.arp_rate, 120.0);
+    }
+
+    #[test]
+    fn test_synth_parameters_is_copy() {
+        let params = SynthParameters::default();
+        let copy = params;
+        assert_eq!(copy.master_volume, params.master_volume);
+    }
+
+    #[test]
+    fn test_triple_buffer_write_read() {
+        let mut buf = TripleBuffer::new(SynthParameters::default());
+        let mut params = SynthParameters::default();
+        params.master_volume = 0.42;
+        buf.write(params);
+        let read = buf.read();
+        assert_eq!(read.master_volume, 0.42);
+    }
+
+    #[test]
+    fn test_lock_free_synth_panic_request() {
+        let synth = LockFreeSynth::new();
+        assert!(!synth.check_panic_request());
+        synth.request_panic();
+        assert!(synth.check_panic_request());
+        assert!(!synth.check_panic_request());
+    }
+}
