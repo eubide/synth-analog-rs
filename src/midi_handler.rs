@@ -1,7 +1,7 @@
-use midir::{MidiInput, Ignore};
-use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
 use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue};
+use midir::{Ignore, MidiInput};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]
 pub struct MidiMessage {
@@ -35,17 +35,30 @@ impl MidiHandler {
         }
 
         for (i, port) in in_ports.iter().enumerate() {
-            log::info!("MIDI port {}: {}", i, midi_in.port_name(port).unwrap_or_else(|_| "Unknown".to_string()));
+            log::info!(
+                "MIDI port {}: {}",
+                i,
+                midi_in
+                    .port_name(port)
+                    .unwrap_or_else(|_| "Unknown".to_string())
+            );
         }
 
         let in_port = &in_ports[0];
-        let port_name = midi_in.port_name(in_port).unwrap_or_else(|_| "Unknown".to_string());
+        let port_name = midi_in
+            .port_name(in_port)
+            .unwrap_or_else(|_| "Unknown".to_string());
         log::info!("Connecting to MIDI port: {}", port_name);
 
         let history_clone = message_history.clone();
-        let connection = midi_in.connect(in_port, "synth-input", move |_stamp, message, _| {
-            Self::handle_midi_message(message, &lock_free_synth, &midi_events, &history_clone);
-        }, ())?;
+        let connection = midi_in.connect(
+            in_port,
+            "synth-input",
+            move |_stamp, message, _| {
+                Self::handle_midi_message(message, &lock_free_synth, &midi_events, &history_clone);
+            },
+            (),
+        )?;
 
         Ok(MidiHandler {
             _connection: Some(connection),
@@ -68,28 +81,68 @@ impl MidiHandler {
             let (msg_type, description) = match status & 0xF0 {
                 0x90 => {
                     if data2 > 0 {
-                        midi_events.push(MidiEvent::NoteOn { note: data1, velocity: data2 });
-                        ("Note On".to_string(), format!("Note: {} Vel: {} Ch: {}", Self::note_name(data1), data2, channel))
+                        midi_events.push(MidiEvent::NoteOn {
+                            note: data1,
+                            velocity: data2,
+                        });
+                        (
+                            "Note On".to_string(),
+                            format!(
+                                "Note: {} Vel: {} Ch: {}",
+                                Self::note_name(data1),
+                                data2,
+                                channel
+                            ),
+                        )
                     } else {
                         midi_events.push(MidiEvent::NoteOff { note: data1 });
-                        ("Note Off".to_string(), format!("Note: {} (vel 0) Ch: {}", Self::note_name(data1), channel))
+                        (
+                            "Note Off".to_string(),
+                            format!("Note: {} (vel 0) Ch: {}", Self::note_name(data1), channel),
+                        )
                     }
-                },
+                }
                 0x80 => {
                     midi_events.push(MidiEvent::NoteOff { note: data1 });
-                    ("Note Off".to_string(), format!("Note: {} Vel: {} Ch: {}", Self::note_name(data1), data2, channel))
-                },
+                    (
+                        "Note Off".to_string(),
+                        format!(
+                            "Note: {} Vel: {} Ch: {}",
+                            Self::note_name(data1),
+                            data2,
+                            channel
+                        ),
+                    )
+                }
                 0xB0 => {
                     Self::handle_cc_message(lock_free_synth, midi_events, data1, data2);
-                    ("CC".to_string(), format!("CC: {} Val: {} Ch: {}", data1, data2, channel))
-                },
-                0xC0 => ("Program".to_string(), format!("Program: {} Ch: {}", data1, channel)),
-                0xD0 => ("Pressure".to_string(), format!("Pressure: {} Ch: {}", data1, channel)),
+                    (
+                        "CC".to_string(),
+                        format!("CC: {} Val: {} Ch: {}", data1, data2, channel),
+                    )
+                }
+                0xC0 => (
+                    "Program".to_string(),
+                    format!("Program: {} Ch: {}", data1, channel),
+                ),
+                0xD0 => (
+                    "Pressure".to_string(),
+                    format!("Pressure: {} Ch: {}", data1, channel),
+                ),
                 0xE0 => {
                     let bend_value = ((data2 as u16) << 7) | (data1 as u16);
-                    ("Pitch Bend".to_string(), format!("Bend: {} Ch: {}", bend_value, channel))
-                },
-                _ => ("Unknown".to_string(), format!("Status: 0x{:02X} Data: {} {} Ch: {}", status, data1, data2, channel)),
+                    (
+                        "Pitch Bend".to_string(),
+                        format!("Bend: {} Ch: {}", bend_value, channel),
+                    )
+                }
+                _ => (
+                    "Unknown".to_string(),
+                    format!(
+                        "Status: 0x{:02X} Data: {} {} Ch: {}",
+                        status, data1, data2, channel
+                    ),
+                ),
             };
 
             if let Ok(mut hist) = history.lock() {
@@ -106,13 +159,20 @@ impl MidiHandler {
     }
 
     fn note_name(note: u8) -> String {
-        let notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        let notes = [
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+        ];
         let octave = (note / 12) as i32 - 1;
         let note_index = note % 12;
         format!("{}{}", notes[note_index as usize], octave)
     }
 
-    fn handle_cc_message(lock_free_synth: &Arc<LockFreeSynth>, midi_events: &Arc<MidiEventQueue>, cc_number: u8, cc_value: u8) {
+    fn handle_cc_message(
+        lock_free_synth: &Arc<LockFreeSynth>,
+        midi_events: &Arc<MidiEventQueue>,
+        cc_number: u8,
+        cc_value: u8,
+    ) {
         let normalized_value = cc_value as f32 / 127.0;
         let mut params = *lock_free_synth.get_params();
 
@@ -156,9 +216,11 @@ impl MidiHandler {
             53 => params.arp_octaves = 1 + (normalized_value * 3.0) as u8,
             54 => params.arp_gate_length = 0.1 + (normalized_value * 0.9),
             64 => {
-                midi_events.push(MidiEvent::SustainPedal { pressed: normalized_value > 0.5 });
+                midi_events.push(MidiEvent::SustainPedal {
+                    pressed: normalized_value > 0.5,
+                });
                 return;
-            },
+            }
             _ => return,
         }
 
