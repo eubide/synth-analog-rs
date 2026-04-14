@@ -76,7 +76,7 @@ impl SynthApp {
         let mut wave_type = Synthesizer::u8_to_wave_type_pub(*waveform);
         ui.horizontal(|ui| {
             ui.label("wave:");
-            egui::ComboBox::from_id_source(format!("wave_{}", osc_num))
+            egui::ComboBox::from_id_salt(format!("wave_{}", osc_num))
                 .selected_text(match wave_type {
                     WaveType::Sawtooth => "Saw",
                     WaveType::Triangle => "Tri",
@@ -250,7 +250,7 @@ impl SynthApp {
         let mut lfo_waveform = Synthesizer::u8_to_lfo_waveform_pub(self.params.lfo_waveform);
         ui.horizontal(|ui| {
             ui.label("waveform:");
-            egui::ComboBox::from_id_source("lfo_waveform")
+            egui::ComboBox::from_id_salt("lfo_waveform")
                 .selected_text(match lfo_waveform {
                     LfoWaveform::Triangle => "Triangle",
                     LfoWaveform::Square => "Square",
