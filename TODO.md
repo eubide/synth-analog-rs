@@ -22,13 +22,13 @@ Los cambios aquí son los que más mueven la percepción hacia "suave y natural"
 
 - [x] **PolyBLEP en los 4 osciladores.** Sustituir sawtooth (8 armónicos fijos), square y triangle naive por PolyBLEP con doble transición para PWM. `synthesizer.rs:734-758`. *(ver P1 del análisis)*
 - [x] **Envelopes exponenciales reales.** Reescribir los dos ADSR con `coeff = exp(-dt/τ)` y `value = target + (value - target) * coeff`. Elimina clics y el tufo digital. `synthesizer.rs:863-1001`. *(ver P2)*
-- [ ] **Filtro ZDF ladder bien afinado.** Coeficiente `g = tan(π·fc/fs)`, `tanh` dentro de cada una de las 4 etapas, compensación de graves al subir resonancia, y mover el DC blocker al bus master con `coeff ≈ 0.9999`. `synthesizer.rs:760-850`. *(ver P3)*
+- [x] **Filtro ZDF ladder bien afinado.** Coeficiente `g = tan(π·fc/fs)`, `tanh` dentro de cada una de las 4 etapas, compensación de graves al subir resonancia, y mover el DC blocker al bus master con `coeff ≈ 0.9999`. `synthesizer.rs:760-850`. *(ver P3)*
 - [x] **Fix de detune en cents (logarítmico).** Cambiar `freq * (1 + detune/100)` por `freq * 2f32.powf(detune/1200)`. `synthesizer.rs:608-609`. *(ver P4a)*
 - [x] **Keyboard tracking exponencial.** Cambiar a `cutoff *= 2f32.powf((midi_note - 60) / 12 * kbd_track)`. `synthesizer.rs:666-677`. *(ver P4b)*
 
 ## P2 — Motor de sonido: impacto medio
 
-- [ ] **Gain staging + soft clipper continuo.** Normalizar la suma de voces (`1/√N` o headroom fijo), reemplazar el clipper discontinuo en 0.7 por `tanh(x)` o `x/(1+|x|)` aplicado en todo el rango. `synthesizer.rs:712,722-727`. *(ver P5)*
+- [x] **Gain staging + soft clipper continuo.** Normalizar la suma de voces (`1/√N` o headroom fijo), reemplazar el clipper discontinuo en 0.7 por `tanh(x)` o `x/(1+|x|)` aplicado en todo el rango. `synthesizer.rs:712,722-727`. *(ver P5)*
 - [ ] **Reverb Freeverb-style.** 8 combs en paralelo con damping LP interno + 4 allpass en serie, o como mínimo añadir 2 allpass tras el banco actual. `synthesizer.rs:1118-1137`. *(ver P6)*
 - [ ] **Carácter analógico por voz.** Fase inicial aleatoria en los osciladores, LFO sub-audio de drift por voz (±1–3 cents), pink noise con PRNG xorshift en lugar de `rand::random` blanco. `synthesizer.rs:302-303,649`. *(ver P7)*
 - [ ] **Retrigger sin clic.** Rampa corta de 5–10 ms al reiniciar attack, en lugar de `envelope_value *= 0.5`. `synthesizer.rs:420-427`. *(ver P8)*
@@ -178,6 +178,8 @@ Los puntos **1–3** cubren probablemente el 70% del camino hacia "suave y natur
 - [x] **Envelopes exponenciales reales** — ambos ADSR (amp y filter) con curvas RC `exp(-dt/τ)` en attack, decay y release; elimina el tufo digital y los clics de retrigger
 - [x] **Detune en cents logarítmico** — `freq * 2^(detune/1200)` en ambos osciladores
 - [x] **Keyboard tracking exponencial** — `cutoff * 2^((note-60)/12 * amount)` para seguimiento de octavas correcto
+- [x] **Filtro ZDF ladder bien afinado** — TPT con `g = tan(π·fc/fs)`, `tanh` en las 4 etapas, compensación de passband, DC blocker maestro `coeff=0.9999`
+- [x] **Gain staging + soft clipper continuo** — normalización `1/√N` por voces activas; soft clipper `tanh` ya en sitio
 
 ### Estabilidad y rendimiento en audio thread
 - [x] Threading lock-free real con `TripleBuffer` de atomics (`lock_free.rs:7-56`)
