@@ -826,33 +826,35 @@ impl eframe::App for SynthApp {
                 }
             }
         });
+    }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Compact Vintage Analog Style Header
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("PROPHET-5 SYNTHESIZER")
-                        .size(18.0)
-                        .strong(),
-                );
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+        // Compact Vintage Analog Style Header
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("PROPHET-5 SYNTHESIZER")
+                    .size(18.0)
+                    .strong(),
+            );
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self._midi_handler.is_some() {
-                        if ui.small_button("MIDI").clicked() {
-                            self.show_midi_monitor = !self.show_midi_monitor;
-                        }
-                    } else {
-                        let _ = ui.small_button("NO MIDI");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self._midi_handler.is_some() {
+                    if ui.small_button("MIDI").clicked() {
+                        self.show_midi_monitor = !self.show_midi_monitor;
                     }
+                } else {
+                    let _ = ui.small_button("NO MIDI");
+                }
 
-                    if ui.small_button("Presets").clicked() {
-                        self.show_presets_window = !self.show_presets_window;
-                    }
-                });
+                if ui.small_button("Presets").clicked() {
+                    self.show_presets_window = !self.show_presets_window;
+                }
             });
-            ui.separator();
+        });
+        ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
                 // CLEAN 4-COLUMN LAYOUT - All vertical organization
                 ui.columns(4, |columns| {
                     // COLUMN 1 - Sound Generation A
@@ -965,13 +967,13 @@ impl eframe::App for SynthApp {
                     self.draw_keyboard_legend(ui);
                 });
             });
-        });
+        }); // CentralPanel::show_inside
 
         // MIDI Monitor Window
         if self.show_midi_monitor {
             egui::Window::new("MIDI Monitor")
                 .default_size([400.0, 300.0])
-                .show(ctx, |ui| {
+                .show(ui.ctx(), |ui| {
                     self.draw_midi_monitor(ui);
                 });
         }
@@ -982,7 +984,7 @@ impl eframe::App for SynthApp {
             egui::Window::new("Preset Manager")
                 .default_size([350.0, 400.0])
                 .open(&mut show_presets_window)
-                .show(ctx, |ui| {
+                .show(ui.ctx(), |ui| {
                     self.draw_preset_panel(ui);
                 });
             self.show_presets_window = show_presets_window;
