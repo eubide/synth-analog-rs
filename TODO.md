@@ -32,14 +32,14 @@ Los cambios aquí son los que más mueven la percepción hacia "suave y natural"
 - [ ] **Reverb Freeverb-style.** 8 combs en paralelo con damping LP interno + 4 allpass en serie, o como mínimo añadir 2 allpass tras el banco actual. `synthesizer.rs:1118-1137`. *(ver P6)*
 - [ ] **Carácter analógico por voz.** Fase inicial aleatoria en los osciladores, LFO sub-audio de drift por voz (±1–3 cents), pink noise con PRNG xorshift en lugar de `rand::random` blanco. `synthesizer.rs:302-303,649`. *(ver P7)*
 - [ ] **Retrigger sin clic.** Rampa corta de 5–10 ms al reiniciar attack, en lugar de `envelope_value *= 0.5`. `synthesizer.rs:420-427`. *(ver P8)*
-- [ ] **Glide / Portamento.** Tiempo ajustable, modos constante-time y constante-rate. Fundamental para solos tipo Prophet.
+- [x] **Glide / Portamento.** Interpolación exponencial por voz con `glide_time` ajustable. `synthesizer.rs:631-638`.
 
 ## P3 — Features del Prophet-5 faltantes
 
-- [ ] **Poly-Mod section** con las routings clásicas:
-  - [ ] Filter Envelope → Oscillator A frequency
-  - [ ] Filter Envelope → Oscillator A pulse width
-  - [ ] Oscillator B → Oscillator A frequency
+- [ ] **Poly-Mod section** — routings pendientes:
+  - [x] Filter Envelope → Oscillator A frequency (`synthesizer.rs:643-645`)
+  - [x] Filter Envelope → Oscillator A pulse width (`synthesizer.rs:650-652`)
+  - [ ] Oscillator B → Oscillator A frequency (field existe, falta aplicarlo en audio loop)
   - [ ] Oscillator B → Oscillator A pulse width
   - [ ] Oscillator B → Filter cutoff
 - [ ] **Unison mode** (todas las voces apiladas sobre una sola nota con detune)
@@ -180,6 +180,8 @@ Los puntos **1–3** cubren probablemente el 70% del camino hacia "suave y natur
 - [x] **Keyboard tracking exponencial** — `cutoff * 2^((note-60)/12 * amount)` para seguimiento de octavas correcto
 - [x] **Filtro ZDF ladder bien afinado** — TPT con `g = tan(π·fc/fs)`, `tanh` en las 4 etapas, compensación de passband, DC blocker maestro `coeff=0.9999`
 - [x] **Gain staging + soft clipper continuo** — normalización `1/√N` por voces activas; soft clipper `tanh` ya en sitio
+- [x] **Glide / Portamento** — interpolación exponencial por voz con `glide_time` ajustable (`synthesizer.rs:631-638`)
+- [x] **Poly-Mod Filter Envelope → Osc A freq/PW** — implementado en el audio loop (`synthesizer.rs:643-652`)
 
 ### Estabilidad y rendimiento en audio thread
 - [x] Threading lock-free real con `TripleBuffer` de atomics (`lock_free.rs:7-56`)
@@ -187,7 +189,7 @@ Los puntos **1–3** cubren probablemente el 70% del camino hacia "suave y natur
 - [x] Sample rate leído del dispositivo y pasado al synth — ya no está hardcoded a 44.1 kHz (`audio_engine.rs:24,78`)
 - [x] Phase drift corregido con acumuladores enteros de 32-bit fractional
 - [x] Filter clamping seguro para evitar runaway
-- [x] DC blocker presente (aunque mal ubicado — ver P1 del análisis)
+- [x] DC blocker maestro en bus de salida (`coeff=0.9999` → ~0.7 Hz HP)
 - [x] Limiter de seguridad en audio thread (`audio_engine.rs:143-150`)
 - [x] Error handling robusto sin `unwrap()` en audio thread
 
