@@ -719,14 +719,10 @@ impl Synthesizer {
             *sample = self.apply_delay(*sample);
             *sample = self.apply_reverb(*sample);
 
-            // Gentle soft clipping using tanh for smoother distortion
-            *sample = if sample.abs() > 0.7 {
-                sample.signum() * (1.0 - (-sample.abs() * 3.0).exp())
-            } else {
-                *sample
-            };
+            // Continuous saturation. The previous threshold clipper jumped
+            // by ~0.18 at |x|=0.7 and buzzed on every loud peak.
+            *sample = sample.tanh();
 
-            // Final hard clipping as safety
             *sample = (*sample).clamp(-1.0, 1.0);
         }
     }
@@ -824,23 +820,46 @@ impl Synthesizer {
 
         let dc_blocked_output = state.dc_block_y2;
 
-        // Prevent denormal numbers
-        if state.stage1.abs() < 1e-10 {
+        // Flush denormals in every feedback path. Missing any of these causes
+        // ~100x slowdown on decayed tails and drops audio-thread deadlines.
+        const DENORMAL_FLOOR: f32 = 1.0e-20;
+        if state.stage1.abs() < DENORMAL_FLOOR {
             state.stage1 = 0.0;
         }
-        if state.stage2.abs() < 1e-10 {
+        if state.stage2.abs() < DENORMAL_FLOOR {
             state.stage2 = 0.0;
         }
-        if state.stage3.abs() < 1e-10 {
+        if state.stage3.abs() < DENORMAL_FLOOR {
             state.stage3 = 0.0;
         }
-        if state.stage4.abs() < 1e-10 {
+        if state.stage4.abs() < DENORMAL_FLOOR {
             state.stage4 = 0.0;
         }
-        if state.dc_block_y1.abs() < 1e-10 {
+        if state.delay1.abs() < DENORMAL_FLOOR {
+            state.delay1 = 0.0;
+        }
+        if state.delay2.abs() < DENORMAL_FLOOR {
+            state.delay2 = 0.0;
+        }
+        if state.delay3.abs() < DENORMAL_FLOOR {
+            state.delay3 = 0.0;
+        }
+        if state.delay4.abs() < DENORMAL_FLOOR {
+            state.delay4 = 0.0;
+        }
+        if state.feedback.abs() < DENORMAL_FLOOR {
+            state.feedback = 0.0;
+        }
+        if state.dc_block_x1.abs() < DENORMAL_FLOOR {
+            state.dc_block_x1 = 0.0;
+        }
+        if state.dc_block_x2.abs() < DENORMAL_FLOOR {
+            state.dc_block_x2 = 0.0;
+        }
+        if state.dc_block_y1.abs() < DENORMAL_FLOOR {
             state.dc_block_y1 = 0.0;
         }
-        if state.dc_block_y2.abs() < 1e-10 {
+        if state.dc_block_y2.abs() < DENORMAL_FLOOR {
             state.dc_block_y2 = 0.0;
         }
 
@@ -1107,6 +1126,13 @@ impl Synthesizer {
         };
 
         let delayed_sample = self.delay_buffer[delay_read_index];
+        // Flush denormals in the feedback tail, otherwise decaying echoes
+        // slow the audio thread and cause xruns.
+        let delayed_sample = if delayed_sample.abs() < 1.0e-20 {
+            0.0
+        } else {
+            delayed_sample
+        };
         let feedback_sample = delayed_sample * self.effects.delay_feedback;
 
         self.delay_buffer[self.delay_index] = sample + feedback_sample;
@@ -1125,6 +1151,12 @@ impl Synthesizer {
 
         for (i, buffer) in self.reverb_buffers.iter_mut().enumerate() {
             let delay_sample = buffer[self.reverb_indices[i]];
+            // Flush denormals in the comb feedback.
+            let delay_sample = if delay_sample.abs() < 1.0e-20 {
+                0.0
+            } else {
+                delay_sample
+            };
             buffer[self.reverb_indices[i]] = sample + (delay_sample * decay);
             reverb_output += delay_sample;
 
