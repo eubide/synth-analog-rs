@@ -12,9 +12,17 @@ Sintetizador analógico tipo Prophet-5 en Rust. Esta lista prioriza el trabajo p
 
 ---
 
+## Bugs conocidos
+
+- [ ] **CC 1 mapeado a `osc1_level` en lugar de mod wheel.** `midi_handler.rs:195`. CC 1 es el estándar de Modulation Wheel; debería rutear a `lfo_amount` o a la profundidad de modulación del LFO, no al nivel del oscilador.
+- [ ] **`lfo_target_*` booleans son dead code.** Los campos `lfo_target_osc1_pitch / osc2_pitch / filter / amplitude` se guardan en presets y en el struct `LFO` pero el audio loop los ignora — solo los amounts `lfo_to_*` controlan el routing. Hay que o bien usarlos como gates booleanos (si el toggle está off, ignorar el amount) o eliminarlos del formato de preset.
+- [ ] **2 de 5 routings de Poly Mod no tienen slider en la GUI.** `poly_mod_osc_b_to_osc_a_pw` y `poly_mod_osc_b_to_filter_cutoff` están implementados en el motor de audio pero el panel POLY MOD solo muestra 3 de los 5 parámetros. `gui.rs:569-615`.
+
 ## P3 — Features del Prophet-5 faltantes
 
-- [ ] **Unison mode** — todas las voces apiladas sobre una sola nota con detune escalonado
+- [ ] **Sustain pedal.** El evento `MidiEvent::SustainPedal` llega pero se ignora (`audio_engine.rs:103`). Falta: flag de sustain por voz; si el pedal está pulsado, las notas liberadas entran en sustain extendido en lugar de pasar a release.
+- [ ] **Modo monofónico + legato.** Voz única con prioridad configurable (last/low/high). En legato, cambiar nota no retriggeriza los envelopes — solo glisa el pitch. Complementa el glide ya existente.
+- [ ] **Unison mode** — todas las voces apiladas sobre una sola nota con detune escalonado (spread configurable)
 - [ ] **Modo 5-voice auténtico** como opción (actualmente 8)
 - [ ] **Vintage voice allocation modes:**
   - [ ] Last-note priority
@@ -24,19 +32,31 @@ Sintetizador analógico tipo Prophet-5 en Rust. Esta lista prioriza el trabajo p
 
 ## P4 — MIDI pendiente
 
+- [ ] **Mod wheel routing real (CC 1).** Una vez corregido el bug, mapear CC 1 a `lfo_amount` o crear un parámetro de "mod depth" independiente que escale el LFO hacia los destinos activos.
+- [ ] **MIDI clock sync para el arpeggiador.** El arpeggiador usa BPM interno; debería poderse sincronizar a MIDI clock externo (DAW / drum machine).
 - [ ] **MIDI SysEx** para patch dump/load
 
 ## P5 — GUI / UX
 
+- [ ] **Completar panel Poly Mod** — añadir sliders para `poly_mod_osc_b_to_osc_a_pw` y `poly_mod_osc_b_to_filter_cutoff`. `gui.rs:569-615`.
+- [ ] **Controles de aftertouch en GUI** — sliders para `aftertouch_to_cutoff` y `aftertouch_to_amplitude` (los parámetros existen en `SynthParameters` pero no tienen UI).
+- [ ] **Pitch bend range configurable en GUI** — actualmente hardcodeado a 2 semitones en el default; debería ser ajustable por preset (típicamente 2 o 12).
+- [ ] **Selector de modo de voz** — polyphonic / mono / legato / unison, una vez implementados los modos en P3.
 - [ ] **Mapeo logarítmico del knob de filter cutoff** — percepción natural, independiente de los fixes DSP
 - [ ] **Keyboard velocity curves humanizadas** — curvas soft/linear/hard configurables (hoy es lineal)
 - [ ] **Patch A/B comparison**
 - [ ] **Preset browser con categorías** — metadato de categoría en presets (Bass / Lead / Pad / Brass / FX) y agrupación en la UI
+- [ ] **Randomización de preset** — botón "Random patch" para exploración de sonido; randomizar dentro de rangos razonables (evitar cutoff a 20 Hz o attack a 5 s)
+- [ ] **VU meter / indicador de clipping** — feedback visual del nivel de salida; alerta si el soft limiter está trabajando continuamente
 
-## P6 — Character analógico adicional
+## P5.5 — Audio quality / ergonomía
 
-Más allá del drift / fase aleatoria / pink noise ya implementados:
+- [ ] **Parameter smoothing (anti-zipper noise).** Cambios abruptos de `filter_cutoff`, `master_volume`, etc. vía CC producen zipper audible porque el cambio se aplica de bloque en bloque sin rampa. Añadir un smoother de 1-pole por parámetro crítico (cutoff, resonance, volume) en el audio loop.
+- [ ] **MIDI learn mode** — permitir al usuario asignar cualquier CC a cualquier parámetro en lugar de depender del mapa hardcodeado de `midi_handler.rs`.
 
+## P6 — Effects
+
+- [ ] **Chorus / ensemble** — efecto de modulación de pitch+delay muy corto (≈5–25 ms, depth ≈0.3–2 ms, rate ≈0.1–3 Hz). Quintaesencial en el sonido Prophet-5 de estudio; muchos de los sonidos icónicos del instrumento usan chorus externo.
 - [ ] **Component tolerance variations** — pequeñas variaciones por voz en la respuesta del filtro y los envelopes
 - [ ] **VCA bleed-through** — ligera fuga del oscilador cuando el VCA está cerrado
 - [ ] **Analog noise floor** — ruido de fondo muy bajo tipo "hiss" de circuito
@@ -48,6 +68,7 @@ Más allá del drift / fase aleatoria / pink noise ya implementados:
 - [ ] **Micro-tuning / alternate tuning tables** (Just Intonation, tunings históricos)
 - [ ] **A-440 Hz reference tone generator**
 - [ ] **Voice panning / stereo spread** — el motor es mono; añadir posicionamiento estéreo por voz
+- [ ] **Plugin format (CLAP / VST3)** — para usar el sintetizador como instrumento virtual en un DAW
 
 ---
 
@@ -84,7 +105,7 @@ Más allá del drift / fase aleatoria / pink noise ya implementados:
 ### Estabilidad y rendimiento en audio thread
 - [x] Threading lock-free real con `TripleBuffer` de atomics (`lock_free.rs:7-56`)
 - [x] Buffer mono pre-alocado y redimensionado dinámicamente en el callback de audio
-- [x] Sample rate leído del dispositivo y pasado al synth — ya no está hardcoded a 44.1 kHz
+- [x] Sample rate leído del dispositivo y pasado al synth — ya no está hardcodeado a 44.1 kHz
 - [x] Phase drift corregido con acumuladores enteros de 32-bit fractional
 - [x] Filter clamping seguro para evitar runaway
 - [x] DC blocker maestro en bus de salida (`coeff=0.9999` → ~0.7 Hz HP)
@@ -95,8 +116,7 @@ Más allá del drift / fase aleatoria / pink noise ya implementados:
 ### MIDI
 - [x] Note on/off
 - [x] CC mapping completo (CC 1-54) para parámetros de synth
-- [x] Sustain pedal (CC 64)
-- [x] Modulation wheel (CC 1)
+- [x] Sustain pedal (CC 64) — evento recibido y parseado
 - [x] Auto-conexión al primer MIDI input disponible
 - [x] **Pitch bend** (0xE0) — ±`pitch_bend_range` semitones, ratio precomputado por bloque
 - [x] **Aftertouch** (0xD0) — modulación aditiva al cutoff (×4 kHz máx) y multiplicativa a amplitud
