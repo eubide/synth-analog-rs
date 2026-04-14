@@ -131,7 +131,6 @@ pub struct Voice {
     pub envelope_time: f32,
     pub envelope_value: f32,
     pub filter_envelope_state: EnvelopeState,
-    pub filter_envelope_time: f32,
     pub filter_envelope_value: f32,
     pub filter_state: LadderFilterState,
     pub is_active: bool,
@@ -305,7 +304,6 @@ impl Voice {
             envelope_time: 0.0,
             envelope_value: 0.0,
             filter_envelope_state: EnvelopeState::Attack,
-            filter_envelope_time: 0.0,
             filter_envelope_value: 0.0,
             filter_state: LadderFilterState {
                 stage1: 0.0,
@@ -339,7 +337,6 @@ impl Voice {
         match self.filter_envelope_state {
             EnvelopeState::Attack | EnvelopeState::Decay | EnvelopeState::Sustain => {
                 self.filter_envelope_state = EnvelopeState::Release;
-                self.filter_envelope_time = 0.0;
                 // Keep current filter_envelope_value as release starting point
             }
             _ => {} // Already in release or idle
@@ -423,7 +420,6 @@ impl Synthesizer {
                     voice.envelope_time = 0.0;
                     voice.envelope_value *= 0.5; // Quick fade instead of hard reset
                     voice.filter_envelope_state = EnvelopeState::Attack;
-                    voice.filter_envelope_time = 0.0;
                     voice.filter_envelope_value *= 0.5;
                 } else {
                     // If note is quiet or inactive, full restart is fine
@@ -572,6 +568,18 @@ impl Synthesizer {
         let master_volume = self.master_volume;
         let sample_rate = self.sample_rate;
 
+        // Precompute values that are constant for the entire block.
+        // Avoids transcendental calls (powf, exp) inside the per-sample voice loop.
+        let osc1_detune_ratio = 2f32.powf(osc1_detune / 1200.0);
+        let osc2_detune_ratio = 2f32.powf(osc2_detune / 1200.0);
+        // Envelope RC coefficients — coeff=0 gives instant transition (handles attack/decay/release=0)
+        let amp_attack_coeff = (-dt * 5.0 / envelope_attack).exp();
+        let amp_decay_coeff = (-dt * 5.0 / envelope_decay).exp();
+        let amp_release_coeff = (-dt * 5.0 / envelope_release).exp();
+        let flt_attack_coeff = (-dt * 5.0 / filter_envelope_attack).exp();
+        let flt_decay_coeff = (-dt * 5.0 / filter_envelope_decay).exp();
+        let flt_release_coeff = (-dt * 5.0 / filter_envelope_release).exp();
+
         for sample in buffer.iter_mut() {
             *sample = 0.0;
 
@@ -605,8 +613,8 @@ impl Synthesizer {
                 }
 
                 // Calculate frequencies with detune and modulation matrix
-                let mut freq1 = voice.frequency * (1.0 + osc1_detune / 100.0);
-                let mut freq2 = voice.frequency * (1.0 + osc2_detune / 100.0);
+                let mut freq1 = voice.frequency * osc1_detune_ratio;
+                let mut freq2 = voice.frequency * osc2_detune_ratio;
 
                 // Apply modulation matrix to oscillator pitch
                 freq1 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc1_pitch * 0.1);
@@ -660,29 +668,26 @@ impl Synthesizer {
                 };
                 let mut mixed = osc1_out * mixer_osc1_level + osc2_out * mixer_osc2_level + noise;
 
-                // Process filter envelope
                 let filter_envelope_value = Self::process_filter_envelope_static(
                     voice,
-                    filter_envelope_attack,
-                    filter_envelope_decay,
                     filter_envelope_sustain,
-                    filter_envelope_release,
-                    sample_rate,
+                    flt_attack_coeff,
+                    flt_decay_coeff,
+                    flt_release_coeff,
                 );
 
-                // Apply filter envelope to cutoff and keyboard tracking
-                let note_frequency = voice.frequency;
-                let kbd_track_amount = filter_keyboard_tracking * ((note_frequency / 261.63) - 1.0); // C4 = 261.63 Hz as reference
+                let kbd_multiplier =
+                    2f32.powf((voice.note as f32 - 60.0) / 12.0 * filter_keyboard_tracking);
 
                 // Apply modulation matrix to filter
                 let lfo_cutoff_mod = lfo_value * modulation_matrix.lfo_to_cutoff * 1000.0;
                 let velocity_cutoff_mod =
                     voice.velocity * modulation_matrix.velocity_to_cutoff * 1000.0;
-                let modulated_cutoff = filter_cutoff
+                let modulated_cutoff = (filter_cutoff
                     + lfo_cutoff_mod
                     + velocity_cutoff_mod
-                    + (filter_cutoff * filter_envelope_amount * filter_envelope_value)
-                    + (filter_cutoff * kbd_track_amount);
+                    + filter_cutoff * filter_envelope_amount * filter_envelope_value)
+                    * kbd_multiplier;
                 let final_cutoff = modulated_cutoff.clamp(20.0, 20000.0);
 
                 let lfo_resonance_mod = lfo_value * modulation_matrix.lfo_to_resonance * 2.0;
@@ -698,14 +703,13 @@ impl Synthesizer {
                     sample_rate,
                 );
 
-                // Apply amp envelope
                 let envelope_value = Self::process_envelope_static(
                     voice,
-                    envelope_attack,
-                    envelope_decay,
                     envelope_sustain,
-                    envelope_release,
-                    sample_rate,
+                    dt,
+                    amp_attack_coeff,
+                    amp_decay_coeff,
+                    amp_release_coeff,
                 );
 
                 // Apply modulation matrix to amplitude
@@ -922,49 +926,36 @@ impl Synthesizer {
 
     fn process_envelope_static(
         voice: &mut Voice,
-        attack: f32,
-        decay: f32,
         sustain: f32,
-        release: f32,
-        sample_rate: f32,
+        dt: f32,
+        attack_coeff: f32,
+        decay_coeff: f32,
+        release_coeff: f32,
     ) -> f32 {
-        let dt = 1.0 / sample_rate;
         voice.envelope_time += dt;
 
         match voice.envelope_state {
             EnvelopeState::Attack => {
-                if attack <= 0.0 {
+                // coeff=0 when attack=0 → instant transition (exp(-inf)=0)
+                voice.envelope_value = 1.0 + (voice.envelope_value - 1.0) * attack_coeff;
+                if voice.envelope_value >= 0.999 {
                     voice.envelope_value = 1.0;
                     voice.envelope_state = EnvelopeState::Decay;
                     voice.envelope_time = 0.0;
-                } else {
-                    voice.envelope_value = (voice.envelope_time / attack).min(1.0);
-                    if voice.envelope_value >= 1.0 {
-                        voice.envelope_state = EnvelopeState::Decay;
-                        voice.envelope_time = 0.0;
-                    }
                 }
             }
             EnvelopeState::Decay => {
-                if decay <= 0.0 {
+                voice.envelope_value = sustain + (voice.envelope_value - sustain) * decay_coeff;
+                if (voice.envelope_value - sustain).abs() < 0.0005 {
                     voice.envelope_value = sustain;
                     voice.envelope_state = EnvelopeState::Sustain;
-                } else {
-                    let decay_progress = (voice.envelope_time / decay).min(1.0);
-                    voice.envelope_value = 1.0 - decay_progress * (1.0 - sustain);
-                    if decay_progress >= 1.0 {
-                        voice.envelope_state = EnvelopeState::Sustain;
-                    }
                 }
             }
             EnvelopeState::Sustain => {
                 voice.envelope_value = sustain;
                 voice.sustain_time += dt;
-
-                // Add small amount of noise reduction during sustain to prevent buildup
+                // Flush tiny filter state values after 1 s of sustain to prevent drift buildup
                 if voice.sustain_time > 1.0 {
-                    // After 1 second of sustain
-                    // Slightly reduce very small filter state values that can cause drift
                     if voice.filter_state.stage1.abs() < 1e-8 {
                         voice.filter_state.stage1 = 0.0;
                     }
@@ -977,27 +968,15 @@ impl Synthesizer {
                     if voice.filter_state.stage4.abs() < 1e-8 {
                         voice.filter_state.stage4 = 0.0;
                     }
-
-                    // Reset sustain timer to prevent constant checking
                     voice.sustain_time = 0.0;
                 }
             }
             EnvelopeState::Release => {
-                if release <= 0.001 {
+                voice.envelope_value *= release_coeff;
+                if voice.envelope_value < 0.0001 {
                     voice.envelope_value = 0.0;
                     voice.is_active = false;
                     voice.envelope_state = EnvelopeState::Idle;
-                } else {
-                    // Use exponential decay for more natural release
-                    let release_rate = 1.0 / release;
-                    voice.envelope_value *= (1.0 - release_rate * dt).max(0.0);
-
-                    // Consider voice finished when very quiet
-                    if voice.envelope_value < 0.001 {
-                        voice.envelope_value = 0.0;
-                        voice.is_active = false;
-                        voice.envelope_state = EnvelopeState::Idle;
-                    }
                 }
             }
             EnvelopeState::Idle => {
@@ -1011,56 +990,36 @@ impl Synthesizer {
 
     fn process_filter_envelope_static(
         voice: &mut Voice,
-        attack: f32,
-        decay: f32,
         sustain: f32,
-        release: f32,
-        sample_rate: f32,
+        attack_coeff: f32,
+        decay_coeff: f32,
+        release_coeff: f32,
     ) -> f32 {
-        let dt = 1.0 / sample_rate;
-        voice.filter_envelope_time += dt;
-
         match voice.filter_envelope_state {
             EnvelopeState::Attack => {
-                if attack <= 0.0 {
+                voice.filter_envelope_value =
+                    1.0 + (voice.filter_envelope_value - 1.0) * attack_coeff;
+                if voice.filter_envelope_value >= 0.999 {
                     voice.filter_envelope_value = 1.0;
                     voice.filter_envelope_state = EnvelopeState::Decay;
-                    voice.filter_envelope_time = 0.0;
-                } else {
-                    voice.filter_envelope_value = (voice.filter_envelope_time / attack).min(1.0);
-                    if voice.filter_envelope_value >= 1.0 {
-                        voice.filter_envelope_state = EnvelopeState::Decay;
-                        voice.filter_envelope_time = 0.0;
-                    }
                 }
             }
             EnvelopeState::Decay => {
-                if decay <= 0.0 {
+                voice.filter_envelope_value =
+                    sustain + (voice.filter_envelope_value - sustain) * decay_coeff;
+                if (voice.filter_envelope_value - sustain).abs() < 0.0005 {
                     voice.filter_envelope_value = sustain;
                     voice.filter_envelope_state = EnvelopeState::Sustain;
-                } else {
-                    let decay_progress = (voice.filter_envelope_time / decay).min(1.0);
-                    voice.filter_envelope_value = 1.0 - decay_progress * (1.0 - sustain);
-                    if decay_progress >= 1.0 {
-                        voice.filter_envelope_state = EnvelopeState::Sustain;
-                    }
                 }
             }
             EnvelopeState::Sustain => {
                 voice.filter_envelope_value = sustain;
             }
             EnvelopeState::Release => {
-                if release <= 0.001 {
+                voice.filter_envelope_value *= release_coeff;
+                if voice.filter_envelope_value < 0.0001 {
                     voice.filter_envelope_value = 0.0;
                     voice.filter_envelope_state = EnvelopeState::Idle;
-                } else {
-                    let release_rate = 1.0 / release;
-                    voice.filter_envelope_value *= (1.0 - release_rate * dt).max(0.0);
-
-                    if voice.filter_envelope_value < 0.001 {
-                        voice.filter_envelope_value = 0.0;
-                        voice.filter_envelope_state = EnvelopeState::Idle;
-                    }
                 }
             }
             EnvelopeState::Idle => {

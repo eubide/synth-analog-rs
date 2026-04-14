@@ -20,11 +20,11 @@ Cada ítem incluye referencia de archivo y línea cuando aplica. Los detalles t�
 
 Los cambios aquí son los que más mueven la percepción hacia "suave y natural". Son la ruta crítica para que el sintetizador deje de sonar digital.
 
-- [ ] **PolyBLEP en los 4 osciladores.** Sustituir sawtooth (8 armónicos fijos), square y triangle naive por PolyBLEP con doble transición para PWM. `synthesizer.rs:734-758`. *(ver P1 del análisis)*
-- [ ] **Envelopes exponenciales reales.** Reescribir los dos ADSR con `coeff = exp(-dt/τ)` y `value = target + (value - target) * coeff`. Elimina clics y el tufo digital. `synthesizer.rs:863-1001`. *(ver P2)*
+- [x] **PolyBLEP en los 4 osciladores.** Sustituir sawtooth (8 armónicos fijos), square y triangle naive por PolyBLEP con doble transición para PWM. `synthesizer.rs:734-758`. *(ver P1 del análisis)*
+- [x] **Envelopes exponenciales reales.** Reescribir los dos ADSR con `coeff = exp(-dt/τ)` y `value = target + (value - target) * coeff`. Elimina clics y el tufo digital. `synthesizer.rs:863-1001`. *(ver P2)*
 - [ ] **Filtro ZDF ladder bien afinado.** Coeficiente `g = tan(π·fc/fs)`, `tanh` dentro de cada una de las 4 etapas, compensación de graves al subir resonancia, y mover el DC blocker al bus master con `coeff ≈ 0.9999`. `synthesizer.rs:760-850`. *(ver P3)*
-- [ ] **Fix de detune en cents (logarítmico).** Cambiar `freq * (1 + detune/100)` por `freq * 2f32.powf(detune/1200)`. `synthesizer.rs:608-609`. *(ver P4a)*
-- [ ] **Keyboard tracking exponencial.** Cambiar a `cutoff *= 2f32.powf((midi_note - 60) / 12 * kbd_track)`. `synthesizer.rs:666-677`. *(ver P4b)*
+- [x] **Fix de detune en cents (logarítmico).** Cambiar `freq * (1 + detune/100)` por `freq * 2f32.powf(detune/1200)`. `synthesizer.rs:608-609`. *(ver P4a)*
+- [x] **Keyboard tracking exponencial.** Cambiar a `cutoff *= 2f32.powf((midi_note - 60) / 12 * kbd_track)`. `synthesizer.rs:666-677`. *(ver P4b)*
 
 ## P2 — Motor de sonido: impacto medio
 
@@ -174,6 +174,10 @@ Los puntos **1–3** cubren probablemente el 70% del camino hacia "suave y natur
 - [x] LFO con 5 waveforms (Triangle, Square, Sawtooth, ReverseSawtooth, Sample & Hold) y keyboard sync
 - [x] 8-voice polyphony con voice stealing
 - [x] Effects: reverb y delay básicos (bonus, no en el Prophet-5 original)
+- [x] **PolyBLEP + PolyBLAMP** en los 4 osciladores — elimina aliasing en sawtooth, square/PWM y triangle
+- [x] **Envelopes exponenciales reales** — ambos ADSR (amp y filter) con curvas RC `exp(-dt/τ)` en attack, decay y release; elimina el tufo digital y los clics de retrigger
+- [x] **Detune en cents logarítmico** — `freq * 2^(detune/1200)` en ambos osciladores
+- [x] **Keyboard tracking exponencial** — `cutoff * 2^((note-60)/12 * amount)` para seguimiento de octavas correcto
 
 ### Estabilidad y rendimiento en audio thread
 - [x] Threading lock-free real con `TripleBuffer` de atomics (`lock_free.rs:7-56`)
