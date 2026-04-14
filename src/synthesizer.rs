@@ -613,8 +613,10 @@ impl Synthesizer {
                 freq2 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc2_pitch * 0.1);
 
                 // Update phases using integer accumulators to prevent drift
-                let phase1_increment = ((freq1 / self.sample_rate) * PHASE_SCALE as f32) as u64;
-                let phase2_increment = ((freq2 / self.sample_rate) * PHASE_SCALE as f32) as u64;
+                let dt1 = freq1 * dt;
+                let dt2 = freq2 * dt;
+                let phase1_increment = (dt1 * PHASE_SCALE as f32) as u64;
+                let phase2_increment = (dt2 * PHASE_SCALE as f32) as u64;
 
                 voice.phase1_accumulator = voice.phase1_accumulator.wrapping_add(phase1_increment);
                 voice.phase2_accumulator = voice.phase2_accumulator.wrapping_add(phase2_increment);
@@ -635,10 +637,6 @@ impl Synthesizer {
                     voice.phase2_accumulator = 0;
                     phase2 = 0.0;
                 }
-
-                // Normalised phase increments for PolyBLEP band-limiting.
-                let dt1 = freq1 / sample_rate;
-                let dt2 = freq2 / sample_rate;
 
                 // Generate oscillator outputs using calculated phases
                 let osc1_out = Self::generate_oscillator_static(
@@ -743,23 +741,21 @@ impl Synthesizer {
         dt: f32,
         pulse_width: f32,
     ) -> f32 {
-        let phase = phase.rem_euclid(1.0);
-        // dt is the normalised phase increment (freq/sample_rate). Clamp to avoid
-        // PolyBLEP regions overlapping at pathological values.
-        let dt = dt.clamp(1.0e-6, 0.49);
         match wave_type {
             WaveType::Sine => OPTIMIZATION_TABLES.fast_sin(phase * 2.0 * PI),
             WaveType::Sawtooth => {
-                // Naive ramp minus PolyBLEP correction at the wrap-around.
                 let value = 2.0 * phase - 1.0;
                 value - Self::poly_blep(phase, dt)
             }
             WaveType::Square => {
-                // Variable-width pulse with PolyBLEP on both edges.
                 let pw = pulse_width.clamp(0.01, 0.99);
                 let mut value = if phase < pw { 1.0 } else { -1.0 };
                 value += Self::poly_blep(phase, dt);
-                let falling_phase = (phase + 1.0 - pw).rem_euclid(1.0);
+                let falling_phase = if phase >= pw {
+                    phase - pw
+                } else {
+                    phase + 1.0 - pw
+                };
                 value -= Self::poly_blep(falling_phase, dt);
                 value
             }
@@ -772,7 +768,11 @@ impl Synthesizer {
                     3.0 - 4.0 * phase
                 };
                 value += 8.0 * dt * Self::poly_blamp(phase, dt);
-                let half_phase = (phase + 0.5).rem_euclid(1.0);
+                let half_phase = if phase >= 0.5 {
+                    phase - 0.5
+                } else {
+                    phase + 0.5
+                };
                 value -= 8.0 * dt * Self::poly_blamp(half_phase, dt);
                 value
             }
