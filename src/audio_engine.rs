@@ -21,7 +21,7 @@ impl AudioEngine {
             .default_output_config()
             .map_err(|e| format!("No default output config: {}", e))?;
 
-        let sample_rate = config.sample_rate().0;
+        let sample_rate = config.sample_rate();
         log::info!(
             "Audio engine initialized with {} Hz sample rate",
             sample_rate
