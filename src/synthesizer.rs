@@ -12,6 +12,10 @@ const PHASE_MASK: u64 = PHASE_SCALE - 1;
 // removes DC offset introduced by filter self-oscillation or asymmetric saturation.
 const MASTER_DC_COEFF: f32 = 0.9999;
 
+// Per-voice VCO drift: each oscillator drifts ±2.5 cents at a slow sub-audio rate.
+// Linear approximation 2^(c/1200) ≈ 1 + c·ln2/1200 — error <0.001 % for |c| < 10 cents.
+const DRIFT_FREQ_FACTOR: f32 = 2.5 * 0.000578;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WaveType {
     Sine,
@@ -139,7 +143,17 @@ pub struct Voice {
     pub filter_state: LadderFilterState,
     pub is_active: bool,
     pub sustain_time: f32,
-    pub glide_current_freq: f32, // frecuencia actual durante portamento
+    pub glide_current_freq: f32,
+    // Analog character: per-voice VCO drift
+    pub drift_phase: f32, // [0, 1) — current phase of the slow drift LFO
+    pub drift_rate: f32,  // Hz — randomized at birth so voices don't phase-lock
+    // Analog character: per-voice pink noise generator (xorshift32 + Paul Kellett IIR)
+    pub noise_prng: u32,
+    pub noise_b0: f32,
+    pub noise_b1: f32,
+    pub noise_b2: f32,
+    // Poly Mod: last Osc B output sample used to cross-modulate Osc A (1-sample delay)
+    pub osc2_last_out: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -181,8 +195,12 @@ pub struct Synthesizer {
     pub max_polyphony: usize,
     pub delay_buffer: Vec<f32>,
     pub delay_index: usize,
-    pub reverb_buffers: Vec<Vec<f32>>,
-    pub reverb_indices: Vec<usize>,
+    // Freeverb: 8 parallel comb filters + 4 series allpass filters
+    pub reverb_comb_buffers: Vec<Vec<f32>>,
+    pub reverb_comb_indices: Vec<usize>,
+    pub reverb_comb_filters: Vec<f32>, // LP filter state inside each comb
+    pub reverb_allpass_buffers: Vec<Vec<f32>>,
+    pub reverb_allpass_indices: Vec<usize>,
     pub held_notes: Vec<u8>,
     pub arp_step: usize,
     pub arp_timer: f32,
@@ -191,8 +209,19 @@ pub struct Synthesizer {
     pub poly_mod_filter_env_to_osc_a_freq: f32,
     pub poly_mod_filter_env_to_osc_a_pw: f32,
     pub poly_mod_osc_b_to_osc_a_freq: f32,
+    pub poly_mod_osc_b_to_osc_a_pw: f32,
+    pub poly_mod_osc_b_to_filter_cutoff: f32,
     // Glide
     pub glide_time: f32,
+    // Pitch bend (updated from MIDI, applied to all voice frequencies)
+    pub pitch_bend: f32,      // -1.0..=1.0
+    pub pitch_bend_range: u8, // semitones
+    // Aftertouch
+    pub aftertouch: f32,
+    pub aftertouch_to_cutoff: f32,
+    pub aftertouch_to_amplitude: f32,
+    // Expression pedal
+    pub expression: f32, // 0.0..=1.0 multiplier on master output
     // Master DC blocker (one-pole HPF, coeff ≈ 0.9999 → ~0.7 Hz cutoff at 44.1 kHz)
     pub master_dc_x: f32,
     pub master_dc_y: f32,
@@ -300,8 +329,9 @@ impl Voice {
             frequency,
             note,
             velocity,
-            phase1_accumulator: 0,
-            phase2_accumulator: 0,
+            // Random initial phase prevents phase-coherent cancellations in chords.
+            phase1_accumulator: rand::random::<u32>() as u64,
+            phase2_accumulator: rand::random::<u32>() as u64,
             envelope_state: EnvelopeState::Attack,
             envelope_time: 0.0,
             envelope_value: 0.0,
@@ -316,6 +346,16 @@ impl Voice {
             is_active: true,
             sustain_time: 0.0,
             glide_current_freq: frequency,
+            // Random drift phase and rate so voices oscillate independently.
+            // Rate in [0.05, 0.25] Hz → period 4–20 s, mimicking VCO thermal drift.
+            drift_phase: rand::random::<f32>(),
+            drift_rate: 0.05 + rand::random::<f32>() * 0.20,
+            // Non-zero PRNG seed (xorshift produces 0 forever if seeded with 0).
+            noise_prng: rand::random::<u32>() | 1,
+            noise_b0: 0.0,
+            noise_b1: 0.0,
+            noise_b2: 0.0,
+            osc2_last_out: 0.0,
         }
     }
 
@@ -342,12 +382,15 @@ impl Synthesizer {
     pub fn new() -> Self {
         let sample_rate = 44100.0;
         let max_delay_samples = (sample_rate * 2.0) as usize; // 2 second max delay
-        let reverb_sizes = [
-            (sample_rate * 0.025) as usize, // 25ms
-            (sample_rate * 0.041) as usize, // 41ms
-            (sample_rate * 0.059) as usize, // 59ms
-            (sample_rate * 0.073) as usize, // 73ms
-        ];
+
+        // Freeverb delay line lengths (Jezar's original tuning at 44.1 kHz).
+        // Comb delays are prime-ish and spread across 25–37 ms to avoid flutter echo.
+        // Allpass delays provide diffusion without coloring the frequency response.
+        let rate = sample_rate / 44100.0;
+        let comb_sizes: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
+            .map(|n| ((n as f32 * rate) as usize).max(1));
+        let allpass_sizes: [usize; 4] = [556, 441, 341, 225]
+            .map(|n| ((n as f32 * rate) as usize).max(1));
 
         Self {
             osc1: OscillatorParams::default(),
@@ -370,8 +413,11 @@ impl Synthesizer {
             max_polyphony: 8,
             delay_buffer: vec![0.0; max_delay_samples],
             delay_index: 0,
-            reverb_buffers: reverb_sizes.iter().map(|&size| vec![0.0; size]).collect(),
-            reverb_indices: vec![0; reverb_sizes.len()],
+            reverb_comb_buffers: comb_sizes.iter().map(|&n| vec![0.0f32; n]).collect(),
+            reverb_comb_indices: vec![0; 8],
+            reverb_comb_filters: vec![0.0; 8],
+            reverb_allpass_buffers: allpass_sizes.iter().map(|&n| vec![0.0f32; n]).collect(),
+            reverb_allpass_indices: vec![0; 4],
             held_notes: Vec::new(),
             arp_step: 0,
             arp_timer: 0.0,
@@ -379,7 +425,15 @@ impl Synthesizer {
             poly_mod_filter_env_to_osc_a_freq: 0.0,
             poly_mod_filter_env_to_osc_a_pw: 0.0,
             poly_mod_osc_b_to_osc_a_freq: 0.0,
+            poly_mod_osc_b_to_osc_a_pw: 0.0,
+            poly_mod_osc_b_to_filter_cutoff: 0.0,
             glide_time: 0.0,
+            pitch_bend: 0.0,
+            pitch_bend_range: 2,
+            aftertouch: 0.0,
+            aftertouch_to_cutoff: 0.5,
+            aftertouch_to_amplitude: 0.0,
+            expression: 1.0,
             master_dc_x: 0.0,
             master_dc_y: 0.0,
         }
@@ -413,19 +467,15 @@ impl Synthesizer {
         // Check if note is already playing - for intentional re-triggering, we restart it
         for voice in &mut self.voices {
             if voice.note == note {
-                // Restart the note with a smooth transition to avoid clicks
-                if voice.is_active && voice.envelope_value > 0.1 {
-                    // If note is loud, do a quick fade to avoid click
-                    voice.envelope_state = EnvelopeState::Attack;
-                    voice.envelope_time = 0.0;
-                    voice.envelope_value *= 0.5; // Quick fade instead of hard reset
-                    voice.filter_envelope_state = EnvelopeState::Attack;
-                    voice.filter_envelope_value *= 0.5;
-                } else {
-                    // If note is quiet or inactive, full restart is fine
-                    *voice = Voice::new(note, frequency, velocity_normalized);
-                }
+                // Smooth retrigger: restart both envelopes from their current values.
+                // The RC-style attack (value → 1.0 exponentially) starts from wherever
+                // the envelope is now, so there is no amplitude discontinuity and no click.
+                // Halving the value (the old approach) caused a zip on loud notes.
                 voice.frequency = frequency;
+                voice.velocity = velocity_normalized;
+                voice.envelope_state = EnvelopeState::Attack;
+                voice.envelope_time = 0.0;
+                voice.filter_envelope_state = EnvelopeState::Attack;
                 voice.is_active = true;
                 return;
             }
@@ -569,12 +619,29 @@ impl Synthesizer {
         let sample_rate = self.sample_rate;
         let poly_mod_fe_freq = self.poly_mod_filter_env_to_osc_a_freq;
         let poly_mod_fe_pw = self.poly_mod_filter_env_to_osc_a_pw;
+        let poly_mod_osc_b_freq = self.poly_mod_osc_b_to_osc_a_freq;
+        let poly_mod_osc_b_pw = self.poly_mod_osc_b_to_osc_a_pw;
+        let poly_mod_osc_b_cutoff = self.poly_mod_osc_b_to_filter_cutoff;
         let glide_time = self.glide_time;
+        let pitch_bend = self.pitch_bend;
+        let pitch_bend_range = self.pitch_bend_range;
+        let aftertouch = self.aftertouch;
+        let aftertouch_to_cutoff = self.aftertouch_to_cutoff;
+        let aftertouch_to_amplitude = self.aftertouch_to_amplitude;
+        let expression = self.expression;
 
         // Precompute values that are constant for the entire block.
         // Avoids transcendental calls (powf, exp) inside the per-sample voice loop.
         let osc1_detune_ratio = 2f32.powf(osc1_detune / 1200.0);
         let osc2_detune_ratio = 2f32.powf(osc2_detune / 1200.0);
+        // Pitch bend ratio: ±pitch_bend_range semitones at full deflection.
+        let pitch_bend_ratio = Self::semitones_to_ratio(pitch_bend * pitch_bend_range as f32);
+        // Aftertouch modulations are per-block constants (aftertouch doesn't change within a buffer).
+        // Velocity is per-voice so it stays inside the loop; aftertouch is channel-wide so it doesn't.
+        // Cutoff uses 4× the velocity scale (4000 vs 1000 Hz) because aftertouch sweeps are typically
+        // larger and more expressive than velocity-triggered filter movements.
+        let aftertouch_cutoff_mod = aftertouch * aftertouch_to_cutoff * 4000.0;
+        let aftertouch_amplitude_mod = 1.0 + aftertouch * aftertouch_to_amplitude * 0.5;
 
         // Voice gain normalization: prevent loud chords from driving the clipper hard.
         // With N voices summing to ±N, the RMS grows as √N so we scale down by 1/√N.
@@ -588,6 +655,13 @@ impl Synthesizer {
         let flt_attack_coeff = (-dt * 5.0 / filter_envelope_attack).exp();
         let flt_decay_coeff = (-dt * 5.0 / filter_envelope_decay).exp();
         let flt_release_coeff = (-dt * 5.0 / filter_envelope_release).exp();
+        // Glide coefficient: exp(-dt/tau). Constant per block since glide_time and sample_rate don't change.
+        // Precomputed here to avoid calling exp() once per voice per sample in the inner loop.
+        let glide_coeff = if glide_time > 0.001 {
+            (-1.0_f32 / (glide_time * sample_rate)).exp()
+        } else {
+            0.0
+        };
 
         for sample in buffer.iter_mut() {
             *sample = 0.0;
@@ -621,19 +695,29 @@ impl Synthesizer {
                     continue;
                 }
 
-                // Glide: interpolación exponencial hacia la nota objetivo
-                if glide_time > 0.001 {
-                    let coeff = (-1.0_f32 / (glide_time * sample_rate)).exp();
+                // Glide: exponential interpolation toward the target frequency
+                if glide_coeff > 0.0 {
                     voice.glide_current_freq = voice.frequency
-                        + (voice.glide_current_freq - voice.frequency) * coeff;
+                        + (voice.glide_current_freq - voice.frequency) * glide_coeff;
                 } else {
                     voice.glide_current_freq = voice.frequency;
                 }
                 let base_freq = voice.glide_current_freq;
 
-                // Calculate frequencies with detune and modulation matrix
-                let mut freq1 = base_freq * osc1_detune_ratio;
-                let mut freq2 = base_freq * osc2_detune_ratio;
+                // Per-voice VCO drift: advance the slow drift LFO and compute a
+                // tiny pitch deviation. Each voice has its own rate so they drift
+                // independently, reproducing the tuning "life" of real analog VCOs.
+                voice.drift_phase += voice.drift_rate * dt;
+                if voice.drift_phase >= 1.0 {
+                    voice.drift_phase -= 1.0;
+                }
+                let drift_ratio = 1.0
+                    + DRIFT_FREQ_FACTOR
+                        * OPTIMIZATION_TABLES.fast_sin(voice.drift_phase * 2.0 * PI);
+
+                // Calculate frequencies with detune, drift, and modulation matrix
+                let mut freq1 = base_freq * osc1_detune_ratio * drift_ratio;
+                let mut freq2 = base_freq * osc2_detune_ratio * drift_ratio;
 
                 // Apply modulation matrix to oscillator pitch
                 freq1 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc1_pitch * 0.1);
@@ -642,7 +726,7 @@ impl Synthesizer {
                 // Poly Mod: Filter Envelope → Osc A frequency (±24 semitones a plena excursión)
                 if poly_mod_fe_freq.abs() > 0.001 {
                     let semitones = poly_mod_fe_freq * 24.0 * voice.filter_envelope_value;
-                    freq1 *= 2.0_f32.powf(semitones / 12.0);
+                    freq1 *= Self::semitones_to_ratio(semitones);
                 }
 
                 // Poly Mod: Filter Envelope → Osc A pulse width
@@ -651,6 +735,22 @@ impl Synthesizer {
                     let pw_shift = poly_mod_fe_pw * 0.4 * voice.filter_envelope_value;
                     osc1_pw_voice = (osc1_pw_voice + pw_shift).clamp(0.05, 0.95);
                 }
+
+                // Poly Mod: Osc B → Osc A (1-sample delay avoids circular dependency;
+                // matches the finite propagation time in real analog hardware)
+                let osc_b_mod = voice.osc2_last_out;
+                if poly_mod_osc_b_freq.abs() > 0.001 {
+                    let semitones = poly_mod_osc_b_freq * 24.0 * osc_b_mod;
+                    freq1 *= Self::semitones_to_ratio(semitones);
+                }
+                if poly_mod_osc_b_pw.abs() > 0.001 {
+                    let pw_shift = poly_mod_osc_b_pw * 0.4 * osc_b_mod;
+                    osc1_pw_voice = (osc1_pw_voice + pw_shift).clamp(0.05, 0.95);
+                }
+
+                // Pitch bend: applied globally to both oscillators
+                freq1 *= pitch_bend_ratio;
+                freq2 *= pitch_bend_ratio;
 
                 // Update phases using integer accumulators to prevent drift
                 let dt1 = freq1 * dt;
@@ -692,12 +792,25 @@ impl Synthesizer {
                     osc2_pulse_width,
                 ) * osc2_amplitude;
 
-                // Mix oscillators with individual levels and add noise
+                // Pink noise via per-voice xorshift32 PRNG + Paul Kellett 3-stage IIR.
+                // Pink noise has -3 dB/octave rolloff, closer to the Prophet-5 noise
+                // source (which is filtered before entering the signal path) than white.
+                // xorshift32 is deterministic and ~8× cheaper than rand::random().
                 let noise = if mixer_noise_level > 0.0 {
-                    (rand::random::<f32>() - 0.5) * 2.0 * mixer_noise_level
+                    voice.noise_prng ^= voice.noise_prng << 13;
+                    voice.noise_prng ^= voice.noise_prng >> 17;
+                    voice.noise_prng ^= voice.noise_prng << 5;
+                    let white = (voice.noise_prng as i32) as f32 * (1.0 / 2_147_483_648.0);
+                    voice.noise_b0 = 0.99886 * voice.noise_b0 + white * 0.0555179;
+                    voice.noise_b1 = 0.99332 * voice.noise_b1 + white * 0.0750759;
+                    voice.noise_b2 = 0.96900 * voice.noise_b2 + white * 0.153_852;
+                    (voice.noise_b0 + voice.noise_b1 + voice.noise_b2 + white * 0.0556418)
+                        * mixer_noise_level
                 } else {
                     0.0
                 };
+                voice.osc2_last_out = osc2_out;
+
                 let mut mixed = osc1_out * mixer_osc1_level + osc2_out * mixer_osc2_level + noise;
 
                 let filter_envelope_value = Self::process_filter_envelope_static(
@@ -709,15 +822,18 @@ impl Synthesizer {
                 );
 
                 let kbd_multiplier =
-                    2f32.powf((voice.note as f32 - 60.0) / 12.0 * filter_keyboard_tracking);
+                    Self::semitones_to_ratio((voice.note as f32 - 60.0) * filter_keyboard_tracking);
 
                 // Apply modulation matrix to filter
                 let lfo_cutoff_mod = lfo_value * modulation_matrix.lfo_to_cutoff * 1000.0;
                 let velocity_cutoff_mod =
                     voice.velocity * modulation_matrix.velocity_to_cutoff * 1000.0;
+                let osc_b_cutoff_mod = osc_b_mod * poly_mod_osc_b_cutoff * 4000.0;
                 let modulated_cutoff = (filter_cutoff
                     + lfo_cutoff_mod
                     + velocity_cutoff_mod
+                    + aftertouch_cutoff_mod
+                    + osc_b_cutoff_mod
                     + filter_cutoff * filter_envelope_amount * filter_envelope_value)
                     * kbd_multiplier;
                 let final_cutoff = modulated_cutoff.clamp(20.0, 20000.0);
@@ -750,9 +866,8 @@ impl Synthesizer {
                 let velocity_amplitude_mod =
                     0.5 + (voice.velocity * modulation_matrix.velocity_to_amplitude * 0.5);
 
-                mixed *= envelope_value * lfo_amplitude_mod * velocity_amplitude_mod;
+                mixed *= envelope_value * lfo_amplitude_mod * velocity_amplitude_mod * aftertouch_amplitude_mod;
 
-                // Add to output
                 *sample += mixed;
             }
 
@@ -760,8 +875,8 @@ impl Synthesizer {
             // Without this, 8 voices × ±2 amplitude = ±16 and tanh crushes all dynamics.
             *sample *= voice_norm;
 
-            // Apply master volume with gentle compression
-            *sample *= master_volume;
+            // Apply master volume with gentle compression; expression pedal scales on top
+            *sample *= master_volume * expression;
 
             // Apply effects processing
             *sample = self.apply_delay(*sample);
@@ -849,6 +964,12 @@ impl Synthesizer {
         } else {
             0.0
         }
+    }
+
+    /// Convert a semitone offset to a frequency ratio: 2^(semitones/12).
+    #[inline(always)]
+    fn semitones_to_ratio(semitones: f32) -> f32 {
+        2.0_f32.powf(semitones / 12.0)
     }
 
     /// Padé approximant for tanh — accurate to <0.1 % for |x| ≤ 3, clamped to ±1 beyond.
@@ -1171,26 +1292,54 @@ impl Synthesizer {
             return sample;
         }
 
-        let mut reverb_output = 0.0;
-        let decay = 0.7 * self.effects.reverb_size;
+        // Freeverb-style reverb (Jezar at Dreampoint, 1997).
+        //
+        // reverb_size maps to Freeverb's "roomsize" (feedback gain g).
+        // A fixed damping of 0.5 gives a warm, analog-sounding decay without
+        // the metallic flutter of undamped combs.
+        let g = (0.56 + self.effects.reverb_size * 0.42).min(0.985); // room feedback
+        const DAMP: f32 = 0.5;
+        const DAMP_INV: f32 = 1.0 - DAMP;
+        const AP_G: f32 = 0.5; // allpass diffusion gain
+        const DENORMAL: f32 = 1.0e-20;
 
-        for (i, buffer) in self.reverb_buffers.iter_mut().enumerate() {
-            let delay_sample = buffer[self.reverb_indices[i]];
-            // Flush denormals in the comb feedback.
-            let delay_sample = if delay_sample.abs() < 1.0e-20 {
+        // 8 parallel comb filters with LP damping inside the feedback loop.
+        // The LP filter inside each comb is what makes Freeverb sound warm instead
+        // of metallic: high frequencies decay faster than low frequencies.
+        let mut comb_sum = 0.0f32;
+        for i in 0..8 {
+            let idx = self.reverb_comb_indices[i];
+            let out = self.reverb_comb_buffers[i][idx];
+            let out = if out.abs() < DENORMAL { 0.0 } else { out };
+            // One-pole LP inside the comb feedback
+            self.reverb_comb_filters[i] =
+                out * DAMP_INV + self.reverb_comb_filters[i] * DAMP;
+            let filtered = if self.reverb_comb_filters[i].abs() < DENORMAL {
                 0.0
             } else {
-                delay_sample
+                self.reverb_comb_filters[i]
             };
-            buffer[self.reverb_indices[i]] = sample + (delay_sample * decay);
-            reverb_output += delay_sample;
+            self.reverb_comb_buffers[i][idx] = sample + filtered * g;
+            let len = self.reverb_comb_buffers[i].len();
+            self.reverb_comb_indices[i] = (idx + 1) % len;
+            comb_sum += out;
+        }
+        let mut reverb = comb_sum * 0.125; // average of 8 combs
 
-            self.reverb_indices[i] = (self.reverb_indices[i] + 1) % buffer.len();
+        // 4 series allpass filters for diffusion.
+        // Allpass filters scatter energy in time without coloring the spectrum,
+        // turning the comb-filter echoes into a smooth density tail.
+        for i in 0..4 {
+            let idx = self.reverb_allpass_indices[i];
+            let buf_out = self.reverb_allpass_buffers[i][idx];
+            let buf_out = if buf_out.abs() < DENORMAL { 0.0 } else { buf_out };
+            self.reverb_allpass_buffers[i][idx] = reverb + buf_out * AP_G;
+            let len = self.reverb_allpass_buffers[i].len();
+            self.reverb_allpass_indices[i] = (idx + 1) % len;
+            reverb = buf_out - reverb;
         }
 
-        let reverb_mix =
-            (reverb_output / self.reverb_buffers.len() as f32) * self.effects.reverb_amount;
-        sample + reverb_mix
+        sample + reverb * self.effects.reverb_amount
     }
 
     pub fn save_preset(&self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -2547,10 +2696,18 @@ impl Synthesizer {
             arp_octaves: self.arpeggiator.octaves,
             arp_gate_length: self.arpeggiator.gate_length,
             master_volume: self.master_volume,
-            poly_mod_filter_env_to_osc_a_freq: 0.0,
-            poly_mod_filter_env_to_osc_a_pw: 0.0,
-            poly_mod_osc_b_to_osc_a_freq: 0.0,
-            glide_time: 0.0,
+            poly_mod_filter_env_to_osc_a_freq: self.poly_mod_filter_env_to_osc_a_freq,
+            poly_mod_filter_env_to_osc_a_pw: self.poly_mod_filter_env_to_osc_a_pw,
+            poly_mod_osc_b_to_osc_a_freq: self.poly_mod_osc_b_to_osc_a_freq,
+            poly_mod_osc_b_to_osc_a_pw: self.poly_mod_osc_b_to_osc_a_pw,
+            poly_mod_osc_b_to_filter_cutoff: self.poly_mod_osc_b_to_filter_cutoff,
+            glide_time: self.glide_time,
+            pitch_bend: self.pitch_bend,
+            pitch_bend_range: self.pitch_bend_range,
+            aftertouch: self.aftertouch,
+            aftertouch_to_cutoff: self.aftertouch_to_cutoff,
+            aftertouch_to_amplitude: self.aftertouch_to_amplitude,
+            expression: self.expression,
         }
     }
 
@@ -2610,7 +2767,15 @@ impl Synthesizer {
         self.poly_mod_filter_env_to_osc_a_freq = params.poly_mod_filter_env_to_osc_a_freq;
         self.poly_mod_filter_env_to_osc_a_pw = params.poly_mod_filter_env_to_osc_a_pw;
         self.poly_mod_osc_b_to_osc_a_freq = params.poly_mod_osc_b_to_osc_a_freq;
+        self.poly_mod_osc_b_to_osc_a_pw = params.poly_mod_osc_b_to_osc_a_pw;
+        self.poly_mod_osc_b_to_filter_cutoff = params.poly_mod_osc_b_to_filter_cutoff;
         self.glide_time = params.glide_time;
+        self.pitch_bend = params.pitch_bend;
+        self.pitch_bend_range = params.pitch_bend_range;
+        self.aftertouch = params.aftertouch;
+        self.aftertouch_to_cutoff = params.aftertouch_to_cutoff;
+        self.aftertouch_to_amplitude = params.aftertouch_to_amplitude;
+        self.expression = params.expression;
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {

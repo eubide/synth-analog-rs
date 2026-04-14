@@ -139,9 +139,23 @@ pub struct SynthParameters {
     pub poly_mod_filter_env_to_osc_a_freq: f32, // ±24 semitones a plena excursión
     pub poly_mod_filter_env_to_osc_a_pw: f32,   // shift de pulse width
     pub poly_mod_osc_b_to_osc_a_freq: f32,      // ±24 semitones a plena excursión
+    pub poly_mod_osc_b_to_osc_a_pw: f32,        // shift de pulse width
+    pub poly_mod_osc_b_to_filter_cutoff: f32,   // ±4 kHz a plena excursión
 
     // Glide / Portamento
     pub glide_time: f32, // 0.0 = off, >0 = segundos de deslizamiento
+
+    // Pitch bend
+    pub pitch_bend: f32,       // -1.0..=1.0 (centro = 0.0)
+    pub pitch_bend_range: u8,  // semitones, typically 2 or 12
+
+    // Aftertouch (channel pressure)
+    pub aftertouch: f32,              // 0.0..=1.0
+    pub aftertouch_to_cutoff: f32,    // 0.0..=1.0 — amount que mapea a ±4 kHz en cutoff
+    pub aftertouch_to_amplitude: f32, // 0.0..=1.0 — amount que mapea a ±amplitude
+
+    // Expression pedal (CC 11): scales master output level
+    pub expression: f32, // 0.0..=1.0, default 1.0 (full)
 }
 
 impl Default for SynthParameters {
@@ -183,7 +197,7 @@ impl Default for SynthParameters {
 
             // LFO – waveform 0 = Triangle
             lfo_rate: 2.0,
-            lfo_amount: 0.0,
+            lfo_amount: 1.0,
             lfo_waveform: 0,
             lfo_sync: false,
             lfo_target_osc1_pitch: false,
@@ -221,9 +235,23 @@ impl Default for SynthParameters {
             poly_mod_filter_env_to_osc_a_freq: 0.0,
             poly_mod_filter_env_to_osc_a_pw: 0.0,
             poly_mod_osc_b_to_osc_a_freq: 0.0,
+            poly_mod_osc_b_to_osc_a_pw: 0.0,
+            poly_mod_osc_b_to_filter_cutoff: 0.0,
 
             // Glide — off por defecto
             glide_time: 0.0,
+
+            // Pitch bend — centrado por defecto
+            pitch_bend: 0.0,
+            pitch_bend_range: 2,
+
+            // Aftertouch — off por defecto
+            aftertouch: 0.0,
+            aftertouch_to_cutoff: 0.5,
+            aftertouch_to_amplitude: 0.0,
+
+            // Expression pedal — abierta al máximo por defecto
+            expression: 1.0,
         }
     }
 }
@@ -257,6 +285,8 @@ pub enum MidiEvent {
     NoteOn { note: u8, velocity: u8 },
     NoteOff { note: u8 },
     SustainPedal { pressed: bool },
+    /// Program Change: load preset at position `program` (0-indexed) in sorted list
+    ProgramChange { program: u8 },
 }
 
 /// Lightweight event queue for MIDI note events

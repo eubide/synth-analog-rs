@@ -121,19 +121,34 @@ impl MidiHandler {
                         format!("CC: {} Val: {} Ch: {}", data1, data2, channel),
                     )
                 }
-                0xC0 => (
-                    "Program".to_string(),
-                    format!("Program: {} Ch: {}", data1, channel),
-                ),
-                0xD0 => (
-                    "Pressure".to_string(),
-                    format!("Pressure: {} Ch: {}", data1, channel),
-                ),
+                0xC0 => {
+                    midi_events.push(MidiEvent::ProgramChange { program: data1 });
+                    (
+                        "Program".to_string(),
+                        format!("Program: {} Ch: {}", data1, channel),
+                    )
+                }
+                0xD0 => {
+                    // Channel Pressure (aftertouch): data1 = pressure 0..=127
+                    let normalized = data1 as f32 / 127.0;
+                    let mut params = *lock_free_synth.get_params();
+                    params.aftertouch = normalized;
+                    lock_free_synth.set_params(params);
+                    (
+                        "Pressure".to_string(),
+                        format!("Pressure: {:.3} Ch: {}", normalized, channel),
+                    )
+                }
                 0xE0 => {
                     let bend_value = ((data2 as u16) << 7) | (data1 as u16);
+                    // 14-bit value: 0..=16383, center = 8192 → normalize to -1.0..=1.0
+                    let normalized = (bend_value as f32 - 8192.0) / 8192.0;
+                    let mut params = *lock_free_synth.get_params();
+                    params.pitch_bend = normalized.clamp(-1.0, 1.0);
+                    lock_free_synth.set_params(params);
                     (
                         "Pitch Bend".to_string(),
-                        format!("Bend: {} Ch: {}", bend_value, channel),
+                        format!("Bend: {:.3} Ch: {}", normalized, channel),
                     )
                 }
                 _ => (
@@ -186,6 +201,7 @@ impl MidiHandler {
             7 => params.mixer_osc1_level = normalized_value,
             8 => params.mixer_osc2_level = normalized_value,
             9 => params.noise_level = normalized_value,
+            11 => params.expression = normalized_value,
             16 => params.filter_cutoff = 20.0 + (normalized_value * 19980.0),
             17 => params.filter_resonance = normalized_value * 10.0,
             18 => params.filter_envelope_amount = normalized_value,

@@ -77,6 +77,11 @@ impl AudioEngine {
         let mut synthesizer = Synthesizer::new();
         synthesizer.sample_rate = sample_rate as f32;
 
+        // Cache preset list before entering the real-time callback.
+        // list_presets() does filesystem I/O which must never run on the audio thread.
+        let preset_names: std::sync::Arc<Vec<String>> =
+            std::sync::Arc::new(Synthesizer::list_presets());
+
         // Pre-allocated mono buffer
         let mut mono_buffer = vec![0.0f32; 1024];
 
@@ -97,6 +102,16 @@ impl AudioEngine {
                             }
                             MidiEvent::SustainPedal { pressed: _pressed } => {
                                 // Sustain pedal - future enhancement
+                            }
+                            MidiEvent::ProgramChange { program } => {
+                                if !preset_names.is_empty() {
+                                    let idx = (program as usize) % preset_names.len();
+                                    if let Err(e) = synthesizer.load_preset(&preset_names[idx]) {
+                                        log::warn!("Program Change: failed to load preset '{}': {}", preset_names[idx], e);
+                                    } else {
+                                        log::info!("Program Change {}: loaded '{}'", program, preset_names[idx]);
+                                    }
+                                }
                             }
                         }
                     }
