@@ -613,8 +613,10 @@ impl Synthesizer {
                 freq2 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc2_pitch * 0.1);
 
                 // Update phases using integer accumulators to prevent drift
-                let phase1_increment = ((freq1 / self.sample_rate) * PHASE_SCALE as f32) as u64;
-                let phase2_increment = ((freq2 / self.sample_rate) * PHASE_SCALE as f32) as u64;
+                let dt1 = freq1 * dt;
+                let dt2 = freq2 * dt;
+                let phase1_increment = (dt1 * PHASE_SCALE as f32) as u64;
+                let phase2_increment = (dt2 * PHASE_SCALE as f32) as u64;
 
                 voice.phase1_accumulator = voice.phase1_accumulator.wrapping_add(phase1_increment);
                 voice.phase2_accumulator = voice.phase2_accumulator.wrapping_add(phase2_increment);
@@ -637,12 +639,18 @@ impl Synthesizer {
                 }
 
                 // Generate oscillator outputs using calculated phases
-                let osc1_out =
-                    Self::generate_oscillator_static(osc1_wave_type, phase1, osc1_pulse_width)
-                        * osc1_amplitude;
-                let osc2_out =
-                    Self::generate_oscillator_static(osc2_wave_type, phase2, osc2_pulse_width)
-                        * osc2_amplitude;
+                let osc1_out = Self::generate_oscillator_static(
+                    osc1_wave_type,
+                    phase1,
+                    dt1,
+                    osc1_pulse_width,
+                ) * osc1_amplitude;
+                let osc2_out = Self::generate_oscillator_static(
+                    osc2_wave_type,
+                    phase2,
+                    dt2,
+                    osc2_pulse_width,
+                ) * osc2_amplitude;
 
                 // Mix oscillators with individual levels and add noise
                 let noise = if mixer_noise_level > 0.0 {
@@ -727,29 +735,73 @@ impl Synthesizer {
         }
     }
 
-    fn generate_oscillator_static(wave_type: WaveType, phase: f32, pulse_width: f32) -> f32 {
-        let phase = phase % 1.0;
+    fn generate_oscillator_static(
+        wave_type: WaveType,
+        phase: f32,
+        dt: f32,
+        pulse_width: f32,
+    ) -> f32 {
         match wave_type {
             WaveType::Sine => OPTIMIZATION_TABLES.fast_sin(phase * 2.0 * PI),
+            WaveType::Sawtooth => {
+                let value = 2.0 * phase - 1.0;
+                value - Self::poly_blep(phase, dt)
+            }
             WaveType::Square => {
-                // Pulse wave with variable width
-                if phase < pulse_width { 1.0 } else { -1.0 }
+                let pw = pulse_width.clamp(0.01, 0.99);
+                let mut value = if phase < pw { 1.0 } else { -1.0 };
+                value += Self::poly_blep(phase, dt);
+                let falling_phase = if phase >= pw {
+                    phase - pw
+                } else {
+                    phase + 1.0 - pw
+                };
+                value -= Self::poly_blep(falling_phase, dt);
+                value
             }
             WaveType::Triangle => {
-                if phase < 0.5 {
+                // Triangle harmonics already fall at 1/n^2, so naive aliasing is mild;
+                // PolyBLAMP smooths the slope discontinuities at phase 0 and 0.5.
+                let mut value = if phase < 0.5 {
                     4.0 * phase - 1.0
                 } else {
                     3.0 - 4.0 * phase
-                }
+                };
+                value += 8.0 * dt * Self::poly_blamp(phase, dt);
+                let half_phase = if phase >= 0.5 {
+                    phase - 0.5
+                } else {
+                    phase + 0.5
+                };
+                value -= 8.0 * dt * Self::poly_blamp(half_phase, dt);
+                value
             }
-            WaveType::Sawtooth => {
-                // Band-limited sawtooth using sin harmonics (lookup table)
-                let mut output = 0.0;
-                for n in 1..=8 {
-                    output += OPTIMIZATION_TABLES.fast_sin(n as f32 * phase * 2.0 * PI) / n as f32;
-                }
-                -2.0 * output / PI
-            }
+        }
+    }
+
+    #[inline]
+    fn poly_blep(phase: f32, dt: f32) -> f32 {
+        if phase < dt {
+            let t = phase / dt;
+            2.0 * t - t * t - 1.0
+        } else if phase > 1.0 - dt {
+            let t = (phase - 1.0) / dt;
+            t * t + 2.0 * t + 1.0
+        } else {
+            0.0
+        }
+    }
+
+    #[inline]
+    fn poly_blamp(phase: f32, dt: f32) -> f32 {
+        if phase < dt {
+            let t = phase / dt - 1.0;
+            -(1.0 / 3.0) * t * t * t
+        } else if phase > 1.0 - dt {
+            let t = (phase - 1.0) / dt + 1.0;
+            (1.0 / 3.0) * t * t * t
+        } else {
+            0.0
         }
     }
 
@@ -2699,9 +2751,10 @@ mod tests {
 
     #[test]
     fn test_oscillator_sine_output_range() {
+        let dt = 440.0 / 48000.0;
         for i in 0..100 {
             let phase = i as f32 / 100.0;
-            let output = Synthesizer::generate_oscillator_static(WaveType::Sine, phase, 0.5);
+            let output = Synthesizer::generate_oscillator_static(WaveType::Sine, phase, dt, 0.5);
             assert!(
                 (-1.01..=1.01).contains(&output),
                 "Sine at phase {} = {}",
@@ -2713,9 +2766,11 @@ mod tests {
 
     #[test]
     fn test_oscillator_sawtooth_output_range() {
+        let dt = 440.0 / 48000.0;
         for i in 0..100 {
             let phase = i as f32 / 100.0;
-            let output = Synthesizer::generate_oscillator_static(WaveType::Sawtooth, phase, 0.5);
+            let output =
+                Synthesizer::generate_oscillator_static(WaveType::Sawtooth, phase, dt, 0.5);
             assert!(
                 (-1.5..=1.5).contains(&output),
                 "Saw at phase {} = {}",
