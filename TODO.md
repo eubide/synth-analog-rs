@@ -1,224 +1,202 @@
 # TODO
 
-## Documentation
-- [x] Create comprehensive README.md with:
-  - [x] Build and run instructions
-  - [x] System requirements (audio, MIDI setup)
-  - [x] Keyboard controls and shortcuts
-  - [x] Preset management guide
-  - [x] Architecture overview
-- [x] Create CLAUDE.md for Claude Code assistance with:
-  - [x] Development commands and workflow
-  - [x] Prophet-5 architecture overview
-  - [x] Key components and their interactions
-  - [x] Performance considerations for real-time audio
+Sintetizador analógico tipo Prophet-5 en Rust. Esta lista prioriza el trabajo pendiente por impacto en el sonido y la fidelidad al instrumento original.
 
-## Vintage Analog Features
+## Leyenda
 
-### Filter Section
-- [x] Implement 4-pole (24dB/octave) ladder filter (currently using 2-pole 12dB/octave biquad)
-- [x] Add filter self-oscillation capability at high resonance
-- [x] Implement proper filter saturation/drive modeling
+- **P1** — Motor de sonido, impacto alto (hacer primero)
+- **P2** — Motor de sonido, impacto medio
+- **P3** — Features del Prophet-5 que faltan
+- **P4** — MIDI pendiente
+- **P5** — GUI / UX
+- **P6** — Character analógico adicional
+- **P7** — Opcional / avanzado
 
-### LFO Section  
-- [x] Add multiple LFO waveforms (currently only sine):
-  - [x] Triangle
-  - [x] Sawtooth (ramp up/down)  
-  - [x] Square
-  - [x] Sample & Hold (random)
-- [x] Add LFO sync to keyboard trigger option
-- [ ] Implement LFO delay/fade-in
+Cada ítem incluye referencia de archivo y línea cuando aplica. Los detalles técnicos de P1 y P2 están en el **Análisis de sonido 2026-04-14** más abajo.
 
-### Modulation Features
-- [ ] Implement Poly-Mod section with vintage analog routings:
+---
+
+## P1 — Motor de sonido: impacto alto
+
+Los cambios aquí son los que más mueven la percepción hacia "suave y natural". Son la ruta crítica para que el sintetizador deje de sonar digital.
+
+- [ ] **PolyBLEP en los 4 osciladores.** Sustituir sawtooth (8 armónicos fijos), square y triangle naive por PolyBLEP con doble transición para PWM. `synthesizer.rs:734-758`. *(ver P1 del análisis)*
+- [ ] **Envelopes exponenciales reales.** Reescribir los dos ADSR con `coeff = exp(-dt/τ)` y `value = target + (value - target) * coeff`. Elimina clics y el tufo digital. `synthesizer.rs:863-1001`. *(ver P2)*
+- [ ] **Filtro ZDF ladder bien afinado.** Coeficiente `g = tan(π·fc/fs)`, `tanh` dentro de cada una de las 4 etapas, compensación de graves al subir resonancia, y mover el DC blocker al bus master con `coeff ≈ 0.9999`. `synthesizer.rs:760-850`. *(ver P3)*
+- [ ] **Fix de detune en cents (logarítmico).** Cambiar `freq * (1 + detune/100)` por `freq * 2f32.powf(detune/1200)`. `synthesizer.rs:608-609`. *(ver P4a)*
+- [ ] **Keyboard tracking exponencial.** Cambiar a `cutoff *= 2f32.powf((midi_note - 60) / 12 * kbd_track)`. `synthesizer.rs:666-677`. *(ver P4b)*
+
+## P2 — Motor de sonido: impacto medio
+
+- [ ] **Gain staging + soft clipper continuo.** Normalizar la suma de voces (`1/√N` o headroom fijo), reemplazar el clipper discontinuo en 0.7 por `tanh(x)` o `x/(1+|x|)` aplicado en todo el rango. `synthesizer.rs:712,722-727`. *(ver P5)*
+- [ ] **Reverb Freeverb-style.** 8 combs en paralelo con damping LP interno + 4 allpass en serie, o como mínimo añadir 2 allpass tras el banco actual. `synthesizer.rs:1118-1137`. *(ver P6)*
+- [ ] **Carácter analógico por voz.** Fase inicial aleatoria en los osciladores, LFO sub-audio de drift por voz (±1–3 cents), pink noise con PRNG xorshift en lugar de `rand::random` blanco. `synthesizer.rs:302-303,649`. *(ver P7)*
+- [ ] **Retrigger sin clic.** Rampa corta de 5–10 ms al reiniciar attack, en lugar de `envelope_value *= 0.5`. `synthesizer.rs:420-427`. *(ver P8)*
+- [ ] **Glide / Portamento.** Tiempo ajustable, modos constante-time y constante-rate. Fundamental para solos tipo Prophet.
+
+## P3 — Features del Prophet-5 faltantes
+
+- [ ] **Poly-Mod section** con las routings clásicas:
   - [ ] Filter Envelope → Oscillator A frequency
   - [ ] Filter Envelope → Oscillator A pulse width
   - [ ] Oscillator B → Oscillator A frequency
   - [ ] Oscillator B → Oscillator A pulse width
   - [ ] Oscillator B → Filter cutoff
-- [ ] Add Glide/Portamento with adjustable time
-- [ ] Implement Unison mode (all voices stacked on single note with detune)
-
-### MIDI Implementation
-- [x] Basic MIDI note on/off support (already implemented)
-- [x] Comprehensive MIDI CC support for all parameters (CC 1-54 mapped in midi_handler.rs)
-- [x] Sustain pedal (CC 64) support
-- [x] Modulation wheel (CC 1) support
-- [ ] MIDI CC support for remaining controls:
-  - [ ] Pitch bend (CC 0)
-  - [ ] Expression pedal (CC 11)
-- [ ] MIDI Program Change for preset selection
-- [ ] MIDI SysEx for patch dump/load
-
-### Voice Architecture
-- [ ] Reduce to authentic 5-voice polyphony mode (currently 8 voices)
-- [ ] Add voice panning/spread (vintage analog feature)
-- [ ] Implement vintage voice allocation modes:
+- [ ] **Unison mode** (todas las voces apiladas sobre una sola nota con detune)
+- [ ] **Modo 5-voice auténtico** como opción (actualmente 8)
+- [ ] **Vintage voice allocation modes:**
   - [ ] Last-note priority
-  - [ ] Low-note priority  
+  - [ ] Low-note priority
   - [ ] High-note priority
-- [ ] Add analog voice detuning/drift simulation
+- [ ] **LFO delay / fade-in**
 
-### Analog Modeling
-- [ ] Add vintage character options:
-  - [ ] Oscillator drift/instability
-  - [ ] Filter temperature drift
-  - [ ] Component tolerance variations
-  - [ ] VCA bleed-through
-  - [ ] Analog noise floor
-- [ ] Implement vintage vs modern mode toggle
+## P4 — MIDI pendiente
 
-### Performance Features
-- [ ] Add keyboard velocity curves
-- [ ] Implement aftertouch support
-- [ ] Add micro-tuning/alternate tuning tables
-- [ ] Implement A-440 Hz reference tone generator
+- [ ] **Pitch bend** (status byte `0xE0`). Detectado en `midi_handler.rs:132-138` pero solo se loguea. Falta aplicarlo al pitch de todas las voces (con rango configurable en semitonos).
+- [ ] **Aftertouch** (status byte `0xD0`). Detectado en `midi_handler.rs:128-131` pero no ruteado. Añadirlo como fuente en la modulation matrix.
+- [ ] **Program Change** (status byte `0xC0`). Detectado en `midi_handler.rs:124-127` pero sin efecto. Usarlo para cambiar de preset.
+- [ ] **Expression pedal** (CC 11)
+- [ ] **MIDI SysEx** para patch dump/load
 
-### UI Enhancements
-- [x] Create authentic vintage analog GUI layout
-- [x] Add oscilloscope/waveform display
-- [ ] Implement patch comparison (A/B)
-- [x] Add MIDI activity indicators
-- [ ] Create preset browser with categories
+## P5 — GUI / UX
 
-## Análisis Crítico del Motor de Sonido - Problemas Identificados
+- [ ] **Mapeo logarítmico del knob de filter cutoff** (percepción natural, independiente de los fixes DSP de P1)
+- [ ] **Keyboard velocity curves humanizadas.** Hoy la velocidad es lineal; añadir curvas (soft/linear/hard) configurables.
+- [ ] **Patch A/B comparison**
+- [ ] **Preset browser con categorías.** Añadir metadato de categoría a los presets (Bass / Lead / Pad / Brass / FX) y agrupar en la UI.
 
-### **Problemas Críticos Que Requieren Atención Inmediata**
+## P6 — Character analógico adicional
 
-#### 1. **Problemas Graves de Aliasing y Anti-aliasing**
+Más allá del drift / fase aleatoria / pink noise de P2, modelado de idiosincrasias analógicas:
 
-**Sawtooth Wave (synthesizer.rs:~line 400)**
-- **Problema**: Solo usa 8 armónicos fijos → aliasing severo en frecuencias altas
-- **Impacto**: Sonido digital áspero, especialmente en notas agudas
-- **Ubicación**: `WaveType::Sawtooth` en `generate_oscillator_static()`
-- **Solución**: Implementar osciladores BLEP/PolyBLEP o wavetables pre-calculadas
+- [ ] **Component tolerance variations** — pequeñas variaciones por voz en la respuesta del filtro y los envelopes
+- [ ] **VCA bleed-through** — ligera fuga del oscilador cuando el VCA está cerrado
+- [ ] **Analog noise floor** — ruido de fondo muy bajo tipo "hiss" de circuito
+- [ ] **Filter temperature drift** — drift lento del cutoff por "calentamiento" simulado
 
-**Square/Triangle Waves**
-- **Problema**: Generación naive sin band-limiting → aliasing masivo
-- **Impacto**: Artifacts digitales muy audibles
-- **Solución**: Band-limited square waves con PolyBLEP
+## P7 — Opcional / avanzado
 
-#### 2. **Problemas Críticos de Precisión Numérica**
+- [ ] **Oversampling 2×/4×** (baja prioridad una vez PolyBLEP esté en sitio)
+- [ ] **Micro-tuning / alternate tuning tables** (Just Intonation, tunings históricos)
+- [ ] **A-440 Hz reference tone generator**
+- [ ] **Voice panning / stereo spread.** Actualmente el motor es mono y se convierte a multi-channel copiando. Añadir posicionamiento estéreo por voz.
 
-**Drift de Fase (synthesizer.rs:~line 580)**
-- **Problema**: Acumulación de errores de punto flotante en `voice.phase1/phase2`
-- **Código problemático**: 
+---
+
+## Análisis de sonido 2026-04-14 — detalles técnicos
+
+Este bloque es la referencia técnica para los ítems de P1 y P2. Ordenado por impacto en la percepción de "sonido suave y natural".
+
+### P1 — PolyBLEP en los 4 osciladores (impacto 10/10)
+- **Ref:** `synthesizer.rs:734-758` (`generate_oscillator_static`)
+- Cuadrado y triángulo son naive (discontinuidad sin band-limit) → aliasing severo sobre C5.
+- Sawtooth suma 8 armónicos fijos: en graves (C1 ~32 Hz) suena apagado porque faltan cientos de armónicos disponibles; en agudos sigue aliaseando. Además es ~8× más caro que PolyBLEP.
+- **Acción:** sustituir las 4 formas por PolyBLEP (saw, pulse con doble transición para PWM, triángulo por integración del pulse).
+
+### P2 — Envelopes exponenciales reales (impacto 9/10)
+- **Ref:** `synthesizer.rs:863-938` (amp) y `synthesizer.rs:941-1001` (filter)
+- Attack y decay son rampas lineales → carácter digital inmediato. Prophet-5 usa curvas RC `1 − exp(−t/τ)`.
+- El "release exponencial" actual `value *= (1 - release_rate*dt).max(0)` no es una exponencial verdadera: con `release` corto se convierte en corte abrupto (clic) y no respeta el tiempo de caída teórico.
+- **Acción:** reescribir los 3 estados con `coeff = exp(-dt/τ)` y `value = target + (value - target) * coeff`.
+
+### P3 — Filtro ladder mal afinado (impacto 9/10)
+- **Ref:** `synthesizer.rs:760-850` (`apply_ladder_filter_static`)
+- **Coeficiente sin warping:** usa `f = 2·fc/fs`. Debería ser `g = tan(π·fc/fs)` (ZDF/TPT) o mínimo `g = 1 - exp(-2π·fc/fs)`. Sin warping, el corte se desafina en la banda alta.
+- **Topología sospechosa:** la forma con `state.delayN = saturated - state.stageN` no corresponde a un TPT correcto — el filtro está fuera del tono teórico.
+- **Saturación mal colocada:** aplica `tanh` solo antes de la etapa 1. El Huovilainen real mete `tanh` dentro de cada una de las 4 etapas, de ahí el "calor" característico.
+- **Compensación de resonancia arbitraria:** `1 + res*0.1` no compensa la pérdida real de graves al subir la resonancia (passband gain compensation).
+- **DC blocker mal ubicado y mal sintonizado:** `synthesizer.rs:818` usa `dc_block_coeff = 0.995` que en 44.1k da un HP a ~35 Hz, no "1.6 Hz" como dice el comentario → los bajos se adelgazan. Moverlo al bus master con coeficiente ~0.9999 o eliminarlo por voz.
+
+### P4 — Bugs de afinación (impacto 8/10)
+- **P4a — Detune en "cents" es lineal, no logarítmico.** `synthesizer.rs:608-609`:
   ```rust
-  voice.phase1 = (voice.phase1 + freq1 * dt) % 1.0;
+  let mut freq1 = voice.frequency * (1.0 + osc1_detune / 100.0);
   ```
-- **Impacto**: Desintonización gradual, inestabilidad de pitch
-- **Solución**: Usar contadores de muestras enteros + conversión a fase
-
-**LFO Phase Drift (synthesizer.rs:~line 555)**
-- **Problema**: `self.lfo_phase` vulnerable a drift temporal
-- **Impacto**: LFO pierde sincronización con el tiempo
-- **Solución**: Reset periódico o contador entero
-
-#### 3. **Threading y Concurrencia - CRÍTICO PARA AUDIO**
-
-**Mutex Contention (audio_engine.rs:56)**
-- **Problema**: `synthesizer.lock().unwrap()` en audio thread
-- **Impacto**: Audio dropouts, crackling, latencia variable
-- **Código problemático**: 
+  +50 "cents" acaba siendo ×1.5 (una quinta justa) en vez de medio semitono. Fórmula correcta: `freq * 2f32.powf(detune_cents / 1200.0)`. Revisar rango de GUI y presets que hayan guardado valores grandes confiando en el comportamiento actual.
+- **P4b — Keyboard tracking no es exponencial.** `synthesizer.rs:666-677`:
   ```rust
-  let mut synth = synthesizer.lock().unwrap();
+  kbd_track = kbd * ((note_freq / 261.63) - 1.0);
+  modulated_cutoff += filter_cutoff * kbd_track;
   ```
-- **Solución**: Lock-free communication con ringbuffers/atomics
+  No sigue octavas. Debería ser `cutoff *= 2f32.powf((midi_note - 60) / 12.0 * kbd_track)`.
 
-**GUI Interference (gui.rs:36)**
-- **Problema**: GUI locks pueden bloquear audio thread
-- **Impacto**: Crackling cuando se mueven controles
-- **Solución**: Separar parámetros GUI de audio engine
+### P5 — Gain staging y soft clip (impacto 7/10)
+- **Ref:** `synthesizer.rs:712` (`*sample += mixed;`) y `synthesizer.rs:722-727` (soft clip)
+- Las 8 voces se suman sin normalizar. Un acorde de 4 con ambos osciladores al 100% llega a ~8. Con `master_volume = 0.7` y soft clip disparándose a 0.7 → el synth satura constantemente en acordes.
+- Soft clip **discontinuo en 0.7**: la expresión `sign * (1 - exp(-abs*3))` no empata con `x` en la transición → kink audible.
+- **Acción:** headroom global + clipper continuo (`tanh`, `x/(1+|x|)` o curva hermite) en todo el rango. Opcional: compresor RMS muy suave al final para "pegamento" analógico en acordes.
 
-**Panic Vulnerability**
-- **Problema**: `unwrap()` en audio callback puede crashear
-- **Impacto**: Crash completo del programa
-- **Solución**: Error handling robusto en audio thread
+### P6 — Reverb metálico (impacto 6/10)
+- **Ref:** `synthesizer.rs:1118-1137` (`apply_reverb`)
+- 4 combs paralelos sin difusión → timbre resonante/vidrioso. Los tamaños 25/41/59/73 ms están muy cercanos y producen flutter.
+- **Acción:** migrar a Freeverb-style (8 combs con damping LP interno + 4 allpass en serie).
 
-#### 4. **Problemas Graves en el Filtro**
+### P7 — Vida analógica (impacto 6/10)
+- **Fase inicial siempre en 0** al crear voz (`synthesizer.rs:302-303`). Las voces son fase-coherentes → cancelaciones/phasiness en acordes. Inicializar `phase1_accumulator` y `phase2_accumulator` a valores aleatorios.
+- **Drift por voz:** cada VCO del Prophet-5 deriva ±3 cents lentamente. Añadir un LFO sub-audio pseudoaleatorio por voz con amplitud 1–3 cents.
+- **Ruido blanco vs pink:** `rand::random` por muestra en `synthesizer.rs:649`. Prophet-5 usa ruido más cercano a pink (pasa por filtro analógico). Añadir pink noise + PRNG xorshift.
 
-**Inestabilidad del Filtro (synthesizer.rs:~line 680)**
-- **Problema**: Coeficientes pueden volverse inestables
-- **Código problemático**: `let fc = (cutoff / sample_rate).min(0.49);`
-- **Impacto**: Explosión de señal, saturación
-- **Solución**: Clamp más estricto, verificación de estabilidad
+### P8 — Retrigger con clic (impacto 5/10)
+- **Ref:** `synthesizer.rs:420-427`
+  ```rust
+  voice.envelope_value *= 0.5;
+  voice.envelope_state = EnvelopeState::Attack;
+  ```
+- Saltar la envolvente a la mitad y reiniciar el attack produce un zip audible. Opciones: rampa corta ~5–10 ms hacia el nuevo valor, o modo legato real que mantiene envelope y solo cambia pitch.
 
-**Self-Oscillation Peligrosa**
-- **Problema**: `let res = resonance.clamp(0.0, 4.0);` permite runaway
-- **Impacto**: Volumen extremo, posible daño a altavoces/oídos
-- **Solución**: Limiter de seguridad, resonancia máxima más baja
+### Orden de trabajo recomendado
 
-**Falta DC Blocking**
-- **Problema**: Acumulación de DC offset en filtro
-- **Impacto**: Pop/clicks, saturación gradual
-- **Solución**: High-pass DC blocker
+Impacto descendente con riesgo ascendente:
 
-#### 5. **Performance - Problemas en Hot Path**
+1. **P1 PolyBLEP** — el cambio más audible de todos.
+2. **P2 envelopes exponenciales** — elimina el tufo digital, trivial.
+3. **P4 fix de detune + keyboard tracking** — corrige tuning, trivial.
+4. **P3 filtro ZDF con tanh por etapa + DC blocker al master** — calor Moog real.
+5. **P5 gain staging + soft clipper continuo** — acordes limpios.
+6. **P7 drift + fase aleatoria + pink noise** — movimiento analógico.
+7. **P6 reverb Freeverb-style** — solo si se usa reverb en presets.
+8. **P8 retrigger legato + glide** — expresividad.
 
-**Allocations en Audio Thread (audio_engine.rs:60)**
-- **Problema**: `let mut mono_buffer = vec![0.0f32; frames];`
-- **Impacto**: GC pauses, jitter, dropouts
-- **Solución**: Pre-allocar buffer reutilizable
+Los puntos **1–3** cubren probablemente el 70% del camino hacia "suave y natural".
 
-**Random Calls Costosas (synthesizer.rs:~line 575)**
-- **Problema**: `rand::random::<f32>()` es pesado para noise
-- **Impacto**: CPU spikes, dropouts
-- **Solución**: PRNG simple (Linear Congruential Generator)
+---
 
-**Envelope Calculations Ineficientes**
-- **Problema**: Cálculos repetidos por voice por sample
-- **Impacto**: Alto uso de CPU
-- **Solución**: Lookup tables o algoritmos optimizados
+## Completado
 
-#### 6. **Problemas de Calidad DSP**
+### Proyecto y documentación
+- [x] README.md completo con build, system requirements, keyboard controls, preset management, architecture overview
+- [x] CLAUDE.md con development commands, Prophet-5 architecture, key components, performance notes
 
-**Envelope Curves Poco Naturales**
-- **Problema**: Envelopes lineales suenan digitales
-- **Impacto**: Sonido poco orgánico
-- **Solución**: Curves exponenciales/logarítmicas
+### Motor de sonido
+- [x] Filtro 4-pole (24dB/octave) ladder con self-oscillation y saturation básica
+- [x] Dual oscillators con oscillator sync
+- [x] ADSR envelopes separados para amp y filter
+- [x] LFO con 5 waveforms (Triangle, Square, Sawtooth, ReverseSawtooth, Sample & Hold) y keyboard sync
+- [x] 8-voice polyphony con voice stealing
+- [x] Effects: reverb y delay básicos (bonus, no en el Prophet-5 original)
 
-**Filter Frequency Mapping**
-- **Problema**: No hay scaling logarítmico perceptual
-- **Impacto**: Controles poco intuitivos
-- **Solución**: Mapeo exponencial de frecuencias
+### Estabilidad y rendimiento en audio thread
+- [x] Threading lock-free real con `TripleBuffer` de atomics (`lock_free.rs:7-56`)
+- [x] Buffer mono pre-alocado y redimensionado dinámicamente en el callback de audio (`audio_engine.rs:81,110-111`)
+- [x] Sample rate leído del dispositivo y pasado al synth — ya no está hardcoded a 44.1 kHz (`audio_engine.rs:24,78`)
+- [x] Phase drift corregido con acumuladores enteros de 32-bit fractional
+- [x] Filter clamping seguro para evitar runaway
+- [x] DC blocker presente (aunque mal ubicado — ver P1 del análisis)
+- [x] Limiter de seguridad en audio thread (`audio_engine.rs:143-150`)
+- [x] Error handling robusto sin `unwrap()` en audio thread
 
-**Velocity Response Básica**
-- **Problema**: Respuesta linear de velocity
-- **Impacto**: Expresividad limitada
-- **Solución**: Curves de velocity humanizadas
+### MIDI
+- [x] Note on/off
+- [x] CC mapping completo (CC 1-54) para parámetros de synth
+- [x] Sustain pedal (CC 64)
+- [x] Modulation wheel (CC 1)
+- [x] Auto-conexión al primer MIDI input disponible
 
-### **Plan de Correcciones Prioritarias**
+### Presets
+- [x] Save/load system con formato propio
+- [x] 26 presets clásicos (Moog Bass, Warm Pad, Brass Stab, Sax Lead, etc.)
 
-#### **Prioridad 1 - CRÍTICO (Seguridad/Estabilidad)**
-- [x] Implementar limiter/compressor de seguridad
-- [ ] Refactorizar threading lock-free (parcialmente completado - ahora usa try_lock())
-- [x] Eliminar allocations en audio thread
-- [x] Error handling robusto (no unwrap())
-
-#### **Prioridad 2 - ALTA (Calidad de Audio)**
-- [ ] Implementar osciladores anti-aliased (PolyBLEP)
-- [x] Estabilizar filtro con clamps seguros
-- [x] Agregar DC blocking
-- [x] Corregir drift de fase en osciladores y LFO (usando acumuladores enteros)
-- [ ] Optimizar envelope calculations
-
-#### **Prioridad 3 - MEDIA (Mejoras de Calidad)**
-- [ ] Envelope curves exponenciales
-- [ ] Filter frequency mapping logarítmico
-- [ ] PRNG optimizado para noise
-- [ ] Velocity curves humanizadas
-
-#### **Prioridad 4 - BAJA (Features Avanzadas)**
-- [ ] Oversampling para calidad premium
-- [ ] Procesamiento estéreo verdadero
-- [ ] Buffer size adaptive
-- [ ] Sample rate adaptive algorithms
-
-## Completed
-- [x] Basic MIDI input support
-- [x] Dual oscillators with sync
-- [x] Basic filter with envelope
-- [x] ADSR envelopes (amp and filter)
-- [x] LFO with basic routing
-- [x] Preset save/load system
-- [x] Effects (reverb, delay) - bonus features not in original
+### GUI
+- [x] Layout vintage analógico con egui
+- [x] Oscilloscope/waveform display
+- [x] MIDI activity indicators
