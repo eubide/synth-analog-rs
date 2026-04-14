@@ -134,6 +134,14 @@ pub struct SynthParameters {
 
     // Global controls
     pub master_volume: f32,
+
+    // Poly Mod (Prophet-5) — todas en rango -1.0..=1.0
+    pub poly_mod_filter_env_to_osc_a_freq: f32, // ±24 semitones a plena excursión
+    pub poly_mod_filter_env_to_osc_a_pw: f32,   // shift de pulse width
+    pub poly_mod_osc_b_to_osc_a_freq: f32,      // ±24 semitones a plena excursión
+
+    // Glide / Portamento
+    pub glide_time: f32, // 0.0 = off, >0 = segundos de deslizamiento
 }
 
 impl Default for SynthParameters {
@@ -208,6 +216,14 @@ impl Default for SynthParameters {
 
             // Global
             master_volume: 0.7,
+
+            // Poly Mod — off por defecto
+            poly_mod_filter_env_to_osc_a_freq: 0.0,
+            poly_mod_filter_env_to_osc_a_pw: 0.0,
+            poly_mod_osc_b_to_osc_a_freq: 0.0,
+
+            // Glide — off por defecto
+            glide_time: 0.0,
         }
     }
 }

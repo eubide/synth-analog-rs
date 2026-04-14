@@ -135,6 +135,7 @@ pub struct Voice {
     pub filter_state: LadderFilterState,
     pub is_active: bool,
     pub sustain_time: f32,
+    pub glide_current_freq: f32, // frecuencia actual durante portamento
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -194,6 +195,12 @@ pub struct Synthesizer {
     pub arp_step: usize,
     pub arp_timer: f32,
     pub arp_note_timer: f32,
+    // Poly Mod
+    pub poly_mod_filter_env_to_osc_a_freq: f32,
+    pub poly_mod_filter_env_to_osc_a_pw: f32,
+    pub poly_mod_osc_b_to_osc_a_freq: f32,
+    // Glide
+    pub glide_time: f32,
 }
 
 impl Default for OscillatorParams {
@@ -322,6 +329,7 @@ impl Voice {
             },
             is_active: true,
             sustain_time: 0.0,
+            glide_current_freq: frequency,
         }
     }
 
@@ -382,6 +390,10 @@ impl Synthesizer {
             arp_step: 0,
             arp_timer: 0.0,
             arp_note_timer: 0.0,
+            poly_mod_filter_env_to_osc_a_freq: 0.0,
+            poly_mod_filter_env_to_osc_a_pw: 0.0,
+            poly_mod_osc_b_to_osc_a_freq: 0.0,
+            glide_time: 0.0,
         }
     }
 
@@ -540,7 +552,7 @@ impl Synthesizer {
         let osc1_wave_type = self.osc1.wave_type;
         let osc1_amplitude = self.osc1.amplitude;
         let osc1_detune = self.osc1.detune;
-        let osc1_pulse_width = self.osc1.pulse_width;
+        let osc1_pulse_width_base = self.osc1.pulse_width;
         let osc2_wave_type = self.osc2.wave_type;
         let osc2_amplitude = self.osc2.amplitude;
         let osc2_detune = self.osc2.detune;
@@ -567,6 +579,9 @@ impl Synthesizer {
         let modulation_matrix = self.modulation_matrix.clone();
         let master_volume = self.master_volume;
         let sample_rate = self.sample_rate;
+        let poly_mod_fe_freq = self.poly_mod_filter_env_to_osc_a_freq;
+        let poly_mod_fe_pw = self.poly_mod_filter_env_to_osc_a_pw;
+        let glide_time = self.glide_time;
 
         // Precompute values that are constant for the entire block.
         // Avoids transcendental calls (powf, exp) inside the per-sample voice loop.
@@ -612,13 +627,36 @@ impl Synthesizer {
                     continue;
                 }
 
+                // Glide: interpolación exponencial hacia la nota objetivo
+                if glide_time > 0.001 {
+                    let coeff = (-1.0_f32 / (glide_time * sample_rate)).exp();
+                    voice.glide_current_freq = voice.frequency
+                        + (voice.glide_current_freq - voice.frequency) * coeff;
+                } else {
+                    voice.glide_current_freq = voice.frequency;
+                }
+                let base_freq = voice.glide_current_freq;
+
                 // Calculate frequencies with detune and modulation matrix
-                let mut freq1 = voice.frequency * osc1_detune_ratio;
-                let mut freq2 = voice.frequency * osc2_detune_ratio;
+                let mut freq1 = base_freq * osc1_detune_ratio;
+                let mut freq2 = base_freq * osc2_detune_ratio;
 
                 // Apply modulation matrix to oscillator pitch
                 freq1 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc1_pitch * 0.1);
                 freq2 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc2_pitch * 0.1);
+
+                // Poly Mod: Filter Envelope → Osc A frequency (±24 semitones a plena excursión)
+                if poly_mod_fe_freq.abs() > 0.001 {
+                    let semitones = poly_mod_fe_freq * 24.0 * voice.filter_envelope_value;
+                    freq1 *= 2.0_f32.powf(semitones / 12.0);
+                }
+
+                // Poly Mod: Filter Envelope → Osc A pulse width
+                let mut osc1_pw_voice = osc1_pulse_width_base;
+                if poly_mod_fe_pw.abs() > 0.001 {
+                    let pw_shift = poly_mod_fe_pw * 0.4 * voice.filter_envelope_value;
+                    osc1_pw_voice = (osc1_pw_voice + pw_shift).clamp(0.05, 0.95);
+                }
 
                 // Update phases using integer accumulators to prevent drift
                 let dt1 = freq1 * dt;
@@ -651,7 +689,7 @@ impl Synthesizer {
                     osc1_wave_type,
                     phase1,
                     dt1,
-                    osc1_pulse_width,
+                    osc1_pw_voice, // puede estar modulado por poly mod
                 ) * osc1_amplitude;
                 let osc2_out = Self::generate_oscillator_static(
                     osc2_wave_type,
@@ -2533,6 +2571,10 @@ impl Synthesizer {
             arp_octaves: self.arpeggiator.octaves,
             arp_gate_length: self.arpeggiator.gate_length,
             master_volume: self.master_volume,
+            poly_mod_filter_env_to_osc_a_freq: 0.0,
+            poly_mod_filter_env_to_osc_a_pw: 0.0,
+            poly_mod_osc_b_to_osc_a_freq: 0.0,
+            glide_time: 0.0,
         }
     }
 
@@ -2589,6 +2631,10 @@ impl Synthesizer {
         self.arpeggiator.octaves = params.arp_octaves;
         self.arpeggiator.gate_length = params.arp_gate_length;
         self.master_volume = params.master_volume;
+        self.poly_mod_filter_env_to_osc_a_freq = params.poly_mod_filter_env_to_osc_a_freq;
+        self.poly_mod_filter_env_to_osc_a_pw = params.poly_mod_filter_env_to_osc_a_pw;
+        self.poly_mod_osc_b_to_osc_a_freq = params.poly_mod_osc_b_to_osc_a_freq;
+        self.glide_time = params.glide_time;
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {
