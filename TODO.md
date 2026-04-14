@@ -29,19 +29,19 @@ Los cambios aquí son los que más mueven la percepción hacia "suave y natural"
 ## P2 — Motor de sonido: impacto medio
 
 - [x] **Gain staging + soft clipper continuo.** Normalizar la suma de voces (`1/√N` o headroom fijo), reemplazar el clipper discontinuo en 0.7 por `tanh(x)` o `x/(1+|x|)` aplicado en todo el rango. `synthesizer.rs:712,722-727`. *(ver P5)*
-- [ ] **Reverb Freeverb-style.** 8 combs en paralelo con damping LP interno + 4 allpass en serie, o como mínimo añadir 2 allpass tras el banco actual. `synthesizer.rs:1118-1137`. *(ver P6)*
-- [ ] **Carácter analógico por voz.** Fase inicial aleatoria en los osciladores, LFO sub-audio de drift por voz (±1–3 cents), pink noise con PRNG xorshift en lugar de `rand::random` blanco. `synthesizer.rs:302-303,649`. *(ver P7)*
-- [ ] **Retrigger sin clic.** Rampa corta de 5–10 ms al reiniciar attack, en lugar de `envelope_value *= 0.5`. `synthesizer.rs:420-427`. *(ver P8)*
+- [x] **Reverb Freeverb-style.** 8 combs en paralelo con damping LP interno + 4 allpass en serie. `synthesizer.rs:apply_reverb`. *(ver P6)*
+- [x] **Carácter analógico por voz.** Fase inicial aleatoria en los osciladores, LFO sub-audio de drift por voz (±1–3 cents), pink noise con PRNG xorshift en lugar de `rand::random` blanco. `synthesizer.rs:302-303,649`. *(ver P7)*
+- [x] **Retrigger sin clic.** Retrigger suave desde el valor actual de la envolvente — sin multiplicador. `synthesizer.rs:435-448`. *(ver P8)*
 - [x] **Glide / Portamento.** Interpolación exponencial por voz con `glide_time` ajustable. `synthesizer.rs:631-638`.
 
 ## P3 — Features del Prophet-5 faltantes
 
-- [ ] **Poly-Mod section** — routings pendientes:
-  - [x] Filter Envelope → Oscillator A frequency (`synthesizer.rs:643-645`)
-  - [x] Filter Envelope → Oscillator A pulse width (`synthesizer.rs:650-652`)
-  - [ ] Oscillator B → Oscillator A frequency (field existe, falta aplicarlo en audio loop)
-  - [ ] Oscillator B → Oscillator A pulse width
-  - [ ] Oscillator B → Filter cutoff
+- [x] **Poly-Mod section** — routings completos:
+  - [x] Filter Envelope → Oscillator A frequency
+  - [x] Filter Envelope → Oscillator A pulse width
+  - [x] Oscillator B → Oscillator A frequency (1-sample delay, `poly_mod_osc_b_to_osc_a_freq`)
+  - [x] Oscillator B → Oscillator A pulse width (`poly_mod_osc_b_to_osc_a_pw`)
+  - [x] Oscillator B → Filter cutoff (`poly_mod_osc_b_to_filter_cutoff`)
 - [ ] **Unison mode** (todas las voces apiladas sobre una sola nota con detune)
 - [ ] **Modo 5-voice auténtico** como opción (actualmente 8)
 - [ ] **Vintage voice allocation modes:**
@@ -52,10 +52,10 @@ Los cambios aquí son los que más mueven la percepción hacia "suave y natural"
 
 ## P4 — MIDI pendiente
 
-- [ ] **Pitch bend** (status byte `0xE0`). Detectado en `midi_handler.rs:132-138` pero solo se loguea. Falta aplicarlo al pitch de todas las voces (con rango configurable en semitonos).
-- [ ] **Aftertouch** (status byte `0xD0`). Detectado en `midi_handler.rs:128-131` pero no ruteado. Añadirlo como fuente en la modulation matrix.
-- [ ] **Program Change** (status byte `0xC0`). Detectado en `midi_handler.rs:124-127` pero sin efecto. Usarlo para cambiar de preset.
-- [ ] **Expression pedal** (CC 11)
+- [x] **Pitch bend** (status byte `0xE0`). `midi_handler.rs` actualiza `params.pitch_bend` en el triple buffer; `synthesizer.rs` precomputa `2f32.powf(bend * range / 12)` por bloque y lo multiplica a `freq1`/`freq2`.
+- [x] **Aftertouch** (status byte `0xD0`). `midi_handler.rs` actualiza `params.aftertouch`; `synthesizer.rs` lo aplica como modulación aditiva al cutoff (×4 kHz máx) y multiplicativa a la amplitud. Amounts `aftertouch_to_cutoff` y `aftertouch_to_amplitude` configurables vía `SynthParameters`.
+- [x] **Program Change** (status byte `0xC0`). Push a `MidiEvent::ProgramChange`; el hilo de audio llama a `synthesizer.load_preset()` con el preset en la posición `program % len` del listado ordenado.
+- [x] **Expression pedal** (CC 11). Añadido `expression: f32` a `SynthParameters`; se multiplica sobre `master_volume` en el loop de audio. CC 11 lo actualiza en el triple buffer.
 - [ ] **MIDI SysEx** para patch dump/load
 
 ## P5 — GUI / UX
