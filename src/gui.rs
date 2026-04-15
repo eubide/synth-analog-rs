@@ -603,6 +603,23 @@ impl SynthApp {
                     .step_by(0.01),
             );
         });
+        ui.horizontal(|ui| {
+            ui.label("pw A:");
+            ui.add(
+                egui::Slider::new(&mut self.params.poly_mod_osc_b_to_osc_a_pw, -1.0..=1.0)
+                    .step_by(0.01),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("cutoff:");
+            ui.add(
+                egui::Slider::new(
+                    &mut self.params.poly_mod_osc_b_to_filter_cutoff,
+                    -1.0..=1.0,
+                )
+                .step_by(0.01),
+            );
+        });
     }
 
     fn draw_keyboard_legend(&mut self, ui: &mut egui::Ui) {
