@@ -1143,17 +1143,17 @@ impl eframe::App for SynthApp {
                     });
                     ui.add_space(4.0);
                     section(ui, "LFO", |ui| self.draw_vintage_lfo_panel(ui));
+                    ui.add_space(4.0);
+                    section(ui, "VOICE MODE", |ui| self.draw_voice_mode_panel(ui));
                 });
 
-                // ── COL 4: PERFORMANCE (160 px) ─────────────────────────
+                // ── COL 4: PERFORMANCE (190 px) ─────────────────────────
                 ui.vertical(|ui| {
-                    ui.set_min_width(160.0);
-                    ui.set_max_width(160.0);
+                    ui.set_min_width(190.0);
+                    ui.set_max_width(190.0);
                     section(ui, "MASTER", |ui| self.draw_master_panel(ui));
                     ui.add_space(4.0);
                     section(ui, "ARP", |ui| self.draw_arpeggiator_panel(ui));
-                    ui.add_space(4.0);
-                    section(ui, "VOICE MODE", |ui| self.draw_voice_mode_panel(ui));
                     ui.add_space(4.0);
                     section(ui, "EFFECTS", |ui| self.draw_effects_panel(ui));
                     ui.add_space(4.0);
