@@ -100,8 +100,8 @@ impl AudioEngine {
                             MidiEvent::NoteOff { note } => {
                                 synthesizer.note_off(note);
                             }
-                            MidiEvent::SustainPedal { pressed: _pressed } => {
-                                // Sustain pedal - future enhancement
+                            MidiEvent::SustainPedal { pressed } => {
+                                synthesizer.sustain_pedal(pressed);
                             }
                             MidiEvent::ProgramChange { program } => {
                                 if !preset_names.is_empty() {

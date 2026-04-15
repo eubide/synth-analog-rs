@@ -142,6 +142,7 @@ pub struct Voice {
     pub filter_envelope_value: f32,
     pub filter_state: LadderFilterState,
     pub is_active: bool,
+    pub is_sustained: bool, // nota retenida por sustain pedal
     pub sustain_time: f32,
     pub glide_current_freq: f32,
     // Analog character: per-voice VCO drift
@@ -202,6 +203,7 @@ pub struct Synthesizer {
     pub reverb_allpass_buffers: Vec<Vec<f32>>,
     pub reverb_allpass_indices: Vec<usize>,
     pub held_notes: Vec<u8>,
+    pub sustain_held: bool, // sustain pedal activo
     pub arp_step: usize,
     pub arp_timer: f32,
     pub arp_note_timer: f32,
@@ -346,6 +348,7 @@ impl Voice {
                 stage4: 0.0,
             },
             is_active: true,
+            is_sustained: false,
             sustain_time: 0.0,
             glide_current_freq: frequency,
             // Random drift phase and rate so voices oscillate independently.
@@ -421,6 +424,7 @@ impl Synthesizer {
             reverb_allpass_buffers: allpass_sizes.iter().map(|&n| vec![0.0f32; n]).collect(),
             reverb_allpass_indices: vec![0; 4],
             held_notes: Vec::new(),
+            sustain_held: false,
             arp_step: 0,
             arp_timer: 0.0,
             arp_note_timer: 0.0,
@@ -502,11 +506,15 @@ impl Synthesizer {
             // Remove note from held notes
             self.held_notes.retain(|&n| n != note);
 
-            // If no notes held, release all voices
+            // If no notes held, release (or sustain) all voices
             if self.held_notes.is_empty() {
                 for voice in &mut self.voices {
                     if voice.is_active {
-                        voice.release();
+                        if self.sustain_held {
+                            voice.is_sustained = true;
+                        } else {
+                            voice.release();
+                        }
                     }
                 }
             }
@@ -514,6 +522,23 @@ impl Synthesizer {
             // Direct note release when arpeggiator is off
             for voice in &mut self.voices {
                 if voice.note == note && voice.is_active {
+                    if self.sustain_held {
+                        voice.is_sustained = true;
+                    } else {
+                        voice.release();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Maneja el sustain pedal. Al soltar el pedal, libera todas las voces sostenidas.
+    pub fn sustain_pedal(&mut self, pressed: bool) {
+        self.sustain_held = pressed;
+        if !pressed {
+            for voice in &mut self.voices {
+                if voice.is_active && voice.is_sustained {
+                    voice.is_sustained = false;
                     voice.release();
                 }
             }
