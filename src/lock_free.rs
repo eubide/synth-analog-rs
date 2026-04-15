@@ -171,6 +171,9 @@ pub struct SynthParameters {
 
     // MIDI clock sync for arpeggiator
     pub arp_sync_to_midi: bool,
+
+    // LFO delay/fade-in: LFO sube gradualmente desde 0 durante este tiempo (segundos)
+    pub lfo_delay: f32, // 0.0 = instantáneo, >0 = fade-in
 }
 
 impl Default for SynthParameters {
@@ -279,6 +282,9 @@ impl Default for SynthParameters {
 
             // MIDI clock sync — desactivado por defecto
             arp_sync_to_midi: false,
+
+            // LFO delay — sin delay por defecto
+            lfo_delay: 0.0,
         }
     }
 }

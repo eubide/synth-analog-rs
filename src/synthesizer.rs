@@ -170,6 +170,8 @@ pub struct Voice {
     pub noise_b2: f32,
     // Poly Mod: last Osc B output sample used to cross-modulate Osc A (1-sample delay)
     pub osc2_last_out: f32,
+    // LFO delay: tiempo transcurrido desde el note-on (para fade-in del LFO)
+    pub lfo_delay_elapsed: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -245,6 +247,8 @@ pub struct Synthesizer {
     pub expression: f32, // 0.0..=1.0 multiplier on master output
     // Mod wheel (CC 1): additional LFO depth scaler
     pub mod_wheel: f32, // 0.0..=1.0
+    // LFO delay/fade-in (segundos, 0 = instantáneo)
+    pub lfo_delay: f32,
     // MIDI clock sync
     pub arp_sync_to_midi: bool,
     pub midi_clock_running: bool,
@@ -386,6 +390,7 @@ impl Voice {
             noise_b1: 0.0,
             noise_b2: 0.0,
             osc2_last_out: 0.0,
+            lfo_delay_elapsed: 0.0,
         }
     }
 
@@ -470,6 +475,7 @@ impl Synthesizer {
             aftertouch_to_amplitude: 0.0,
             expression: 1.0,
             mod_wheel: 0.0,
+            lfo_delay: 0.0,
             arp_sync_to_midi: false,
             midi_clock_running: false,
             midi_clock_bpm: 120.0,
@@ -534,6 +540,7 @@ impl Synthesizer {
                 voice.envelope_state = EnvelopeState::Attack;
                 voice.envelope_time = 0.0;
                 voice.filter_envelope_state = EnvelopeState::Attack;
+                voice.lfo_delay_elapsed = 0.0; // reiniciar fade-in del LFO
                 voice.is_active = true;
                 return;
             }
@@ -638,6 +645,7 @@ impl Synthesizer {
                 voice.envelope_state = EnvelopeState::Attack;
                 voice.envelope_time = 0.0;
                 voice.filter_envelope_state = EnvelopeState::Attack;
+                voice.lfo_delay_elapsed = 0.0; // reiniciar fade-in del LFO
             }
         } else if let Some(voice) = self.voices.iter_mut().find(|v| !v.is_active) {
             *voice = Voice::new(note, frequency, vel);
@@ -814,6 +822,7 @@ impl Synthesizer {
         let aftertouch_to_amplitude = self.aftertouch_to_amplitude;
         let expression = self.expression;
         let mod_wheel = self.mod_wheel;
+        let lfo_delay = self.lfo_delay;
 
         // Precompute values that are constant for the entire block.
         // Avoids transcendental calls (powf, exp) inside the per-sample voice loop.
@@ -882,6 +891,15 @@ impl Synthesizer {
                     continue;
                 }
 
+                // LFO delay / fade-in: ramp from 0 to 1 over lfo_delay seconds desde note-on
+                voice.lfo_delay_elapsed += dt;
+                let lfo_fade = if lfo_delay > 0.001 {
+                    (voice.lfo_delay_elapsed / lfo_delay).min(1.0)
+                } else {
+                    1.0
+                };
+                let lfo_value_voice = lfo_value * lfo_fade;
+
                 // Glide: exponential interpolation toward the target frequency
                 if glide_coeff > 0.0 {
                     voice.glide_current_freq = voice.frequency
@@ -908,10 +926,10 @@ impl Synthesizer {
 
                 // Apply modulation matrix to oscillator pitch (gated by lfo_target booleans)
                 if lfo_target_osc1 {
-                    freq1 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc1_pitch * 0.1);
+                    freq1 *= 1.0 + (lfo_value_voice * modulation_matrix.lfo_to_osc1_pitch * 0.1);
                 }
                 if lfo_target_osc2 {
-                    freq2 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc2_pitch * 0.1);
+                    freq2 *= 1.0 + (lfo_value_voice * modulation_matrix.lfo_to_osc2_pitch * 0.1);
                 }
 
                 // Poly Mod: Filter Envelope → Osc A frequency (±24 semitones a plena excursión)
@@ -1017,7 +1035,7 @@ impl Synthesizer {
 
                 // Apply modulation matrix to filter (gated by lfo_target_filter)
                 let lfo_cutoff_mod = if lfo_target_filter {
-                    lfo_value * modulation_matrix.lfo_to_cutoff * 1000.0
+                    lfo_value_voice * modulation_matrix.lfo_to_cutoff * 1000.0
                 } else {
                     0.0
                 };
@@ -1033,7 +1051,7 @@ impl Synthesizer {
                     * kbd_multiplier;
                 let final_cutoff = modulated_cutoff.clamp(20.0, 20000.0);
 
-                let lfo_resonance_mod = lfo_value * modulation_matrix.lfo_to_resonance * 2.0;
+                let lfo_resonance_mod = lfo_value_voice * modulation_matrix.lfo_to_resonance * 2.0;
                 // Safe resonance limiting to prevent runaway feedback
                 let final_resonance = (filter_resonance + lfo_resonance_mod).clamp(0.0, 3.95); // Slightly below 4.0 for safety
 
@@ -1057,7 +1075,7 @@ impl Synthesizer {
 
                 // Apply modulation matrix to amplitude (gated by lfo_target_amplitude)
                 let lfo_amplitude_mod = if lfo_target_amplitude {
-                    1.0 + (lfo_value * modulation_matrix.lfo_to_amplitude * 0.5)
+                    1.0 + (lfo_value_voice * modulation_matrix.lfo_to_amplitude * 0.5)
                 } else {
                     1.0
                 };
@@ -2921,6 +2939,7 @@ impl Synthesizer {
             unison_spread: self.unison_spread,
             max_voices: self.max_polyphony as u8,
             arp_sync_to_midi: self.arp_sync_to_midi,
+            lfo_delay: self.lfo_delay,
         }
     }
 
@@ -3004,6 +3023,7 @@ impl Synthesizer {
         self.unison_spread = params.unison_spread;
         self.max_polyphony = params.max_voices as usize;
         self.arp_sync_to_midi = params.arp_sync_to_midi;
+        self.lfo_delay = params.lfo_delay;
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {
