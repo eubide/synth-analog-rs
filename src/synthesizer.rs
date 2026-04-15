@@ -617,6 +617,10 @@ impl Synthesizer {
         let lfo_frequency = self.lfo.frequency;
         let lfo_amplitude = self.lfo.amplitude;
         let lfo_waveform = self.lfo.waveform;
+        let lfo_target_osc1 = self.lfo.target_osc1_pitch;
+        let lfo_target_osc2 = self.lfo.target_osc2_pitch;
+        let lfo_target_filter = self.lfo.target_filter;
+        let lfo_target_amplitude = self.lfo.target_amplitude;
         let modulation_matrix = self.modulation_matrix.clone();
         let master_volume = self.master_volume;
         let sample_rate = self.sample_rate;
@@ -725,9 +729,13 @@ impl Synthesizer {
                 let mut freq1 = base_freq * osc1_detune_ratio * drift_ratio;
                 let mut freq2 = base_freq * osc2_detune_ratio * drift_ratio;
 
-                // Apply modulation matrix to oscillator pitch
-                freq1 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc1_pitch * 0.1);
-                freq2 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc2_pitch * 0.1);
+                // Apply modulation matrix to oscillator pitch (gated by lfo_target booleans)
+                if lfo_target_osc1 {
+                    freq1 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc1_pitch * 0.1);
+                }
+                if lfo_target_osc2 {
+                    freq2 *= 1.0 + (lfo_value * modulation_matrix.lfo_to_osc2_pitch * 0.1);
+                }
 
                 // Poly Mod: Filter Envelope → Osc A frequency (±24 semitones a plena excursión)
                 if poly_mod_fe_freq.abs() > 0.001 {
@@ -830,8 +838,12 @@ impl Synthesizer {
                 let kbd_multiplier =
                     Self::semitones_to_ratio((voice.note as f32 - 60.0) * filter_keyboard_tracking);
 
-                // Apply modulation matrix to filter
-                let lfo_cutoff_mod = lfo_value * modulation_matrix.lfo_to_cutoff * 1000.0;
+                // Apply modulation matrix to filter (gated by lfo_target_filter)
+                let lfo_cutoff_mod = if lfo_target_filter {
+                    lfo_value * modulation_matrix.lfo_to_cutoff * 1000.0
+                } else {
+                    0.0
+                };
                 let velocity_cutoff_mod =
                     voice.velocity * modulation_matrix.velocity_to_cutoff * 1000.0;
                 let osc_b_cutoff_mod = osc_b_mod * poly_mod_osc_b_cutoff * 4000.0;
@@ -866,9 +878,12 @@ impl Synthesizer {
                     amp_release_coeff,
                 );
 
-                // Apply modulation matrix to amplitude
-                let lfo_amplitude_mod =
-                    1.0 + (lfo_value * modulation_matrix.lfo_to_amplitude * 0.5);
+                // Apply modulation matrix to amplitude (gated by lfo_target_amplitude)
+                let lfo_amplitude_mod = if lfo_target_amplitude {
+                    1.0 + (lfo_value * modulation_matrix.lfo_to_amplitude * 0.5)
+                } else {
+                    1.0
+                };
                 let velocity_amplitude_mod =
                     0.5 + (voice.velocity * modulation_matrix.velocity_to_amplitude * 0.5);
 
