@@ -10,7 +10,11 @@ pub struct SynthApp {
     midi_events: Arc<MidiEventQueue>,
     _audio_engine: AudioEngine,
     _midi_handler: Option<MidiHandler>,
-    last_key_times: std::collections::HashMap<egui::Key, std::time::Instant>,
+    /// Para cada tecla QWERTY pulsada, guarda (nota MIDI enviada, timestamp).
+    /// Almacenar la nota real previene stuck notes cuando la octava cambia
+    /// entre el press y el release (sin esto, el NoteOff se calcularía con
+    /// la octava actual y no liberaría la voz original).
+    last_key_times: std::collections::HashMap<egui::Key, (u8, std::time::Instant)>,
     current_octave: i32,
     show_midi_monitor: bool,
     show_midi_learn: bool,
@@ -980,31 +984,31 @@ impl eframe::App for SynthApp {
             let now = std::time::Instant::now();
 
             for (key, note_offset) in key_map {
-                let midi_note = self.current_octave * 12 + note_offset;
-
                 if i.key_pressed(key) {
-                    let should_trigger = if let Some(last_time) = self.last_key_times.get(&key) {
+                    let should_trigger = match self.last_key_times.get(&key) {
                         // If more than 100ms since last press, it's intentional (not auto-repeat)
-                        now.duration_since(*last_time).as_millis() > 100
-                    } else {
+                        Some((_, last_time)) => now.duration_since(*last_time).as_millis() > 100,
                         // First time pressing this key
-                        true
+                        None => true,
                     };
 
                     if should_trigger {
-                        self.last_key_times.insert(key, now);
+                        let note = (self.current_octave * 12 + note_offset).clamp(0, 127) as u8;
+                        self.last_key_times.insert(key, (note, now));
                         self.midi_events.push(MidiEvent::NoteOn {
-                            note: midi_note as u8,
+                            note,
                             velocity: 100,
                         });
                     }
                 }
 
-                if i.key_released(key) {
-                    self.last_key_times.remove(&key);
-                    self.midi_events.push(MidiEvent::NoteOff {
-                        note: midi_note as u8,
-                    });
+                if i.key_released(key)
+                    && let Some((stored_note, _)) = self.last_key_times.remove(&key)
+                {
+                    // Usamos la nota grabada en el press, no la recalculamos:
+                    // si el usuario cambió de octava mientras mantenía la tecla,
+                    // recalcular enviaría NoteOff a una nota que nunca sonó.
+                    self.midi_events.push(MidiEvent::NoteOff { note: stored_note });
                 }
             }
         });
