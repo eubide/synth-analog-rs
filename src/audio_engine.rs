@@ -151,6 +151,9 @@ impl AudioEngine {
                                     log::warn!("SysEx: datos no son UTF-8 válido");
                                 }
                             }
+                            MidiEvent::AllNotesOff => {
+                                synthesizer.all_notes_off();
+                            }
                         }
                     }
 

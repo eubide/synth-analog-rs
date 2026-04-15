@@ -342,6 +342,9 @@ pub enum MidiEvent {
     SysExRequest,
     /// SysEx patch load (F0 7D 02 [json] F7)
     SysExPatch { data: Vec<u8> },
+    /// PANIC: silence every active voice and clear all held-note state.
+    /// Triggered by MIDI CC 120/123, the GUI PANIC button, Esc key, or focus loss.
+    AllNotesOff,
 }
 
 /// Lightweight event queue for MIDI note events

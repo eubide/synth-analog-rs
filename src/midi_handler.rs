@@ -344,6 +344,11 @@ impl MidiHandler {
                 });
                 return;
             }
+            120 | 123 => {
+                // CC 120 = All Sound Off, CC 123 = All Notes Off (MIDI standard)
+                midi_events.push(MidiEvent::AllNotesOff);
+                return;
+            }
             _ => return,
         }
 

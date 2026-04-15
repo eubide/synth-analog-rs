@@ -741,6 +741,20 @@ impl Synthesizer {
         }
     }
 
+    /// PANIC: silencia inmediatamente todas las voces y limpia cualquier
+    /// estado de notas pulsadas. Es el remedio universal para stuck notes
+    /// causadas por pérdida de foco, Note Off perdidos por MIDI o cambios
+    /// de voice_mode con voces sonando.
+    pub fn all_notes_off(&mut self) {
+        for voice in &mut self.voices {
+            voice.is_active = false;
+            voice.is_sustained = false;
+        }
+        self.note_stack.clear();
+        self.held_notes.clear();
+        self.sustain_held = false;
+    }
+
     fn find_voice_to_steal(&self) -> usize {
         let mut best_index = 0;
         let mut best_score = f32::MIN;

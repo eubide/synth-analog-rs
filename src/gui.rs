@@ -916,8 +916,23 @@ impl eframe::App for SynthApp {
         let peak_bits = self.lock_free_synth.peak_level.load(std::sync::atomic::Ordering::Relaxed);
         self.peak_level = f32::from_bits(peak_bits);
 
+        // PANIC on focus loss: si la ventana pierde el foco mientras hay teclas
+        // pulsadas, los key_released nunca llegan y las voces quedan enganchadas.
+        // Disparamos AllNotesOff defensivamente para limpiar el estado.
+        let focused = ctx.input(|i| i.focused);
+        if !focused && !self.last_key_times.is_empty() {
+            self.midi_events.push(MidiEvent::AllNotesOff);
+            self.last_key_times.clear();
+        }
+
         // Handle keyboard input
         ctx.input(|i| {
+            // Esc = PANIC universal
+            if i.key_pressed(egui::Key::Escape) {
+                self.midi_events.push(MidiEvent::AllNotesOff);
+                self.last_key_times.clear();
+            }
+
             // Handle octave changes
             if i.key_pressed(egui::Key::ArrowUp) {
                 self.current_octave = (self.current_octave + 1).clamp(0, 8);
@@ -1054,6 +1069,15 @@ impl eframe::App for SynthApp {
 
                 if ui.small_button("Presets").clicked() {
                     self.show_presets_window = !self.show_presets_window;
+                }
+
+                if ui
+                    .small_button("PANIC")
+                    .on_hover_text("Silence all stuck notes (Esc)")
+                    .clicked()
+                {
+                    self.midi_events.push(MidiEvent::AllNotesOff);
+                    self.last_key_times.clear();
                 }
             });
         });
