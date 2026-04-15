@@ -113,6 +113,21 @@ pub enum ArpPattern {
     Random,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VoiceMode {
+    Poly,
+    Mono,
+    Legato,
+    Unison,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NotePriority {
+    Last,
+    Low,
+    High,
+}
+
 #[derive(Debug, Clone)]
 pub struct Preset {
     pub name: String,
@@ -203,7 +218,11 @@ pub struct Synthesizer {
     pub reverb_allpass_buffers: Vec<Vec<f32>>,
     pub reverb_allpass_indices: Vec<usize>,
     pub held_notes: Vec<u8>,
-    pub sustain_held: bool, // sustain pedal activo
+    pub sustain_held: bool,    // sustain pedal activo
+    pub voice_mode: VoiceMode,
+    pub note_priority: NotePriority,
+    pub unison_spread: f32,    // cents spread en unison mode
+    pub note_stack: Vec<(u8, u8)>, // (note, velocity) para mono/legato/unison
     pub arp_step: usize,
     pub arp_timer: f32,
     pub arp_note_timer: f32,
@@ -226,6 +245,12 @@ pub struct Synthesizer {
     pub expression: f32, // 0.0..=1.0 multiplier on master output
     // Mod wheel (CC 1): additional LFO depth scaler
     pub mod_wheel: f32, // 0.0..=1.0
+    // MIDI clock sync
+    pub arp_sync_to_midi: bool,
+    pub midi_clock_running: bool,
+    pub midi_clock_bpm: f32,
+    pub midi_clock_tick_acc: f32,   // segundos acumulados desde primer tick del quarter note actual
+    pub midi_clock_tick_count: u32, // ticks desde el inicio del quarter note actual
     // Master DC blocker (one-pole HPF, coeff ≈ 0.9999 → ~0.7 Hz cutoff at 44.1 kHz)
     pub master_dc_x: f32,
     pub master_dc_y: f32,
@@ -425,6 +450,10 @@ impl Synthesizer {
             reverb_allpass_indices: vec![0; 4],
             held_notes: Vec::new(),
             sustain_held: false,
+            voice_mode: VoiceMode::Poly,
+            note_priority: NotePriority::Last,
+            unison_spread: 10.0,
+            note_stack: Vec::new(),
             arp_step: 0,
             arp_timer: 0.0,
             arp_note_timer: 0.0,
@@ -441,21 +470,43 @@ impl Synthesizer {
             aftertouch_to_amplitude: 0.0,
             expression: 1.0,
             mod_wheel: 0.0,
+            arp_sync_to_midi: false,
+            midi_clock_running: false,
+            midi_clock_bpm: 120.0,
+            midi_clock_tick_acc: 0.0,
+            midi_clock_tick_count: 0,
             master_dc_x: 0.0,
             master_dc_y: 0.0,
         }
     }
 
     pub fn note_on(&mut self, note: u8, velocity: u8) {
-        if self.arpeggiator.enabled {
-            // Add note to held notes if not already there
-            if !self.held_notes.contains(&note) {
-                self.held_notes.push(note);
-                self.held_notes.sort();
+        match self.voice_mode {
+            VoiceMode::Poly => {
+                if self.arpeggiator.enabled {
+                    if !self.held_notes.contains(&note) {
+                        self.held_notes.push(note);
+                        self.held_notes.sort();
+                    }
+                } else {
+                    self.trigger_note(note, velocity);
+                }
             }
-        } else {
-            // Direct note triggering when arpeggiator is off
-            self.trigger_note(note, velocity);
+            VoiceMode::Mono | VoiceMode::Legato => {
+                // Mantener un stack de notas pulsadas; la prioridad determina cuál suena
+                self.note_stack.retain(|&(n, _)| n != note);
+                self.note_stack.push((note, velocity));
+                let is_legato = self.voice_mode == VoiceMode::Legato;
+                let already_playing = self.voices.iter().any(|v| v.is_active);
+                if let Some((n, v)) = self.select_mono_note() {
+                    self.trigger_mono(n, v, is_legato && already_playing);
+                }
+            }
+            VoiceMode::Unison => {
+                self.note_stack.clear();
+                self.note_stack.push((note, velocity));
+                self.trigger_unison(note, velocity);
+            }
         }
     }
 
@@ -502,32 +553,133 @@ impl Synthesizer {
     }
 
     pub fn note_off(&mut self, note: u8) {
-        if self.arpeggiator.enabled {
-            // Remove note from held notes
-            self.held_notes.retain(|&n| n != note);
-
-            // If no notes held, release (or sustain) all voices
-            if self.held_notes.is_empty() {
-                for voice in &mut self.voices {
-                    if voice.is_active {
-                        if self.sustain_held {
-                            voice.is_sustained = true;
-                        } else {
-                            voice.release();
+        match self.voice_mode {
+            VoiceMode::Poly => {
+                if self.arpeggiator.enabled {
+                    self.held_notes.retain(|&n| n != note);
+                    if self.held_notes.is_empty() {
+                        for voice in &mut self.voices {
+                            if voice.is_active {
+                                if self.sustain_held { voice.is_sustained = true; }
+                                else { voice.release(); }
+                            }
+                        }
+                    }
+                } else {
+                    for voice in &mut self.voices {
+                        if voice.note == note && voice.is_active {
+                            if self.sustain_held { voice.is_sustained = true; }
+                            else { voice.release(); }
                         }
                     }
                 }
             }
-        } else {
-            // Direct note release when arpeggiator is off
-            for voice in &mut self.voices {
-                if voice.note == note && voice.is_active {
-                    if self.sustain_held {
-                        voice.is_sustained = true;
-                    } else {
-                        voice.release();
+            VoiceMode::Mono | VoiceMode::Legato => {
+                self.note_stack.retain(|&(n, _)| n != note);
+                if self.note_stack.is_empty() {
+                    for voice in &mut self.voices {
+                        if voice.is_active {
+                            if self.sustain_held { voice.is_sustained = true; }
+                            else { voice.release(); }
+                        }
+                    }
+                } else {
+                    // Retroceder a la nota anterior del stack, siempre con legato
+                    if let Some((n, v)) = self.select_mono_note() {
+                        self.trigger_mono(n, v, true);
                     }
                 }
+            }
+            VoiceMode::Unison => {
+                self.note_stack.retain(|&(n, _)| n != note);
+                if self.note_stack.is_empty() {
+                    for voice in &mut self.voices {
+                        if voice.is_active {
+                            if self.sustain_held { voice.is_sustained = true; }
+                            else { voice.release(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Selecciona la nota activa en modo mono según la prioridad configurada.
+    fn select_mono_note(&self) -> Option<(u8, u8)> {
+        if self.note_stack.is_empty() {
+            return None;
+        }
+        Some(match self.note_priority {
+            NotePriority::Last => *self.note_stack.last().unwrap(),
+            NotePriority::Low => *self.note_stack.iter().min_by_key(|(n, _)| *n).unwrap(),
+            NotePriority::High => *self.note_stack.iter().max_by_key(|(n, _)| *n).unwrap(),
+        })
+    }
+
+    /// Dispara o actualiza una única voz monofónica.
+    /// Si `legato` es true, no retriggeriza los envelopes.
+    fn trigger_mono(&mut self, note: u8, velocity: u8, legato: bool) {
+        let frequency = Self::note_to_frequency(note);
+        let vel = velocity as f32 / 127.0;
+
+        if self.lfo.sync && !legato {
+            self.lfo_phase_accumulator = 0;
+            self.lfo_last_sample_time = 0.0;
+            self.lfo_sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
+        }
+
+        // Reutilizar la primera voz activa (modo mono → máximo 1 voz)
+        if let Some(voice) = self.voices.iter_mut().find(|v| v.is_active) {
+            voice.note = note;
+            voice.frequency = frequency;
+            voice.velocity = vel;
+            voice.is_sustained = false;
+            if !legato {
+                voice.envelope_state = EnvelopeState::Attack;
+                voice.envelope_time = 0.0;
+                voice.filter_envelope_state = EnvelopeState::Attack;
+            }
+        } else if let Some(voice) = self.voices.iter_mut().find(|v| !v.is_active) {
+            *voice = Voice::new(note, frequency, vel);
+        } else if self.voices.is_empty() {
+            self.voices.push(Voice::new(note, frequency, vel));
+        } else {
+            self.voices[0] = Voice::new(note, frequency, vel);
+        }
+    }
+
+    /// Dispara todas las voces en modo unison con detune spread.
+    fn trigger_unison(&mut self, note: u8, velocity: u8) {
+        let frequency = Self::note_to_frequency(note);
+        let vel = velocity as f32 / 127.0;
+        let n_voices = self.max_polyphony.max(1);
+        let spread = self.unison_spread;
+
+        if self.lfo.sync {
+            self.lfo_phase_accumulator = 0;
+            self.lfo_last_sample_time = 0.0;
+            self.lfo_sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
+        }
+
+        // Liberar voces activas actuales
+        for v in &mut self.voices {
+            v.is_active = false;
+        }
+
+        // Activar voces con detune spread
+        for i in 0..n_voices {
+            let detune_cents = if n_voices == 1 {
+                0.0
+            } else {
+                spread * (2.0 * i as f32 / (n_voices - 1) as f32 - 1.0)
+            };
+            let detuned_freq = frequency * 2f32.powf(detune_cents / 1200.0);
+            let mut v = Voice::new(note, detuned_freq, vel);
+            v.glide_current_freq = detuned_freq;
+            if i < self.voices.len() {
+                self.voices[i] = v;
+            } else {
+                self.voices.push(v);
             }
         }
     }
@@ -2755,6 +2907,20 @@ impl Synthesizer {
             aftertouch_to_amplitude: self.aftertouch_to_amplitude,
             expression: self.expression,
             mod_wheel: self.mod_wheel,
+            voice_mode: match self.voice_mode {
+                VoiceMode::Poly => 0,
+                VoiceMode::Mono => 1,
+                VoiceMode::Legato => 2,
+                VoiceMode::Unison => 3,
+            },
+            note_priority: match self.note_priority {
+                NotePriority::Last => 0,
+                NotePriority::Low => 1,
+                NotePriority::High => 2,
+            },
+            unison_spread: self.unison_spread,
+            max_voices: self.max_polyphony as u8,
+            arp_sync_to_midi: self.arp_sync_to_midi,
         }
     }
 
@@ -2824,6 +2990,20 @@ impl Synthesizer {
         self.aftertouch_to_amplitude = params.aftertouch_to_amplitude;
         self.expression = params.expression;
         self.mod_wheel = params.mod_wheel;
+        self.voice_mode = match params.voice_mode {
+            1 => VoiceMode::Mono,
+            2 => VoiceMode::Legato,
+            3 => VoiceMode::Unison,
+            _ => VoiceMode::Poly,
+        };
+        self.note_priority = match params.note_priority {
+            1 => NotePriority::Low,
+            2 => NotePriority::High,
+            _ => NotePriority::Last,
+        };
+        self.unison_spread = params.unison_spread;
+        self.max_polyphony = params.max_voices as usize;
+        self.arp_sync_to_midi = params.arp_sync_to_midi;
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {

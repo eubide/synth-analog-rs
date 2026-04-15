@@ -159,6 +159,18 @@ pub struct SynthParameters {
 
     // Mod wheel (CC 1): scales LFO depth to all active targets
     pub mod_wheel: f32, // 0.0..=1.0
+
+    // Voice mode: 0=Poly, 1=Mono, 2=Legato, 3=Unison
+    pub voice_mode: u8,
+    // Note priority (for Mono/Legato): 0=Last, 1=Low, 2=High
+    pub note_priority: u8,
+    // Unison detune spread in cents
+    pub unison_spread: f32,
+    // Maximum polyphony: 1..=8
+    pub max_voices: u8,
+
+    // MIDI clock sync for arpeggiator
+    pub arp_sync_to_midi: bool,
 }
 
 impl Default for SynthParameters {
@@ -258,6 +270,15 @@ impl Default for SynthParameters {
 
             // Mod wheel — centrado en cero por defecto
             mod_wheel: 0.0,
+
+            // Voice mode — polyphonic por defecto
+            voice_mode: 0,
+            note_priority: 0,
+            unison_spread: 10.0,
+            max_voices: 8,
+
+            // MIDI clock sync — desactivado por defecto
+            arp_sync_to_midi: false,
         }
     }
 }
