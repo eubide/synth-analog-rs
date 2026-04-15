@@ -3,6 +3,15 @@ use midir::{Ignore, MidiInput};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+/// Shared state for MIDI learn mode.
+#[derive(Default)]
+pub struct MidiLearnState {
+    /// Param being learned — set by GUI, cleared when CC arrives.
+    pub pending_param: Option<String>,
+    /// Custom CC→param bindings. Key=CC number, Value=param name.
+    pub custom_map: std::collections::HashMap<u8, String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct MidiMessage {
     pub timestamp: std::time::Instant,
@@ -13,6 +22,7 @@ pub struct MidiMessage {
 pub struct MidiHandler {
     _connection: Option<midir::MidiInputConnection<()>>,
     pub message_history: Arc<Mutex<VecDeque<MidiMessage>>>,
+    pub learn_state: Arc<Mutex<MidiLearnState>>,
 }
 
 impl MidiHandler {
@@ -21,6 +31,8 @@ impl MidiHandler {
         midi_events: Arc<MidiEventQueue>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let message_history = Arc::new(Mutex::new(VecDeque::new()));
+        let learn_state: Arc<Mutex<MidiLearnState>> = Arc::new(Mutex::new(MidiLearnState::default()));
+        let learn_state_clone = learn_state.clone();
         let mut midi_in = MidiInput::new("Rust Synthesizer MIDI Input")?;
         midi_in.ignore(Ignore::None);
 
@@ -31,6 +43,7 @@ impl MidiHandler {
             return Ok(MidiHandler {
                 _connection: None,
                 message_history,
+                learn_state,
             });
         }
 
@@ -55,7 +68,13 @@ impl MidiHandler {
             in_port,
             "synth-input",
             move |_stamp, message, _| {
-                Self::handle_midi_message(message, &lock_free_synth, &midi_events, &history_clone);
+                Self::handle_midi_message(
+                    message,
+                    &lock_free_synth,
+                    &midi_events,
+                    &history_clone,
+                    &learn_state_clone,
+                );
             },
             (),
         )?;
@@ -63,6 +82,7 @@ impl MidiHandler {
         Ok(MidiHandler {
             _connection: Some(connection),
             message_history,
+            learn_state,
         })
     }
 
@@ -71,6 +91,7 @@ impl MidiHandler {
         lock_free_synth: &Arc<LockFreeSynth>,
         midi_events: &Arc<MidiEventQueue>,
         history: &Arc<Mutex<VecDeque<MidiMessage>>>,
+        learn_state: &Arc<Mutex<MidiLearnState>>,
     ) {
         // Mensajes de sistema en tiempo real (1 byte) — alta prioridad, no entran en history
         if !message.is_empty() {
@@ -158,7 +179,7 @@ impl MidiHandler {
                     )
                 }
                 0xB0 => {
-                    Self::handle_cc_message(lock_free_synth, midi_events, data1, data2);
+                    Self::handle_cc_message(lock_free_synth, midi_events, data1, data2, learn_state);
                     (
                         "CC".to_string(),
                         format!("CC: {} Val: {} Ch: {}", data1, data2, channel),
@@ -225,12 +246,55 @@ impl MidiHandler {
         format!("{}{}", notes[note_index as usize], octave)
     }
 
+    fn apply_named_param(params: &mut crate::lock_free::SynthParameters, name: &str, v: f32) {
+        match name {
+            "filter_cutoff" => params.filter_cutoff = 20.0 + v * 19980.0,
+            "filter_resonance" => params.filter_resonance = v * 4.0,
+            "filter_envelope_amount" => params.filter_envelope_amount = v,
+            "amp_attack" => params.amp_attack = v * 5.0,
+            "amp_decay" => params.amp_decay = v * 5.0,
+            "amp_sustain" => params.amp_sustain = v,
+            "amp_release" => params.amp_release = v * 5.0,
+            "filter_attack" => params.filter_attack = v * 5.0,
+            "filter_decay" => params.filter_decay = v * 5.0,
+            "filter_sustain" => params.filter_sustain = v,
+            "filter_release" => params.filter_release = v * 5.0,
+            "lfo_rate" => params.lfo_rate = 0.1 + v * 19.9,
+            "lfo_amount" => params.lfo_amount = v,
+            "master_volume" => params.master_volume = v,
+            "reverb_amount" => params.reverb_amount = v,
+            "delay_feedback" => params.delay_feedback = v * 0.95,
+            "delay_amount" => params.delay_amount = v,
+            "osc1_detune" => params.osc1_detune = -24.0 + v * 48.0,
+            "osc2_detune" => params.osc2_detune = -24.0 + v * 48.0,
+            _ => {}
+        }
+    }
+
     fn handle_cc_message(
         lock_free_synth: &Arc<LockFreeSynth>,
         midi_events: &Arc<MidiEventQueue>,
         cc_number: u8,
         cc_value: u8,
+        learn_state: &Arc<Mutex<MidiLearnState>>,
     ) {
+        // MIDI learn: if a param is pending, bind this CC to it
+        if let Ok(mut state) = learn_state.try_lock() {
+            if let Some(param_name) = state.pending_param.take() {
+                log::info!("MIDI Learn: CC {} → {}", cc_number, param_name);
+                state.custom_map.insert(cc_number, param_name);
+                return;
+            }
+            // Apply custom binding if present
+            if let Some(param_name) = state.custom_map.get(&cc_number).cloned() {
+                let normalized = cc_value as f32 / 127.0;
+                let mut params = *lock_free_synth.get_params();
+                Self::apply_named_param(&mut params, &param_name, normalized);
+                lock_free_synth.set_params(params);
+                return;
+            }
+        }
+
         let normalized_value = cc_value as f32 / 127.0;
         let mut params = *lock_free_synth.get_params();
 

@@ -3,7 +3,7 @@ use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue, SynthParameters
 use crate::midi_handler::MidiHandler;
 use crate::synthesizer::{ArpPattern, LfoWaveform, Synthesizer, WaveType};
 use eframe::egui;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub struct SynthApp {
     lock_free_synth: Arc<LockFreeSynth>,
@@ -13,7 +13,9 @@ pub struct SynthApp {
     last_key_times: std::collections::HashMap<egui::Key, std::time::Instant>,
     current_octave: i32,
     show_midi_monitor: bool,
+    show_midi_learn: bool,
     show_presets_window: bool,
+    learn_state: Option<Arc<Mutex<crate::midi_handler::MidiLearnState>>>,
     current_preset_name: String,
     new_preset_name: String,
     preset_category: String,
@@ -76,6 +78,7 @@ impl SynthApp {
         midi_handler: Option<MidiHandler>,
     ) -> Self {
         let params = *lock_free_synth.get_params();
+        let learn_state = midi_handler.as_ref().map(|h| h.learn_state.clone());
         Self {
             lock_free_synth,
             midi_events,
@@ -84,7 +87,9 @@ impl SynthApp {
             last_key_times: std::collections::HashMap::new(),
             current_octave: 3, // C3 octave by default
             show_midi_monitor: false,
+            show_midi_learn: false,
             show_presets_window: false,
+            learn_state,
             current_preset_name: String::new(),
             new_preset_name: String::new(),
             preset_category: "Other".to_string(),
@@ -1039,6 +1044,13 @@ impl eframe::App for SynthApp {
                     let _ = ui.small_button("NO MIDI");
                 }
 
+                if self.learn_state.is_some() {
+                    let btn_text = if self.show_midi_learn { "MIDI Learn ●" } else { "MIDI Learn" };
+                    if ui.small_button(btn_text).clicked() {
+                        self.show_midi_learn = !self.show_midi_learn;
+                    }
+                }
+
                 if ui.small_button("Presets").clicked() {
                     self.show_presets_window = !self.show_presets_window;
                 }
@@ -1181,6 +1193,15 @@ impl eframe::App for SynthApp {
                 });
         }
 
+        // MIDI Learn Window
+        if self.show_midi_learn {
+            egui::Window::new("MIDI Learn")
+                .default_size([280.0, 380.0])
+                .show(ui.ctx(), |ui| {
+                    self.draw_midi_learn_panel(ui);
+                });
+        }
+
         // Presets Window
         if self.show_presets_window {
             let mut show_presets_window = self.show_presets_window;
@@ -1253,6 +1274,89 @@ impl SynthApp {
             }
         } else {
             ui.label("no MIDI handler available");
+        }
+    }
+
+    fn draw_midi_learn_panel(&mut self, ui: &mut egui::Ui) {
+        let learnable_params: &[(&str, &str)] = &[
+            ("filter_cutoff", "Filter Cutoff"),
+            ("filter_resonance", "Filter Resonance"),
+            ("filter_envelope_amount", "Filter Env Amount"),
+            ("amp_attack", "Amp Attack"),
+            ("amp_decay", "Amp Decay"),
+            ("amp_sustain", "Amp Sustain"),
+            ("amp_release", "Amp Release"),
+            ("filter_attack", "Filter Attack"),
+            ("filter_decay", "Filter Decay"),
+            ("filter_sustain", "Filter Sustain"),
+            ("filter_release", "Filter Release"),
+            ("lfo_rate", "LFO Rate"),
+            ("lfo_amount", "LFO Amount"),
+            ("master_volume", "Master Volume"),
+            ("reverb_amount", "Reverb Amount"),
+            ("delay_feedback", "Delay Feedback"),
+            ("delay_amount", "Delay Amount"),
+            ("osc1_detune", "Osc A Detune"),
+            ("osc2_detune", "Osc B Detune"),
+        ];
+
+        if let Some(ref learn_arc) = self.learn_state {
+            // Status line
+            {
+                if let Ok(state) = learn_arc.try_lock() {
+                    if let Some(ref pending) = state.pending_param {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            format!("Waiting for CC... ({})", pending),
+                        );
+                    } else {
+                        ui.label("Click 'Learn' then move a CC on your controller.");
+                    }
+                    if !state.custom_map.is_empty() {
+                        ui.separator();
+                        ui.label("Active custom bindings:");
+                        for (cc, param) in &state.custom_map {
+                            ui.label(format!("  CC {} → {}", cc, param));
+                        }
+                    }
+                }
+            }
+            ui.separator();
+
+            egui::ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
+                for (param_key, param_label) in learnable_params {
+                    // Collect binding info before mutable ops
+                    let bound_cc: Option<u8> = learn_arc.try_lock().ok().and_then(|state| {
+                        state
+                            .custom_map
+                            .iter()
+                            .find(|(_, v)| v.as_str() == *param_key)
+                            .map(|(cc, _)| *cc)
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.set_min_width(200.0);
+                        ui.label(*param_label);
+                        if ui.small_button("Learn").clicked() {
+                            if let Ok(mut state) = learn_arc.try_lock() {
+                                state.pending_param = Some(param_key.to_string());
+                            }
+                        }
+                        if let Some(cc) = bound_cc {
+                            ui.colored_label(egui::Color32::GREEN, format!("CC {}", cc));
+                            if ui.small_button("×").clicked() {
+                                if let Ok(mut state) = learn_arc.try_lock() {
+                                    state.custom_map.retain(|_, v| v.as_str() != *param_key);
+                                }
+                            }
+                        } else {
+                            ui.colored_label(egui::Color32::GRAY, "—");
+                        }
+                    });
+                }
+            });
+        } else {
+            ui.label("No MIDI device connected.");
         }
     }
 }
