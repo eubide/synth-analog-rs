@@ -361,3 +361,60 @@ DAC → Altavoces 🔊
 | PolyBLEP/BLAMP anti-aliasing | Elimina aliasing digital sin oversampling costoso |
 | Pink noise per-voice xorshift32 | Determinista, ~8× más rápido que `rand::random()`, independiente por voz |
 | Denormal flush en ladder filter | Previene slowdown ~100× en colas de silencio por denormales IEEE 754 |
+
+---
+
+## 12. Decisiones de Diseño — Features Nuevas
+
+### VU Meter Lock-Free (`AtomicU32`)
+
+El hilo de audio escribe el pico de señal en cada bloque; el GUI lo lee cada frame. Se usa `AtomicU32` en lugar de `Mutex<f32>` porque:
+
+- El audio thread **nunca puede bloquear** — ni siquiera en microsegundos.
+- Un `f32` cabe exactamente en un `u32` vía `to_bits()` / `from_bits()`.
+- Una lectura desgarrada (`Ordering::Relaxed`) solo produce un valor incorrecto en un único frame de GUI — imperceptible visualmente.
+
+```rust
+// Audio thread (escribe):
+let new_peak = block_peak.max(decayed);
+lock_free_synth.peak_level.store(new_peak.to_bits(), Ordering::Relaxed);
+
+// GUI thread (lee):
+let peak = f32::from_bits(lock_free_synth.peak_level.load(Ordering::Relaxed));
+```
+
+La decadencia del pico (−0.003 por bloque ≈ −13 dB/s) ocurre también en el hilo de audio para evitar escribir en el AtomicU32 desde el GUI.
+
+---
+
+### Suavizado de Parámetros (1-pole IIR)
+
+Los parámetros continuos recibidos por CC (cutoff, resonance, master volume) pueden llegar 50–100 veces/s y causar "zipper noise" — escalones audibles. Se aplica un filtro de primer orden de 20 Hz antes de cada bloque de audio:
+
+```
+smooth_k = 1 - exp(-2π × 20 / sample_rate)   ≈ 0.00285 @ 44.1 kHz
+nuevo_smooth = smooth + smooth_k × (target - smooth)
+```
+
+- **Corte a 20 Hz**: τ ≈ 8 ms — suficientemente lento para eliminar escalones, suficientemente rápido para respuesta inmediata al oído.
+- **Un coeficiente por bloque** (no por muestra): el error es despreciable dado el tamaño de bloque típico (64–512 muestras).
+- El suavizado vive en `Synthesizer` (`filter_cutoff_smooth`, `filter_resonance_smooth`, `master_volume_smooth`) y se aplica al inicio de `process_block()`.
+
+---
+
+### MIDI Learn con `try_lock`
+
+El callback MIDI de `midir` es cuasi-real-time: no puede bloquearse esperando el Mutex de `MidiLearnState` si el GUI lo tiene adquirido.
+
+```rust
+if let Ok(mut state) = learn_state.try_lock() {
+    if let Some(param_name) = state.pending_param.take() {
+        state.custom_map.insert(cc_number, param_name);
+        return;  // CC consumido por el learn
+    }
+    // ...
+}
+```
+
+- `try_lock()` falla silenciosamente si el GUI tiene el lock — el MIDI learn simplemente no registra ese CC en ese frame. Dado que el usuario mueve el knob durante décimas de segundo, la pérdida de un frame es imperceptible.
+- `pending_param` es `Option<String>` — el GUI lo pone en `Some(nombre)` y el callback MIDI lo consume con `.take()` en cuanto llega el primer CC.

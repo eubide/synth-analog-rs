@@ -1,116 +1,266 @@
-# Guía de Uso - Sintetizador Analógico Vintage
+# Manual de Usuario — Sintetizador Analógico Vintage
 
 ## Descripción General
 
-Este sintetizador está inspirado en los sintetizadores analógicos clásicos de los años 70, especialmente el Prophet-5. Es un software de síntesis con procesamiento de audio en tiempo real y soporte MIDI completo.
+Emulación del Prophet-5 en Rust: síntesis substractiva con 8 voces, filtro Moog ladder de 24 dB, dual ADSR, LFO avanzado, Poly Mod, y efectos integrados.
 
 Para instalación, requisitos del sistema y compilación ver [README.md](README.md).
+Para la arquitectura técnica interna ver [ARQUITECTURA.md](ARQUITECTURA.md).
 
-## Arquitectura del Sintetizador
+---
 
-### Motor de Audio
-- **8 Voces de Polifonía** con sistema inteligente de reasignación de voces
-- **Frecuencia de Muestreo**: 44.1kHz fija
-- **Filtro Ladder 24dB/octava** basado en el modelo Moog mejorado de Huovilainen
-- **Auto-oscilación** del filtro a partir de resonancia 3.8
+## Modos de Voz
 
-### Osciladores
-El sintetizador cuenta con **2 osciladores principales** (A y B):
+| Modo | Descripción |
+|------|-------------|
+| **Poly** | Hasta 8 voces simultáneas. Robo inteligente cuando el pool se llena. |
+| **Mono** | Una sola voz. Stack de notas con prioridad configurable (Last / Low / High). |
+| **Legato** | Como Mono, pero no re-triggeriza envelopes al cambiar nota mientras se mantiene pulsada. |
+| **Unison** | Las 8 voces tocan la misma nota con detunings distribuidos uniformemente. |
 
-#### Formas de Onda Disponibles
-- **Sawtooth (Diente de Sierra)**: Rica en armónicos, ideal para leads y basses
-- **Square (Cuadrada)**: Sonido hueco y característico, con control de ancho de pulso
-- **Triangle (Triangular)**: Sonido suave, menos armónicos que sawtooth
-- **Sine (Sinusoidal)**: Forma de onda pura, ideal para tonos suaves
+**Unison Spread**: ajusta cuántos cents se distribuyen entre las 8 voces. Con spread=10, las voces van de −5 a +5 cents.
 
-#### Controles de Oscilador
-- **freq (Detune)**: Afinación fina de -12 a +12 semitonos
-- **wave**: Selector de forma de onda
-- **pw (Pulse Width)**: Solo disponible en ondas cuadradas (0.1 a 0.9)
-- **level**: Nivel/amplitud del oscilador (0.0 a 1.0)
-- **sync**: Solo en Oscilador B - sincronización con Oscilador A para efectos de sync
+---
 
-## Sección de Filtro (24dB Ladder)
+## Osciladores
 
-### Controles Principales
-- **Cutoff**: Frecuencia de corte (20Hz a 20kHz)
-  - Controla qué frecuencias pasan a través del filtro
-  - Valores bajos = sonido más suave/oscuro
-  - Valores altos = sonido más brillante
-- **Resonance**: Énfasis del filtro (0.0 a 4.0)
-  - A partir de 3.8 el filtro se auto-oscila (genera su propio tono)
-- **Envelope Amount**: Cantidad de modulación del envelope al filtro (-1.0 a 1.0)
-- **Keyboard Tracking**: Qué tanto sigue el filtro al teclado (0.0 a 1.0)
-- **Velocity**: Sensibilidad a la velocidad MIDI (0.0 a 1.0)
+El sintetizador tiene 2 osciladores (A y B).
+
+### Formas de Onda
+
+| Forma | Carácter |
+|-------|----------|
+| **Sawtooth** | Rica en armónicos — leads y basses |
+| **Square** | Sonido hueco — varía el timbre con Pulse Width |
+| **Triangle** | Suave, pocos armónicos — fundamento limpio |
+| **Sine** | Tono puro — suboscilador o FM simple |
+
+### Controles
+
+- **Detune**: Afinación en semitonos (−12 a +12)
+- **Pulse Width**: Ancho de pulso en ondas Square (0.1 a 0.9)
+- **Level**: Nivel del oscilador en el Mixer (0.0 a 1.0)
+- **Sync** *(solo Osc B)*: Sincroniza la fase de B con A, creando timbres complejos
+
+---
+
+## Sección de Filtro (24 dB Ladder)
+
+- **Cutoff**: Frecuencia de corte (20 Hz a 20 kHz, escala logarítmica)
+  - Valores bajos → sonido cálido / oscuro
+  - Valores altos → sonido brillante / abierto
+- **Resonance**: Énfasis en el punto de corte (0.0 a 4.0)
+  - Por encima de **3.8** → auto-oscilación (el filtro genera su propio tono sinusoidal)
+- **Envelope Amount**: Profundidad del Filter Envelope sobre el cutoff (−1.0 a 1.0)
+  - Valores negativos → el filtro se cierra cuando llega el envelope
+- **Keyboard Tracking**: Cuánto sigue el filtro al teclado (0.0 a 1.0)
+  - 1.0 = el cutoff sigue la nota exactamente (útil para auto-oscilación afinada)
+- **Velocity → Filter**: Sensibilidad del velocity MIDI sobre el cutoff (0.0 a 1.0)
+
+---
 
 ## Envelopes (ADSR)
 
-El sintetizador tiene **2 envelopes independientes**:
+Dos envelopes independientes con respuesta RC exponencial.
 
-### Amp Envelope (Amplitud)
-Controla el volumen de cada nota:
-- **A (Attack)**: Tiempo para alcanzar el nivel máximo (0.001s a 2s)
-- **D (Decay)**: Tiempo para caer al nivel sustain (0.001s a 3s)  
-- **S (Sustain)**: Nivel que mantiene mientras la tecla esté presionada (0.0 a 1.0)
-- **R (Release)**: Tiempo para desvanecer después de soltar la tecla (0.001s a 5s)
+### Amp Envelope
 
-### Filter Envelope (Filtro)
-Controla la modulación del filtro con el mismo formato ADSR.
+Controla el volumen de cada voz:
+
+- **A (Attack)**: Tiempo de subida al nivel máximo (0.001 s a 5 s)
+- **D (Decay)**: Tiempo de caída al nivel de sustain (0.001 s a 5 s)
+- **S (Sustain)**: Nivel sostenido mientras la tecla está pulsada (0.0 a 1.0)
+- **R (Release)**: Tiempo de caída a silencio tras soltar la tecla (0.001 s a 5 s)
+
+### Filter Envelope
+
+Controla la modulación del filtro. Mismos parámetros ADSR.
+La cantidad de modulación se ajusta con **Envelope Amount** en la sección de filtro.
+
+---
 
 ## LFO (Low Frequency Oscillator)
 
-### Formas de Onda del LFO
-- **Triangle**: Modulación suave y continua
-- **Square**: Modulación en escalón (on/off)
-- **Sawtooth**: Rampa ascendente repetitiva
-- **Reverse Sawtooth**: Rampa descendente repetitiva
-- **Sample & Hold**: Valores aleatorios sostenidos
+### Formas de Onda
 
-### Controles del LFO
-- **Rate**: Frecuencia del LFO (0.05Hz a 30Hz)
-- **Amount**: Intensidad global de modulación (0.0 a 1.0)
-- **Keyboard Sync**: Reinicia el LFO en cada nota nueva
+- **Triangle**: Modulación suave y continua — vibrato natural
+- **Square**: Modulación escalonada — trill, trémolo pulsante
+- **Sawtooth**: Rampa ascendente — barrido progresivo
+- **Reverse Sawtooth**: Rampa descendente
+- **Sample & Hold**: Valores aleatorios cada ~100 veces/s — modulación errática
 
-### Destinos de Modulación
-- **Filter Cutoff**: Modula la frecuencia de corte del filtro
-- **Filter Resonance**: Modula la resonancia del filtro
-- **Osc A/B Pitch**: Modula la afinación de los osciladores (vibrato)
-- **Amplitude**: Modula el volumen (tremolo)
+### Controles
+
+- **Rate**: Frecuencia del LFO (0.05 Hz a 30 Hz)
+- **Amount**: Profundidad global de modulación (0.0 a 1.0), escalada por el Mod Wheel (CC 1)
+- **Delay**: Tiempo de fade-in del LFO tras el trigger de nota
+- **Keyboard Sync**: Reinicia la fase del LFO en cada nota nueva
+
+### Destinos
+
+- **Filter Cutoff**: Barrido de filtro automático (wah, auto-wah)
+- **Filter Resonance**: Modulación de la resonancia
+- **Osc A Pitch**: Vibrato en oscilador A
+- **Osc B Pitch**: Vibrato en oscilador B
+- **Amplitude**: Tremolo
+
+---
+
+## Poly Mod (Modulación Polifónica)
+
+Rutas de modulación adicionales por voz, inspiradas en el Prophet-5:
+
+| Fuente | Destino | Efecto |
+|--------|---------|--------|
+| Filter Envelope | Osc A Pitch | El envelope afina el oscilador A |
+| Filter Envelope | Osc A PW | El envelope abre/cierra el pulso de A |
+| Osc B | Osc A Pitch | FM clásica (Osc B como modulador) |
+| Osc B | Osc A PW | Modulación de ancho de pulso con Osc B |
+| Osc B | Filter Cutoff | Barrido de filtro controlado por Osc B |
+
+**Técnica FM**: activa "Osc B → Osc A Pitch", baja el nivel de Osc B en el Mixer a 0 para que no suene directamente, y ajusta el detune de B para cambiar el ratio de modulación.
+
+---
 
 ## Mixer
 
-Controla los niveles de las fuentes sonoras:
-- **Oscillator A**: Nivel del oscilador A (0.0 a 1.0)
-- **Oscillator B**: Nivel del oscilador B (0.0 a 1.0)
-- **Noise**: Nivel de ruido blanco (0.0 a 1.0)
+Controla los niveles de las fuentes antes del filtro:
+
+- **Osc A**: Nivel del oscilador A (0.0 a 1.0)
+- **Osc B**: Nivel del oscilador B (0.0 a 1.0)
+- **Noise**: Nivel del generador de ruido rosa (0.0 a 1.0)
+
+---
+
+## Sección Master
+
+### Pitch Bend
+
+- **Bend Range**: Rango del pitch wheel en semitonos (1 a 24)
+
+### Velocity Curves
+
+Determina cómo el velocity MIDI mapea a amplitud:
+
+| Curva | Fórmula | Uso |
+|-------|---------|-----|
+| **Linear** | `vel / 127` | Respuesta directa y predecible |
+| **Soft** | `√(vel / 127)` | Más sensible en velocidades bajas — teclados táctiles |
+| **Hard** | `(vel / 127)²` | Más sensible en velocidades altas — drum pads o teclados duros |
+
+### Aftertouch
+
+El channel pressure (aftertouch) puede modular:
+- **→ Cutoff**: La presión abre el filtro
+- **→ Amplitude**: La presión sube el volumen de la voz
+
+Ambos sliders van de 0.0 a 1.0 (profundidad de modulación).
+
+---
 
 ## Efectos
 
-### Reverb
-- **Amount**: Cantidad de reverb (0.0 a 1.0)
+### Reverb (Freeverb)
+
+- **Amount**: Mezcla húmedo/seco (0.0 a 1.0)
 - **Size**: Tamaño de la sala virtual (0.0 a 1.0)
 
 ### Delay
-- **Time**: Tiempo de delay (0.01s a 2s)
-- **Feedback**: Realimentación del delay (0.0 a 0.95)
+
+- **Time**: Tiempo de repetición (0.01 s a 2 s)
+- **Feedback**: Densidad de ecos (0.0 a 0.95)
 - **Amount**: Mezcla del delay (0.0 a 1.0)
+
+---
+
+## VU Meter
+
+La barra de nivel en el encabezado muestra el pico de salida en tiempo real:
+
+| Color | Rango | Significado |
+|-------|-------|-------------|
+| Verde | 0 – 0.5 | Nivel seguro |
+| Amarillo | 0.5 – 0.8 | Nivel óptimo |
+| Rojo / CLIP | > 0.8 | Riesgo de saturación |
+
+Si aparece **CLIP**, reduce Master Volume o los niveles de osciladores.
+
+---
 
 ## Arpeggiator
 
-### Controles
 - **Enable**: Activa/desactiva el arpegiador
 - **Rate**: Velocidad en BPM (60 a 240)
-- **Pattern**: Patrones de arpegio
-  - **Up**: Notas ascendentes
-  - **Down**: Notas descendentes  
-  - **Up-Down**: Sube y baja
-  - **Random**: Orden aleatorio
+- **Pattern**: Up / Down / Up-Down / Random
 - **Octaves**: Número de octavas (1 a 4)
-- **Gate**: Duración de cada nota (0.1 a 1.0)
+- **Gate**: Duración relativa de cada nota (0.1 a 1.0)
+
+---
+
+## Comparación A/B
+
+Permite comparar dos configuraciones durante el diseño de presets:
+
+| Botón | Acción |
+|-------|--------|
+| **→A** | Guarda los parámetros actuales en el slot A |
+| **A** | Carga los parámetros del slot A |
+| **→B** | Guarda los parámetros actuales en el slot B |
+| **B** | Carga los parámetros del slot B |
+
+Los botones **A** y **B** están desactivados hasta que el slot tiene datos.
+
+---
+
+## Sistema de Presets
+
+### Presets Incluidos (Clásicos)
+
+#### Bass
+- **Moog Bass**: Bass profundo y cálido
+- **Acid Bass**: Bass acid house
+- **Sub Bass**: Bass sub-sónico
+- **Wobble Bass**: Bass con LFO en cutoff
+
+#### Lead
+- **Supersaw Lead**: Lead potente multi-oscilador
+- **Pluck Lead**: Lead percusivo
+- **Screaming Lead**: Lead agresivo, resonancia alta
+- **Vintage Lead**: Lead clásico de los 80s
+
+#### Pad
+- **Warm Pad**: Pad cálido y envolvente
+- **String Ensemble**: Emulación de cuerdas
+- **Choir Pad**: Pad tipo coro
+- **Glass Pad**: Pad cristalino
+
+#### Brass
+- **Brass Stab**: Stab de metales
+- **Trumpet Lead**: Lead tipo trompeta
+- **Sax Lead**: Lead tipo saxofón
+- **Flute**: Sonido de flauta
+
+#### FX
+- **Arp Sequence**: Secuencia de arpegio
+- **Sweep FX**: Barrido de filtro
+- **Noise Sweep**: Barrido con ruido
+- **Zap Sound**: Efecto zap electrónico
+
+### Gestión de Presets
+
+1. **Cargar**: Selecciona en el browser de presets
+2. **Filtrar**: Usa el desplegable de categorías para filtrar la lista
+3. **Guardar**: Escribe un nombre, elige categoría, y haz clic en "Save"
+4. **Random Patch**: Genera un parche aleatorio con parámetros controlados
+5. **Preset por defecto**: Usa "save default" / "load default"
+6. **Crear clásicos**: Usa "create classic presets"
+
+---
 
 ## Controles del Teclado
 
 ### Teclado de Computadora
+
 ```
 Notas (octava C4):
 A  W  S  E  D  F  T  G  Y  H  U  J  K  O  L  P  Ñ
@@ -118,174 +268,211 @@ C  C# D  D# E  F  F# G  G# A  A# B  C  C# D  D# E
 ```
 
 ### Controles de Octava
+
 - **Flecha Arriba**: Sube una octava
 - **Flecha Abajo**: Baja una octava
 - **Rango**: Octavas 0 a 8
 
+---
+
 ## Control MIDI
 
 ### Mensajes MIDI Soportados
+
 - **Note On/Off**: Reproducción de notas con velocity
-- **Sustain Pedal**: Mantiene notas (CC 64)
-- **Modulation Wheel**: Modulación adicional (CC 1)
+- **Pitch Bend**: Rango configurable (1–24 semitonos)
+- **Channel Pressure**: Aftertouch de canal
+- **Sustain Pedal**: CC 64 — mantiene notas
+- **Modulation Wheel**: CC 1 — escala profundidad del LFO
+- **Expression Pedal**: CC 11 — volumen expresivo multiplicativo
 
 ### Mapeo de Control Change (CC)
+
+#### Expresión y Modulación
+
+| CC | Parámetro | Rango |
+|----|-----------|-------|
+| 1 | Mod Wheel (profundidad LFO) | 0.0 – 1.0 |
+| 11 | Expression pedal (volumen) | 0.0 – 1.0 |
+
 #### Osciladores
-- CC 1/2: Amplitud Osc A/B
-- CC 3/4: Detune Osc A/B (-12 a +12 semitonos)
-- CC 5/6: Pulse Width Osc A/B
+
+| CC | Parámetro | Rango |
+|----|-----------|-------|
+| 2 | Nivel Osc B | 0.0 – 1.0 |
+| 3 | Detune Osc A | −12 a +12 st |
+| 4 | Detune Osc B | −12 a +12 st |
+| 5 | Pulse Width Osc A | 0.1 – 0.9 |
+| 6 | Pulse Width Osc B | 0.1 – 0.9 |
 
 #### Mixer
-- CC 7: Nivel Osc A
-- CC 8: Nivel Osc B  
-- CC 9: Nivel Noise
+
+| CC | Parámetro | Rango |
+|----|-----------|-------|
+| 7 | Nivel Osc A | 0.0 – 1.0 |
+| 8 | Nivel Osc B | 0.0 – 1.0 |
+| 9 | Nivel Noise | 0.0 – 1.0 |
 
 #### Filtro
-- CC 16: Cutoff (20Hz a 20kHz)
-- CC 17: Resonance
-- CC 18: Envelope Amount
-- CC 19: Keyboard Tracking
 
-#### Envelopes
-**Filter Envelope:**
-- CC 20: Attack
-- CC 21: Decay
-- CC 22: Sustain
-- CC 23: Release
+| CC | Parámetro | Rango |
+|----|-----------|-------|
+| 16 | Cutoff | 20 Hz – 20 kHz |
+| 17 | Resonance | 0.0 – 4.0 |
+| 18 | Envelope Amount | 0.0 – 1.0 |
+| 19 | Keyboard Tracking | 0.0 – 1.0 |
 
-**Amp Envelope:**
-- CC 24: Attack
-- CC 25: Decay
-- CC 26: Sustain
-- CC 27: Release
+#### Filter Envelope
+
+| CC | Parámetro | Rango |
+|----|-----------|-------|
+| 20 | Attack | 0 – 5 s |
+| 21 | Decay | 0 – 5 s |
+| 22 | Sustain | 0.0 – 1.0 |
+| 23 | Release | 0 – 5 s |
+
+#### Amp Envelope
+
+| CC | Parámetro | Rango |
+|----|-----------|-------|
+| 24 | Attack | 0 – 5 s |
+| 25 | Decay | 0 – 5 s |
+| 26 | Sustain | 0.0 – 1.0 |
+| 27 | Release | 0 – 5 s |
 
 #### LFO
-- CC 28: Frequency (0.1Hz a 20Hz)
-- CC 29: Amplitude
-- CC 30-33: Destinos LFO (>63 = ON)
 
-#### Master & Efectos
-- CC 34: Master Volume
-- CC 40: Reverb Amount
-- CC 41: Reverb Size
-- CC 42: Delay Time
-- CC 43: Delay Feedback
-- CC 44: Delay Amount
+| CC | Parámetro | Rango |
+|----|-----------|-------|
+| 28 | Rate | 0.1 – 20 Hz |
+| 29 | Amount | 0.0 – 1.0 |
+| 30 | Destino: Osc A Pitch | >63 = ON |
+| 31 | Destino: Osc B Pitch | >63 = ON |
+| 32 | Destino: Filter Cutoff | >63 = ON |
+| 33 | Destino: Amplitude | >63 = ON |
+
+#### Master y Efectos
+
+| CC | Parámetro | Rango |
+|----|-----------|-------|
+| 34 | Master Volume | 0.0 – 1.0 |
+| 40 | Reverb Amount | 0.0 – 1.0 |
+| 41 | Reverb Size | 0.0 – 1.0 |
+| 42 | Delay Time | 0.01 – 2 s |
+| 43 | Delay Feedback | 0.0 – 0.95 |
+| 44 | Delay Amount | 0.0 – 1.0 |
+| 64 | Sustain Pedal | >63 = ON |
 
 #### Arpeggiator
-- CC 50: Enable (>63 = ON)
-- CC 51: Rate (60-240 BPM)
-- CC 52: Pattern (0=Up, 1=Down, 2=Up-Down, 3=Random)
-- CC 53: Octaves (1-4)
-- CC 54: Gate Length
 
-## Sistema de Presets
+| CC | Parámetro | Rango |
+|----|-----------|-------|
+| 50 | Enable | >63 = ON |
+| 51 | Rate | 60 – 240 BPM |
+| 52 | Pattern | 0=Up, 1=Down, 2=Up-Down, 3=Random |
+| 53 | Octaves | 1 – 4 |
+| 54 | Gate Length | 0.1 – 1.0 |
 
-### Presets Incluidos (Clásicos)
-#### Bass Sounds
-- **Moog Bass**: Bass profundo y cálido
-- **Acid Bass**: Bass acid house típico
-- **Sub Bass**: Bass sub-sónico
-- **Wobble Bass**: Bass con LFO en cutoff
+### MIDI Learn
 
-#### Lead Sounds  
-- **Supersaw Lead**: Lead potente multi-oscilador
-- **Pluck Lead**: Lead percusivo
-- **Screaming Lead**: Lead agresivo con alta resonancia
-- **Vintage Lead**: Lead clásico de los 80s
+El MIDI Learn permite asignar cualquier CC de tu controlador a un parámetro:
 
-#### Pad Sounds
-- **Warm Pad**: Pad cálido y envolvente
-- **String Ensemble**: Emulación de cuerdas
-- **Choir Pad**: Pad tipo coro
-- **Glass Pad**: Pad cristalino
+1. Haz clic en **"MIDI Learn"** en el encabezado — el botón muestra ●
+2. En el panel, haz clic en **"Learn"** junto al parámetro que quieres asignar
+3. Mueve el knob o fader en tu controlador — el CC se asigna automáticamente
+4. Para eliminar una asignación, haz clic en **×** junto al parámetro
 
-#### Brass Sounds
-- **Brass Stab**: Stab de metales
-- **Trumpet Lead**: Lead tipo trompeta
-- **Sax Lead**: Lead tipo saxofón  
-- **Flute**: Sonido de flauta
+Las asignaciones personalizadas tienen prioridad sobre el mapa CC estándar.
 
-#### FX Sounds
-- **Arp Sequence**: Secuencia de arpegio
-- **Sweep FX**: Efecto de barrido de filtro
-- **Noise Sweep**: Barrido con ruido
-- **Zap Sound**: Efecto zap electrónico
-
-### Gestión de Presets
-1. **Cargar preset**: Haz clic en el preset deseado en la lista
-2. **Guardar preset**: Escribe un nombre y haz clic en "Save"
-3. **Preset por defecto**: Usa "save default" y "load default"
-4. **Crear presets clásicos**: Usa "create classic presets"
+---
 
 ## Ejemplos de Uso
 
-### Ejemplo 1: Crear un Bass Potente
-1. Configura Osc A en Sawtooth, level 0.8
-2. Configura Osc B en Square, detune -12, level 0.6  
-3. Filter: Cutoff 800Hz, Resonance 2.5
-4. Filter Envelope: A=0.01, D=0.5, S=0.3, R=0.8
-5. Envelope Amount: 0.6
+### Ejemplo 1: Bass Potente
 
-### Ejemplo 2: Crear un Lead Screaming
+1. Osc A: Sawtooth, level 0.8
+2. Osc B: Square, detune −12, level 0.6
+3. Filter: Cutoff 800 Hz, Resonance 2.5
+4. Filter Envelope: A=0.01, D=0.5, S=0.3, R=0.8, Env Amount=0.6
+
+### Ejemplo 2: Lead Screaming
+
 1. Osc A: Sawtooth, level 1.0
 2. Osc B: Square, detune +7, level 0.7
-3. Filter: Cutoff 1.5kHz, Resonance 3.9 (auto-oscilación)
-4. LFO: Triangle, Rate 6Hz, modula Filter Cutoff 0.4
+3. Filter: Cutoff 1.5 kHz, Resonance 3.9
+4. LFO: Triangle, Rate 6 Hz, destino Filter Cutoff, Amount 0.4
 5. Amp Envelope: A=0.05, D=0.3, S=0.6, R=1.2
 
-### Ejemplo 3: Crear un Pad Atmosférico
+### Ejemplo 3: Pad Atmosférico
+
 1. Osc A: Sawtooth, level 0.6
 2. Osc B: Triangle, detune +12, level 0.8
-3. Filter: Cutoff 2kHz, Resonance 1.2
+3. Filter: Cutoff 2 kHz, Resonance 1.2
 4. Reverb: Amount 0.7, Size 0.8
 5. Amp Envelope: A=1.5, D=2.0, S=0.7, R=3.0
-6. LFO: Triangle, Rate 0.2Hz, modula Amplitude 0.2
+6. LFO: Triangle, Rate 0.2 Hz, destino Amplitude, Amount 0.2
+
+---
 
 ## Técnicas Avanzadas
 
 ### Auto-Oscilación del Filtro
+
 - Sube Resonance por encima de 3.8
-- El filtro generará su propio tono sinusoidal
-- Usa Keyboard Tracking para que siga las notas
-- Combina con envelope amount negativo para efectos únicos
+- El filtro genera su propio tono sinusoidal
+- Usa Keyboard Tracking = 1.0 para que el tono siga las notas
+- Combina con Envelope Amount negativo para efectos únicos
 
 ### Sync entre Osciladores
-- Activa "sync" en Oscilador B
-- Oscilador B se sincroniza con A, creando armónicos complejos
-- Modula el detune de B con LFO para efectos dinámicos
 
-### Modulación Compleja con LFO
-- Usa Sample & Hold para modulación aleatoria
-- Combina múltiples destinos para movimiento complejo
-- Keyboard sync crea efectos rítmicos sincronizados
+- Activa "Sync" en Osc B
+- Osc B se reinicia cada ciclo de Osc A → armónicos complejos
+- Modula el detune de B con LFO para timbres dinámicos
 
-### Técnicas de Velocity
-- Mapea velocity a cutoff para filtros expresivos
-- Combina con velocity a amplitude para dinámicas realistas
+### FM Simple con Poly Mod
+
+- Activa "Osc B → Osc A Pitch" en Poly Mod
+- Baja el nivel de Osc B en el Mixer a 0 (Osc B modula, no suena directamente)
+- Ajusta el detune de Osc B para cambiar el ratio de FM
+- Sube el Amount de Poly Mod para mayor profundidad
+
+### Velocity Expresiva
+
+- **Soft curve**: gran rango dinámico en pianissimo — ideal para teclados táctiles
+- **Hard curve**: más fácil llegar al fuerte — ideal para drum pads
+- Combina con Filter Velocity para que las notas fuertes sean más brillantes
+
+### Unison Espeso
+
+- Selecciona modo Unison
+- Usa Spread alto (20–50 cents) para un muro de sonido
+- Añade reverb para pegamento entre voces
+
+---
 
 ## Consejos de Rendimiento
 
-1. **Compilación Release**: Siempre usa `cargo run --release` para mejor rendimiento
-2. **Latencia de Audio**: El buffer está optimizado para baja latencia
-3. **CPU**: El filtro ladder es computacionalmente intensivo
-4. **Polifonía**: 8 voces es el máximo recomendado para estabilidad
+1. **Compilación Release**: Siempre usa `cargo run --release` — el modo debug introduce latencia
+2. **CPU**: El filtro Moog y las 8 voces en Unison son los puntos más costosos
+3. **Polifonía**: 8 voces es el máximo
+
+---
 
 ## Solución de Problemas
 
 ### Audio
-- **Sin sonido**: Verifica que la tarjeta de audio esté funcionando
-- **Distorsión**: Reduce Master Volume o los niveles de oscilador
-- **Latencia alta**: Verifica configuración de buffer de audio del sistema
+
+- **Sin sonido**: Verifica que la tarjeta de audio esté activa y seleccionada
+- **Distorsión / CLIP**: Reduce Master Volume o niveles de osciladores; el VU meter te avisa
+- **Latencia alta**: Verifica la configuración de buffer del sistema de audio
 
 ### MIDI
-- **MIDI no detectado**: Conecta el dispositivo antes de ejecutar el programa  
-- **Mensajes no reconocidos**: Verifica el mapeo de CC en la documentación
-- **Monitor MIDI**: Usa la ventana de monitor para diagnosticar mensajes
+
+- **MIDI no detectado**: Conecta el dispositivo antes de ejecutar el programa
+- **CC no funciona**: Verifica el mapeo en la tabla de CC o usa MIDI Learn
+- **Monitor MIDI**: La ventana de monitor muestra todos los mensajes entrantes en tiempo real
 
 ### Rendimiento
-- **Audio entrecortado**: Cierra otras aplicaciones de audio
-- **CPU alto**: Reduce polifonía o efectos
-- **Compilación lenta**: Usa `cargo build --release` solo cuando sea necesario
 
-Esta guía cubre todas las funcionalidades principales del sintetizador. Experimenta con los controles para descubrir sonidos únicos y familiarizarte con el comportamiento del sintetizador analógico vintage.
+- **Audio entrecortado**: Cierra otras aplicaciones de audio; usa `cargo run --release`
+- **CPU alto**: Evita Unison con reverb y delay simultáneamente

@@ -6,22 +6,28 @@ Software de síntesis analógica inspirado en los sintetizadores clásicos de lo
 
 ### Vintage Analog Sound Engine
 - **Dual Oscillators** with sync, detune, and classic waveforms (Saw, Square, Triangle, Sine)
-- **Authentic 24dB/octave Ladder Filter** with self-oscillation capability
-- **Dual ADSR Envelopes** for amplitude and filter modulation
+- **Authentic 24dB/octave Ladder Filter** with self-oscillation at resonance 3.8+
+- **Dual ADSR Envelopes** for amplitude and filter modulation (exponential RC response)
 - **Advanced LFO** with 5 waveforms (Triangle, Square, Sawtooth, Reverse Saw, Sample & Hold)
-- **LFO Keyboard Sync** for rhythmic modulation effects
-- **8-Voice Polyphony** with intelligent voice stealing
-- **Effects Section** with reverb and delay
+- **8-Voice Polyphony** with Poly / Mono / Legato / Unison voice modes
+- **Poly Mod** — filter envelope and Osc B as modulation sources (FM, PWM, filter sweep)
+- **Effects Section** with Freeverb reverb and tape-style delay
 
-### Advanced Features
-- **Real-time MIDI Input** support for external controllers
-- **Arpeggiator** with multiple patterns (Up, Down, Up-Down, Random)
-- **Preset System** with 20 built-in classic synthesizer sounds
-- **Modulation Matrix** for complex sound design
-- **Self-Oscillating Filter** at high resonance settings
-- **Classic Analog GUI** with proper visual hierarchy and organization
-- **Real-time Waveform Display** for visual feedback
-- **MIDI Activity Indicators** for connection status
+### Expressive Controls
+- **Velocity Curves** — Linear, Soft (√), and Hard (²) response shapes
+- **Aftertouch** routing to filter cutoff and amplitude
+- **Pitch Bend** with configurable range (1–24 semitones)
+- **Expression Pedal** support (CC 11)
+- **Modulation Wheel** scales global LFO depth
+
+### Workflow & MIDI
+- **Real-time MIDI Input** with full CC map for all parameters
+- **MIDI Learn** — assign any CC to any parameter without editing config
+- **Arpeggiator** with four patterns and octave range control
+- **A/B Patch Comparison** — store and recall two sounds for quick comparison
+- **Preset System** with categories and one-click random patch generation
+- **VU Meter** with peak hold and clip indicator
+- **MIDI Monitor** window for diagnosing MIDI input
 
 ## Installation & Requirements
 
@@ -106,28 +112,6 @@ The synthesizer automatically detects and connects to the first available MIDI i
 4. Your preset will be saved to the `presets/` directory
 
 See [MANUAL.md](MANUAL.md) for the full preset list and detailed usage instructions.
-
-## Technical Architecture
-
-### Audio Engine
-- **Sample Rate**: 44.1kHz fixed
-- **Buffer Size**: Optimized for low-latency real-time processing
-- **Audio Backend**: CPAL (Cross-Platform Audio Library)
-- **Threading**: Lock-free audio processing with Arc<Mutex> for parameter updates
-
-### Filter Implementation
-The ladder filter is based on the Huovilainen improved Moog model:
-- 4 cascaded one-pole sections for 24dB/octave rolloff
-- Zero-delay feedback for accurate resonance behavior
-- Built-in saturation modeling for analog warmth
-- Self-oscillation at high resonance settings
-
-### Voice Architecture
-Each voice maintains independent state for:
-- Dual oscillator phases with sync capability
-- Amplitude and filter envelope generators
-- Ladder filter state (4 stages + feedback)
-- Velocity and modulation routing
 
 ## Development
 
