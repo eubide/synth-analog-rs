@@ -264,36 +264,49 @@ impl SynthApp {
 
         ui.checkbox(&mut self.params.lfo_sync, "keyboard sync (resets on note)");
 
+        ui.horizontal(|ui| {
+            ui.label("delay:");
+            ui.add(
+                egui::Slider::new(&mut self.params.lfo_delay, 0.0..=5.0)
+                    .step_by(0.01)
+                    .suffix(" s"),
+            );
+        });
+
         ui.separator();
         ui.label(egui::RichText::new("mod destinations").size(10.0).strong());
 
-        // Modulation routing (vintage analog style)
+        // Modulation routing con toggles de target
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
+                ui.checkbox(&mut self.params.lfo_target_filter, "");
                 ui.label("filter cutoff:");
                 ui.add(
                     egui::Slider::new(&mut self.params.lfo_to_cutoff, 0.0..=1.0).step_by(0.01),
                 );
             });
             ui.horizontal(|ui| {
-                ui.label("filter res:");
+                ui.label("   filter res:");
                 ui.add(
                     egui::Slider::new(&mut self.params.lfo_to_resonance, 0.0..=1.0).step_by(0.01),
                 );
             });
             ui.horizontal(|ui| {
+                ui.checkbox(&mut self.params.lfo_target_osc1_pitch, "");
                 ui.label("osc A pitch:");
                 ui.add(
                     egui::Slider::new(&mut self.params.lfo_to_osc1_pitch, 0.0..=1.0).step_by(0.01),
                 );
             });
             ui.horizontal(|ui| {
+                ui.checkbox(&mut self.params.lfo_target_osc2_pitch, "");
                 ui.label("osc B pitch:");
                 ui.add(
                     egui::Slider::new(&mut self.params.lfo_to_osc2_pitch, 0.0..=1.0).step_by(0.01),
                 );
             });
             ui.horizontal(|ui| {
+                ui.checkbox(&mut self.params.lfo_target_amplitude, "");
                 ui.label("amplitude:");
                 ui.add(
                     egui::Slider::new(&mut self.params.lfo_to_amplitude, 0.0..=1.0).step_by(0.01),
@@ -407,6 +420,67 @@ impl SynthApp {
         ui.horizontal(|ui| {
             ui.label("gate:");
             ui.add(egui::Slider::new(&mut self.params.arp_gate_length, 0.1..=1.0).step_by(0.01));
+        });
+
+        ui.separator();
+        ui.checkbox(&mut self.params.arp_sync_to_midi, "sync to MIDI clock");
+    }
+
+    fn draw_voice_mode_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+
+        ui.horizontal(|ui| {
+            ui.label("mode:");
+            egui::ComboBox::from_id_salt("voice_mode")
+                .selected_text(match self.params.voice_mode {
+                    1 => "Mono",
+                    2 => "Legato",
+                    3 => "Unison",
+                    _ => "Poly",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.params.voice_mode, 0, "Poly");
+                    ui.selectable_value(&mut self.params.voice_mode, 1, "Mono");
+                    ui.selectable_value(&mut self.params.voice_mode, 2, "Legato");
+                    ui.selectable_value(&mut self.params.voice_mode, 3, "Unison");
+                });
+        });
+
+        // Note priority — solo relevante en Mono/Legato
+        if self.params.voice_mode == 1 || self.params.voice_mode == 2 {
+            ui.horizontal(|ui| {
+                ui.label("priority:");
+                egui::ComboBox::from_id_salt("note_priority")
+                    .selected_text(match self.params.note_priority {
+                        1 => "Low",
+                        2 => "High",
+                        _ => "Last",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.params.note_priority, 0, "Last");
+                        ui.selectable_value(&mut self.params.note_priority, 1, "Low");
+                        ui.selectable_value(&mut self.params.note_priority, 2, "High");
+                    });
+            });
+        }
+
+        // Unison spread — solo relevante en Unison
+        if self.params.voice_mode == 3 {
+            ui.horizontal(|ui| {
+                ui.label("spread:");
+                ui.add(
+                    egui::Slider::new(&mut self.params.unison_spread, 0.0..=50.0)
+                        .step_by(0.5)
+                        .suffix(" c"),
+                );
+            });
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("voices:");
+            let mut max_v = self.params.max_voices as f32;
+            ui.add(egui::Slider::new(&mut max_v, 1.0..=8.0).step_by(1.0));
+            self.params.max_voices = max_v as u8;
         });
     }
 
@@ -889,6 +963,8 @@ impl eframe::App for SynthApp {
                     section(ui, "MASTER", |ui| self.draw_master_panel(ui));
                     ui.add_space(4.0);
                     section(ui, "ARP", |ui| self.draw_arpeggiator_panel(ui));
+                    ui.add_space(4.0);
+                    section(ui, "VOICE MODE", |ui| self.draw_voice_mode_panel(ui));
                     ui.add_space(4.0);
                     section(ui, "EFFECTS", |ui| self.draw_effects_panel(ui));
                     ui.add_space(4.0);
