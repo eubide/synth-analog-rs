@@ -411,6 +411,15 @@ impl Voice {
             _ => {} // Already in release or idle
         }
     }
+
+    /// Si el sustain pedal está activo, marca la voz como sostenida; si no, la libera.
+    pub fn release_or_sustain(&mut self, sustain_held: bool) {
+        if sustain_held {
+            self.is_sustained = true;
+        } else {
+            self.release();
+        }
+    }
 }
 
 impl Synthesizer {
@@ -567,8 +576,7 @@ impl Synthesizer {
                     if self.held_notes.is_empty() {
                         for voice in &mut self.voices {
                             if voice.is_active {
-                                if self.sustain_held { voice.is_sustained = true; }
-                                else { voice.release(); }
+                                voice.release_or_sustain(self.sustain_held);
                             }
                         }
                     }
@@ -647,10 +655,10 @@ impl Synthesizer {
                 voice.filter_envelope_state = EnvelopeState::Attack;
                 voice.lfo_delay_elapsed = 0.0; // reiniciar fade-in del LFO
             }
-        } else if let Some(voice) = self.voices.iter_mut().find(|v| !v.is_active) {
-            *voice = Voice::new(note, frequency, vel);
         } else if self.voices.is_empty() {
             self.voices.push(Voice::new(note, frequency, vel));
+        } else if let Some(voice) = self.voices.iter_mut().find(|v| !v.is_active) {
+            *voice = Voice::new(note, frequency, vel);
         } else {
             self.voices[0] = Voice::new(note, frequency, vel);
         }
@@ -681,9 +689,8 @@ impl Synthesizer {
             } else {
                 spread * (2.0 * i as f32 / (n_voices - 1) as f32 - 1.0)
             };
-            let detuned_freq = frequency * 2f32.powf(detune_cents / 1200.0);
-            let mut v = Voice::new(note, detuned_freq, vel);
-            v.glide_current_freq = detuned_freq;
+            let detuned_freq = frequency * Self::semitones_to_ratio(detune_cents / 100.0);
+            let v = Voice::new(note, detuned_freq, vel);
             if i < self.voices.len() {
                 self.voices[i] = v;
             } else {
@@ -844,8 +851,8 @@ impl Synthesizer {
 
         // Precompute values that are constant for the entire block.
         // Avoids transcendental calls (powf, exp) inside the per-sample voice loop.
-        let osc1_detune_ratio = 2f32.powf(osc1_detune / 1200.0);
-        let osc2_detune_ratio = 2f32.powf(osc2_detune / 1200.0);
+        let osc1_detune_ratio = Self::semitones_to_ratio(osc1_detune / 100.0);
+        let osc2_detune_ratio = Self::semitones_to_ratio(osc2_detune / 100.0);
         // Pitch bend ratio: ±pitch_bend_range semitones at full deflection.
         let pitch_bend_ratio = Self::semitones_to_ratio(pitch_bend * pitch_bend_range as f32);
         // Aftertouch modulations are per-block constants (aftertouch doesn't change within a buffer).
@@ -910,8 +917,10 @@ impl Synthesizer {
                 }
 
                 // LFO delay / fade-in: ramp from 0 to 1 over lfo_delay seconds desde note-on
-                voice.lfo_delay_elapsed += dt;
                 let lfo_fade = if lfo_delay > 0.001 {
+                    if voice.lfo_delay_elapsed < lfo_delay {
+                        voice.lfo_delay_elapsed += dt;
+                    }
                     (voice.lfo_delay_elapsed / lfo_delay).min(1.0)
                 } else {
                     1.0
@@ -1602,15 +1611,7 @@ impl Synthesizer {
         Ok(())
     }
 
-    pub fn load_preset(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let filename = format!("presets/{}.json", name.replace(" ", "_"));
-        if !Path::new(&filename).exists() {
-            return Err(format!("Preset file '{}' not found", filename).into());
-        }
-
-        let preset_json = fs::read_to_string(&filename)?;
-        let preset = self.json_to_preset(&preset_json)?;
-
+    fn apply_preset(&mut self, preset: Preset) {
         self.osc1 = preset.osc1;
         self.osc2 = preset.osc2;
         self.osc2_sync = preset.osc2_sync;
@@ -1622,26 +1623,25 @@ impl Synthesizer {
         self.modulation_matrix = preset.modulation_matrix;
         self.effects = preset.effects;
         self.master_volume = preset.master_volume;
+    }
 
+    pub fn load_preset(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let filename = format!("presets/{}.json", name.replace(" ", "_"));
+        if !Path::new(&filename).exists() {
+            return Err(format!("Preset file '{}' not found", filename).into());
+        }
+        let preset_json = fs::read_to_string(&filename)?;
+        let preset = self.json_to_preset(&preset_json)?;
         println!("Preset '{}' loaded from {}", name, filename);
+        self.apply_preset(preset);
         Ok(())
     }
 
     /// Carga un preset desde un string JSON en memoria (sin I/O). Usado por MIDI SysEx.
     pub fn load_preset_from_json(&mut self, json: &str) -> Result<(), Box<dyn std::error::Error>> {
         let preset = self.json_to_preset(json)?;
-        self.osc1 = preset.osc1;
-        self.osc2 = preset.osc2;
-        self.osc2_sync = preset.osc2_sync;
-        self.mixer = preset.mixer;
-        self.filter = preset.filter;
-        self.filter_envelope = preset.filter_envelope;
-        self.amp_envelope = preset.amp_envelope;
-        self.lfo = preset.lfo;
-        self.modulation_matrix = preset.modulation_matrix;
-        self.effects = preset.effects;
-        self.master_volume = preset.master_volume;
         log::info!("SysEx: preset '{}' loaded from SysEx data", preset.name);
+        self.apply_preset(preset);
         Ok(())
     }
 
