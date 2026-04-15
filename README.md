@@ -1,6 +1,6 @@
-# Vintage Analog Synthesizer
+# Sintetizador Analógico Vintage (estilo Prophet-5)
 
-A high-fidelity software synthesizer inspired by classic 1970s analog synthesizers, built in Rust with real-time audio processing and MIDI support.
+Software de síntesis analógica inspirado en los sintetizadores clásicos de los años 70, construido en Rust con procesamiento de audio en tiempo real y soporte MIDI.
 
 ## Features
 
@@ -34,14 +34,14 @@ A high-fidelity software synthesizer inspired by classic 1970s analog synthesize
 ### Building from Source
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/synth.git
-cd synth
+# Clonar el repositorio
+git clone <repo-url>
+cd synth-analog-rs
 
-# Build in release mode for optimal audio performance
+# Compilar en modo optimizado (recomendado para audio)
 cargo build --release
 
-# Run the synthesizer
+# Ejecutar el sintetizador
 cargo run --release
 ```
 
@@ -56,16 +56,7 @@ cargo run --release
 
 ### Keyboard Controls (Computer Keyboard)
 
-The synthesizer maps your computer keyboard to musical notes:
-
-```
-Musical Notes (C4 octave):
-  A  S  D  F  G  H  J  K  L
- C  C# D  D# E  F  F# G  G# A
-
-Octave Controls:
-- Z/X: Change octave down/up
-```
+The synthesizer maps your computer keyboard to musical notes. See [MANUAL.md](MANUAL.md) for the full keyboard layout and octave controls.
 
 ### GUI Controls
 
@@ -106,18 +97,15 @@ The synthesizer automatically detects and connects to the first available MIDI i
 
 #### Loading Presets
 1. Use the preset dropdown in the GUI
-2. Select from 20 built-in classic sounds:
-   - **Bass**: Moog Bass, Acid Bass, Sub Bass, Wobble Bass
-   - **Leads**: Supersaw Lead, Pluck Lead, Screaming Lead, Vintage Lead
-   - **Pads**: Warm Pad, String Ensemble, Choir Pad, Glass Pad
-   - **Brass**: Brass Stab, Trumpet Lead, Sax Lead, Flute
-   - **FX**: Arp Sequence, Sweep FX, Noise Sweep, Zap Sound
+2. Select from 20 built-in classic sounds across 5 categories: Bass, Lead, Pad, Brass, FX
 
 #### Saving Custom Presets
 1. Adjust all parameters to your liking
 2. Enter a name in the "New Preset" field
 3. Click "Save Preset"
 4. Your preset will be saved to the `presets/` directory
+
+See [MANUAL.md](MANUAL.md) for the full preset list and detailed usage instructions.
 
 ## Technical Architecture
 
@@ -168,7 +156,7 @@ cargo test -- --nocapture
 ```
 
 ### Architecture
-See [CLAUDE.md](CLAUDE.md) for detailed technical documentation and architecture overview.
+See [ARQUITECTURA.md](ARQUITECTURA.md) for detailed technical documentation and the full signal chain.
 
 ## Known Limitations
 
@@ -177,16 +165,18 @@ See [CLAUDE.md](CLAUDE.md) for detailed technical documentation and architecture
 3. **Output**: Mono output duplicated to stereo channels
 4. **Platform**: Requires Rust build environment
 
+## Documentation
+
+| Documento | Descripción |
+|-----------|-------------|
+| [MANUAL.md](MANUAL.md) | Guía de usuario completa: controles, MIDI CC, presets, técnicas |
+| [ARQUITECTURA.md](ARQUITECTURA.md) | Referencia técnica: hilos, cadena de señal DSP, filtro Moog, modulación |
+| [TEORIA.md](TEORIA.md) | Guía educativa: de la física del sonido al código Rust |
+| [TODO.md](TODO.md) | Trabajo pendiente por prioridad |
+
 ## Contributing
 
-Contributions are welcome! Please see the [TODO.md](TODO.md) file for planned features and improvements.
-
-### Priority Features to Implement
-1. Multiple LFO waveforms (Triangle, Sawtooth, Square, Sample & Hold)
-2. Poly-Mod section with authentic vintage analog routing
-3. Glide/Portamento with adjustable time
-4. Extended MIDI CC support for all parameters
-5. Unison mode for thick lead sounds
+Contributions are welcome! See [TODO.md](TODO.md) for planned features and priorities.
 
 ## License
 

@@ -4,21 +4,7 @@
 
 Este sintetizador está inspirado en los sintetizadores analógicos clásicos de los años 70, especialmente el Prophet-5. Es un software de síntesis con procesamiento de audio en tiempo real y soporte MIDI completo.
 
-## Instalación y Ejecución
-
-### Requisitos del Sistema
-- Sistema operativo: macOS, Linux o Windows
-- Rust 1.70+ (para compilar desde código fuente)
-- Tarjeta de audio: CoreAudio (macOS), ALSA/PulseAudio (Linux), WASAPI (Windows)
-
-### Compilación y Ejecución
-```bash
-# Compilar en modo optimizado (recomendado para audio)
-cargo build --release
-
-# Ejecutar el sintetizador
-cargo run --release
-```
+Para instalación, requisitos del sistema y compilación ver [README.md](README.md).
 
 ## Arquitectura del Sintetizador
 

@@ -64,19 +64,7 @@ sequenceDiagram
     AE->>SY: process_block(&mut buffer)
 ```
 
-### Mapeo de MIDI CC
-
-| CC | Parámetro |
-|----|-----------|
-| 1 | Mod wheel (escala profundidad LFO) |
-| 16 | Filter cutoff (20–20000 Hz) |
-| 17 | Filter resonance (0–10) |
-| 18 | Filter envelope amount |
-| 24–27 | Amp ADSR |
-| 20–23 | Filter ADSR |
-| 28–29 | LFO rate/amount |
-| 40–44 | Reverb y Delay |
-| 64 | Sustain pedal |
+El mapeo completo de MIDI CC está en [MANUAL.md](MANUAL.md#mapeo-de-control-change-cc).
 
 ---
 
