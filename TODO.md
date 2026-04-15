@@ -13,8 +13,6 @@ Sintetizador analógico tipo Prophet-5 en Rust. Esta lista prioriza el trabajo p
 
 ## P1 — GUI / UX
 
-- [ ] **Controles de aftertouch en GUI** — sliders para `aftertouch_to_cutoff` y `aftertouch_to_amplitude` (parámetros existen en `SynthParameters` pero no tienen UI).
-- [ ] **Pitch bend range configurable en GUI** — actualmente hardcodeado a 2 semitones en el default; debería ser ajustable por preset (típicamente 2 o 12).
 - [ ] **VU meter / indicador de clipping** — feedback visual del nivel de salida; alerta si el soft limiter está trabajando continuamente.
 - [ ] **Keyboard velocity curves humanizadas** — curvas soft/linear/hard configurables (hoy es lineal).
 - [ ] **Preset browser con categorías** — metadato de categoría en presets (Bass / Lead / Pad / Brass / FX) y agrupación en la UI.

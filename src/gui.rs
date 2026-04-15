@@ -333,12 +333,38 @@ impl SynthApp {
             );
         });
 
+        ui.horizontal(|ui| {
+            ui.label("bend range:");
+            let mut range_f32 = self.params.pitch_bend_range as f32;
+            ui.add(egui::Slider::new(&mut range_f32, 1.0..=24.0).step_by(1.0).suffix(" st"));
+            self.params.pitch_bend_range = range_f32 as u8;
+        });
+
+        ui.separator();
         ui.label("velocity sensitivity");
 
         ui.horizontal(|ui| {
             ui.label("-> volume:");
             ui.add(
                 egui::Slider::new(&mut self.params.velocity_to_amplitude, 0.0..=1.0).step_by(0.01),
+            );
+        });
+
+        ui.separator();
+        ui.label("aftertouch");
+
+        ui.horizontal(|ui| {
+            ui.label("-> cutoff:");
+            ui.add(
+                egui::Slider::new(&mut self.params.aftertouch_to_cutoff, 0.0..=1.0).step_by(0.01),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("-> amp:");
+            ui.add(
+                egui::Slider::new(&mut self.params.aftertouch_to_amplitude, 0.0..=1.0)
+                    .step_by(0.01),
             );
         });
     }
