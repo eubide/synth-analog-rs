@@ -320,6 +320,18 @@ pub enum MidiEvent {
     SustainPedal { pressed: bool },
     /// Program Change: load preset at position `program` (0-indexed) in sorted list
     ProgramChange { program: u8 },
+    /// MIDI clock tick (0xF8) — 24 pulses per quarter note
+    MidiClock,
+    /// MIDI clock start (0xFA)
+    MidiClockStart,
+    /// MIDI clock continue (0xFB)
+    MidiClockContinue,
+    /// MIDI clock stop (0xFC)
+    MidiClockStop,
+    /// SysEx request dump (F0 7D 01 F7)
+    SysExRequest,
+    /// SysEx patch load (F0 7D 02 [json] F7)
+    SysExPatch { data: Vec<u8> },
 }
 
 /// Lightweight event queue for MIDI note events

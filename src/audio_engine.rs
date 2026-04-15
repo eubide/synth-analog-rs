@@ -85,6 +85,9 @@ impl AudioEngine {
         // Pre-allocated mono buffer
         let mut mono_buffer = vec![0.0f32; 1024];
 
+        // MIDI clock timing: tracks time between ticks using Instant (acceptable overhead at 24ppq)
+        let mut last_clock_instant = std::time::Instant::now();
+
         let err_fn = |err| log::error!("Audio stream error: {}", err);
 
         let stream = device
@@ -111,6 +114,41 @@ impl AudioEngine {
                                     } else {
                                         log::info!("Program Change {}: loaded '{}'", program, preset_names[idx]);
                                     }
+                                }
+                            }
+                            MidiEvent::MidiClock => {
+                                let now = std::time::Instant::now();
+                                let dt = now.duration_since(last_clock_instant).as_secs_f32();
+                                last_clock_instant = now;
+                                synthesizer.midi_clock_tick(dt);
+                            }
+                            MidiEvent::MidiClockStart | MidiEvent::MidiClockContinue => {
+                                synthesizer.midi_clock_running = true;
+                                synthesizer.midi_clock_tick_acc = 0.0;
+                                synthesizer.midi_clock_tick_count = 0;
+                                last_clock_instant = std::time::Instant::now();
+                                log::info!("MIDI clock started");
+                            }
+                            MidiEvent::MidiClockStop => {
+                                synthesizer.midi_clock_running = false;
+                                log::info!("MIDI clock stopped");
+                            }
+                            MidiEvent::SysExRequest => {
+                                // Guardar preset actual. Nota: I/O en audio thread es no-ideal
+                                // pero SysEx es tan raro que el dropout es aceptable.
+                                if let Err(e) = synthesizer.save_preset("sysex_dump") {
+                                    log::warn!("SysEx dump failed: {}", e);
+                                } else {
+                                    log::info!("SysEx: preset guardado como sysex_dump");
+                                }
+                            }
+                            MidiEvent::SysExPatch { data } => {
+                                if let Ok(json_str) = std::str::from_utf8(&data) {
+                                    if let Err(e) = synthesizer.load_preset_from_json(json_str) {
+                                        log::warn!("SysEx patch load failed: {}", e);
+                                    }
+                                } else {
+                                    log::warn!("SysEx: datos no son UTF-8 válido");
                                 }
                             }
                         }

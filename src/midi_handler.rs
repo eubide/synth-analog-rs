@@ -72,6 +72,49 @@ impl MidiHandler {
         midi_events: &Arc<MidiEventQueue>,
         history: &Arc<Mutex<VecDeque<MidiMessage>>>,
     ) {
+        // Mensajes de sistema en tiempo real (1 byte) — alta prioridad, no entran en history
+        if !message.is_empty() {
+            match message[0] {
+                0xF8 => { midi_events.push(MidiEvent::MidiClock); return; }
+                0xFA => { midi_events.push(MidiEvent::MidiClockStart); return; }
+                0xFB => { midi_events.push(MidiEvent::MidiClockContinue); return; }
+                0xFC => { midi_events.push(MidiEvent::MidiClockStop); return; }
+                _ => {}
+            }
+        }
+
+        // SysEx: empieza con 0xF0, termina con 0xF7
+        if message.len() >= 4 && message[0] == 0xF0 && message[message.len() - 1] == 0xF7 {
+            // Manufacturer ID: 0x7D (non-commercial / educational)
+            if message[1] == 0x7D {
+                match message[2] {
+                    0x01 => {
+                        midi_events.push(MidiEvent::SysExRequest);
+                        if let Ok(mut hist) = history.lock() {
+                            hist.push_back(MidiMessage {
+                                timestamp: std::time::Instant::now(),
+                                message_type: "SysEx".to_string(),
+                                description: "Patch dump request".to_string(),
+                            });
+                        }
+                    }
+                    0x02 if message.len() > 4 => {
+                        let data = message[3..message.len() - 1].to_vec();
+                        if let Ok(mut hist) = history.lock() {
+                            hist.push_back(MidiMessage {
+                                timestamp: std::time::Instant::now(),
+                                message_type: "SysEx".to_string(),
+                                description: format!("Patch load ({} bytes)", data.len()),
+                            });
+                        }
+                        midi_events.push(MidiEvent::SysExPatch { data });
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+
         if message.len() >= 3 {
             let status = message[0];
             let data1 = message[1];

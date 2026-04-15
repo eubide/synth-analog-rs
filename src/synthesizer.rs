@@ -692,6 +692,24 @@ impl Synthesizer {
         }
     }
 
+    /// Procesa un tick de MIDI clock (0xF8). Cada 24 ticks = 1 quarter note.
+    /// Calcula el BPM desde el intervalo entre ticks y lo aplica al arpeggiador.
+    pub fn midi_clock_tick(&mut self, dt_since_last: f32) {
+        if !self.arp_sync_to_midi || !self.midi_clock_running {
+            return;
+        }
+        self.midi_clock_tick_acc += dt_since_last;
+        self.midi_clock_tick_count += 1;
+        if self.midi_clock_tick_count >= 24 {
+            // Un quarter note completado — calcular BPM
+            let bpm = 60.0 / self.midi_clock_tick_acc;
+            self.midi_clock_bpm = bpm;
+            self.arpeggiator.rate = bpm.clamp(20.0, 300.0);
+            self.midi_clock_tick_acc = 0.0;
+            self.midi_clock_tick_count = 0;
+        }
+    }
+
     /// Maneja el sustain pedal. Al soltar el pedal, libera todas las voces sostenidas.
     pub fn sustain_pedal(&mut self, pressed: bool) {
         self.sustain_held = pressed;
@@ -1606,6 +1624,24 @@ impl Synthesizer {
         self.master_volume = preset.master_volume;
 
         println!("Preset '{}' loaded from {}", name, filename);
+        Ok(())
+    }
+
+    /// Carga un preset desde un string JSON en memoria (sin I/O). Usado por MIDI SysEx.
+    pub fn load_preset_from_json(&mut self, json: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let preset = self.json_to_preset(json)?;
+        self.osc1 = preset.osc1;
+        self.osc2 = preset.osc2;
+        self.osc2_sync = preset.osc2_sync;
+        self.mixer = preset.mixer;
+        self.filter = preset.filter;
+        self.filter_envelope = preset.filter_envelope;
+        self.amp_envelope = preset.amp_envelope;
+        self.lfo = preset.lfo;
+        self.modulation_matrix = preset.modulation_matrix;
+        self.effects = preset.effects;
+        self.master_volume = preset.master_volume;
+        log::info!("SysEx: preset '{}' loaded from SysEx data", preset.name);
         Ok(())
     }
 
