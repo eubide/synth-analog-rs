@@ -17,6 +17,8 @@ pub struct SynthApp {
     current_preset_name: String,
     new_preset_name: String,
     params: SynthParameters,
+    params_a: Option<SynthParameters>,
+    params_b: Option<SynthParameters>,
     peak_level: f32,
 }
 
@@ -84,6 +86,8 @@ impl SynthApp {
             current_preset_name: String::new(),
             new_preset_name: String::new(),
             params,
+            params_a: None,
+            params_b: None,
             peak_level: 0.0,
         }
     }
@@ -530,6 +534,36 @@ impl SynthApp {
     fn draw_preset_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
+        ui.label(egui::RichText::new("A/B comparison").size(10.0).strong());
+        ui.horizontal(|ui| {
+            if ui.button("→ A").on_hover_text("Store current patch to slot A").clicked() {
+                self.params_a = Some(self.params);
+            }
+            if ui.add_enabled(self.params_a.is_some(), egui::Button::new("A"))
+                .on_hover_text("Load slot A")
+                .clicked()
+            {
+                self.params = self.params_a.unwrap();
+            }
+            ui.separator();
+            if ui.button("→ B").on_hover_text("Store current patch to slot B").clicked() {
+                self.params_b = Some(self.params);
+            }
+            if ui.add_enabled(self.params_b.is_some(), egui::Button::new("B"))
+                .on_hover_text("Load slot B")
+                .clicked()
+            {
+                self.params = self.params_b.unwrap();
+            }
+        });
+        ui.separator();
+
+        if ui.button("Random patch").clicked() {
+            self.params = Self::random_params();
+            self.current_preset_name.clear();
+        }
+        ui.separator();
+
         // Show current preset status
         ui.horizontal(|ui| {
             ui.label("current:");
@@ -799,6 +833,45 @@ impl SynthApp {
                 );
             });
         });
+    }
+
+    fn random_params() -> SynthParameters {
+        // rand 0.10 removed thread_rng/gen_range; use rand::random::<f32>() directly.
+        // Scale a [0,1) value into [lo, hi].
+        let r = |lo: f32, hi: f32| lo + rand::random::<f32>() * (hi - lo);
+        let ri = |n: u8| (rand::random::<f32>() * (n as f32 + 1.0)) as u8;
+        SynthParameters {
+            osc1_waveform: ri(3),
+            osc2_waveform: ri(3),
+            osc1_detune: r(-12.0, 12.0),
+            osc2_detune: r(-12.0, 12.0),
+            osc1_pulse_width: r(0.1, 0.9),
+            osc2_pulse_width: r(0.1, 0.9),
+            mixer_osc1_level: r(0.5, 1.0),
+            mixer_osc2_level: r(0.0, 0.8),
+            noise_level: r(0.0, 0.1),
+            filter_cutoff: {
+                let log_min = 200.0_f32.ln();
+                let log_max = 12000.0_f32.ln();
+                (log_min + rand::random::<f32>() * (log_max - log_min)).exp()
+            },
+            filter_resonance: r(0.0, 3.0),
+            filter_envelope_amount: r(0.0, 0.8),
+            filter_keyboard_tracking: r(0.0, 1.0),
+            amp_attack: r(0.001, 0.5),
+            amp_decay: r(0.05, 1.0),
+            amp_sustain: r(0.3, 1.0),
+            amp_release: r(0.05, 1.5),
+            filter_attack: r(0.001, 0.5),
+            filter_decay: r(0.05, 1.0),
+            filter_sustain: r(0.3, 1.0),
+            filter_release: r(0.05, 1.5),
+            lfo_rate: r(0.1, 8.0),
+            lfo_amount: r(0.0, 0.5),
+            lfo_waveform: ri(4),
+            master_volume: 0.7,
+            ..SynthParameters::default()
+        }
     }
 }
 
