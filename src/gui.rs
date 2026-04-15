@@ -160,7 +160,7 @@ impl SynthApp {
         if osc_num == 2 {
             ui.horizontal(|ui| {
                 ui.label("sync:");
-                ui.checkbox(&mut self.params.osc2_sync, "→ A");
+                ui.checkbox(&mut self.params.osc2_sync, "-> A");
             });
         }
     }
@@ -545,7 +545,7 @@ impl SynthApp {
 
         ui.label(egui::RichText::new("A/B comparison").size(10.0).strong());
         ui.horizontal(|ui| {
-            if ui.button("→ A").on_hover_text("Store current patch to slot A").clicked() {
+            if ui.button("-> A").on_hover_text("Store current patch to slot A").clicked() {
                 self.params_a = Some(self.params);
             }
             if ui.add_enabled(self.params_a.is_some(), egui::Button::new("A"))
@@ -555,7 +555,7 @@ impl SynthApp {
                 self.params = self.params_a.unwrap();
             }
             ui.separator();
-            if ui.button("→ B").on_hover_text("Store current patch to slot B").clicked() {
+            if ui.button("-> B").on_hover_text("Store current patch to slot B").clicked() {
                 self.params_b = Some(self.params);
             }
             if ui.add_enabled(self.params_b.is_some(), egui::Button::new("B"))
@@ -754,7 +754,7 @@ impl SynthApp {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
 
         ui.label(
-            egui::RichText::new("Filter Env →")
+            egui::RichText::new("Filter Env ->")
                 .size(10.0)
                 .color(egui::Color32::GRAY),
         );
@@ -776,7 +776,7 @@ impl SynthApp {
         ui.separator();
 
         ui.label(
-            egui::RichText::new("Osc B →")
+            egui::RichText::new("Osc B ->")
                 .size(10.0)
                 .color(egui::Color32::GRAY),
         );
@@ -807,6 +807,7 @@ impl SynthApp {
     }
 
     fn draw_keyboard_legend(&mut self, ui: &mut egui::Ui) {
+        let legend_color = egui::Color32::from_gray(70);
         ui.horizontal(|ui| {
             // Octave indicator
             ui.vertical(|ui| {
@@ -815,12 +816,12 @@ impl SynthApp {
                     egui::RichText::new(format!("Oct: {}", self.current_octave))
                         .size(12.0)
                         .strong()
-                        .color(egui::Color32::from_rgb(255, 220, 80)),
+                        .color(legend_color),
                 );
                 ui.label(
-                    egui::RichText::new("↑/↓ to change")
+                    egui::RichText::new("Up/Dn to change")
                         .size(9.0)
-                        .color(egui::Color32::GRAY),
+                        .color(legend_color),
                 );
             });
 
@@ -831,17 +832,17 @@ impl SynthApp {
                 ui.set_min_width(175.0);
                 ui.label(
                     egui::RichText::new(
-                        format!("  S   D     G   H   J      ← oct {}", self.current_octave),
+                        format!("  S   D     G   H   J      oct {}", self.current_octave),
                     )
                     .size(10.0)
                     .monospace()
-                    .color(egui::Color32::from_gray(155)),
+                    .color(legend_color),
                 );
                 ui.label(
                     egui::RichText::new("Z   X   C   V   B   N   M")
                         .size(10.0)
                         .monospace()
-                        .color(egui::Color32::WHITE),
+                        .color(legend_color),
                 );
             });
 
@@ -852,17 +853,17 @@ impl SynthApp {
                 ui.set_min_width(215.0);
                 ui.label(
                     egui::RichText::new(
-                        format!("  2   3     5   6   7        ← oct {}", self.current_octave + 1),
+                        format!("  2   3     5   6   7        oct {}", self.current_octave + 1),
                     )
                     .size(10.0)
                     .monospace()
-                    .color(egui::Color32::from_gray(155)),
+                    .color(legend_color),
                 );
                 ui.label(
                     egui::RichText::new("Q   W   E   R   T   Y   U   I   O   P")
                         .size(10.0)
                         .monospace()
-                        .color(egui::Color32::WHITE),
+                        .color(legend_color),
                 );
             });
         });
@@ -1045,7 +1046,7 @@ impl eframe::App for SynthApp {
                 }
 
                 if self.learn_state.is_some() {
-                    let btn_text = if self.show_midi_learn { "MIDI Learn ●" } else { "MIDI Learn" };
+                    let btn_text = if self.show_midi_learn { "MIDI Learn *" } else { "MIDI Learn" };
                     if ui.small_button(btn_text).clicked() {
                         self.show_midi_learn = !self.show_midi_learn;
                     }
@@ -1316,7 +1317,7 @@ impl SynthApp {
                         ui.separator();
                         ui.label("Active custom bindings:");
                         for (cc, param) in &state.custom_map {
-                            ui.label(format!("  CC {} → {}", cc, param));
+                            ui.label(format!("  CC {} -> {}", cc, param));
                         }
                     }
                 }
@@ -1344,13 +1345,13 @@ impl SynthApp {
                         }
                         if let Some(cc) = bound_cc {
                             ui.colored_label(egui::Color32::GREEN, format!("CC {}", cc));
-                            if ui.small_button("×").clicked() {
+                            if ui.small_button("x").clicked() {
                                 if let Ok(mut state) = learn_arc.try_lock() {
                                     state.custom_map.retain(|_, v| v.as_str() != *param_key);
                                 }
                             }
                         } else {
-                            ui.colored_label(egui::Color32::GRAY, "—");
+                            ui.colored_label(egui::Color32::GRAY, "-");
                         }
                     });
                 }
