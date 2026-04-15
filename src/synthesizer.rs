@@ -131,6 +131,7 @@ pub enum NotePriority {
 #[derive(Debug, Clone)]
 pub struct Preset {
     pub name: String,
+    pub category: String,
     pub osc1: OscillatorParams,
     pub osc2: OscillatorParams,
     pub osc2_sync: bool,
@@ -1603,6 +1604,7 @@ impl Synthesizer {
 
         let preset = Preset {
             name: name.to_string(),
+            category: "Other".to_string(),
             osc1: self.osc1.clone(),
             osc2: self.osc2.clone(),
             osc2_sync: self.osc2_sync,
@@ -1620,6 +1622,30 @@ impl Synthesizer {
         let filename = format!("presets/{}.json", name.replace(" ", "_"));
         fs::write(&filename, preset_json)?;
         println!("Preset '{}' saved to {}", name, filename);
+        Ok(())
+    }
+
+    pub fn save_preset_with_category(&self, name: &str, category: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.ensure_presets_dir()?;
+        let preset = Preset {
+            name: name.to_string(),
+            category: category.to_string(),
+            osc1: self.osc1.clone(),
+            osc2: self.osc2.clone(),
+            osc2_sync: self.osc2_sync,
+            mixer: self.mixer.clone(),
+            filter: self.filter.clone(),
+            filter_envelope: self.filter_envelope.clone(),
+            amp_envelope: self.amp_envelope.clone(),
+            lfo: self.lfo.clone(),
+            modulation_matrix: self.modulation_matrix.clone(),
+            effects: self.effects.clone(),
+            master_volume: self.master_volume,
+        };
+        let preset_json = self.preset_to_json(&preset)?;
+        let filename = format!("presets/{}.json", name.replace(" ", "_"));
+        std::fs::write(&filename, preset_json)?;
+        log::info!("Preset '{}' [{}] saved", name, category);
         Ok(())
     }
 
@@ -1673,6 +1699,33 @@ impl Synthesizer {
         presets
     }
 
+    pub fn list_presets_with_categories() -> Vec<(String, String)> {
+        let mut presets = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("presets") {
+            for entry in entries.flatten() {
+                if let Some(filename) = entry.file_name().to_str() {
+                    if filename.ends_with(".json") {
+                        let name = filename.trim_end_matches(".json").replace("_", " ");
+                        let category = std::fs::read_to_string(entry.path())
+                            .ok()
+                            .and_then(|content| {
+                                let lines: Vec<&str> = content.lines().collect();
+                                if lines.len() > 44 {
+                                    Some(lines[44].trim_matches('"').to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| "Other".to_string());
+                        presets.push((name, category));
+                    }
+                }
+            }
+        }
+        presets.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        presets
+    }
+
     fn preset_to_json(&self, preset: &Preset) -> Result<String, Box<dyn std::error::Error>> {
         // Simple line-based format for easy parsing
         let lines = vec![
@@ -1720,6 +1773,7 @@ impl Synthesizer {
             preset.effects.delay_feedback.to_string(),
             preset.effects.delay_amount.to_string(),
             preset.master_volume.to_string(),
+            format!("\"{}\"", preset.category),
         ];
         Ok(lines.join("\n"))
     }
@@ -1799,8 +1853,15 @@ impl Synthesizer {
         // Master
         let master_vol: f32 = lines[43].parse()?;
 
+        let category = if lines.len() > 44 {
+            lines[44].trim_matches('"').to_string()
+        } else {
+            "Other".to_string()
+        };
+
         Ok(Preset {
             name,
+            category,
             osc1: OscillatorParams {
                 wave_type: osc1_wave,
                 amplitude: osc1_amp,

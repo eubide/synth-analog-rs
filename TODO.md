@@ -13,8 +13,6 @@ Sintetizador analógico tipo Prophet-5 en Rust. Esta lista prioriza el trabajo p
 
 ## P1 — GUI / UX
 
-- [ ] **Preset browser con categorías** — metadato de categoría en presets (Bass / Lead / Pad / Brass / FX) y agrupación en la UI.
-
 ## P2 — Audio quality / ergonomía
 
 - [ ] **Parameter smoothing (anti-zipper noise)** — cambios abruptos de `filter_cutoff`, `master_volume`, etc. vía CC producen zipper audible porque el cambio se aplica de bloque en bloque sin rampa. Añadir un smoother de 1-pole por parámetro crítico (cutoff, resonance, volume) en el audio loop.

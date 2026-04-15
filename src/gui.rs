@@ -16,6 +16,8 @@ pub struct SynthApp {
     show_presets_window: bool,
     current_preset_name: String,
     new_preset_name: String,
+    preset_category: String,
+    preset_category_filter: String,
     params: SynthParameters,
     params_a: Option<SynthParameters>,
     params_b: Option<SynthParameters>,
@@ -85,6 +87,8 @@ impl SynthApp {
             show_presets_window: false,
             current_preset_name: String::new(),
             new_preset_name: String::new(),
+            preset_category: "Other".to_string(),
+            preset_category_filter: "All".to_string(),
             params,
             params_a: None,
             params_b: None,
@@ -577,6 +581,18 @@ impl SynthApp {
         ui.separator();
 
         // Create new preset
+        // Category for new preset
+        ui.horizontal(|ui| {
+            ui.label("category:");
+            egui::ComboBox::from_id_salt("preset_cat_save")
+                .selected_text(&self.preset_category)
+                .show_ui(ui, |ui| {
+                    for cat in &["Bass", "Lead", "Pad", "Brass", "FX", "Other"] {
+                        ui.selectable_value(&mut self.preset_category, cat.to_string(), *cat);
+                    }
+                });
+        });
+
         ui.horizontal(|ui| {
             ui.label("new name:");
             ui.add(
@@ -584,18 +600,14 @@ impl SynthApp {
                     .hint_text("Enter name...")
                     .desired_width(80.0),
             );
-
             let save_enabled = !self.new_preset_name.is_empty();
-            if ui
-                .add_enabled(save_enabled, egui::Button::new("Save"))
-                .clicked()
-            {
+            if ui.add_enabled(save_enabled, egui::Button::new("Save")).clicked() {
                 let mut temp_synth = Synthesizer::new();
                 temp_synth.apply_params(&self.params);
-                if let Err(e) = temp_synth.save_preset(&self.new_preset_name) {
+                if let Err(e) = temp_synth.save_preset_with_category(&self.new_preset_name, &self.preset_category) {
                     log::error!("Error saving preset: {}", e);
                 } else {
-                    log::info!("Preset '{}' saved!", self.new_preset_name);
+                    log::info!("Preset '{}' [{}] saved!", self.new_preset_name, self.preset_category);
                     self.current_preset_name = self.new_preset_name.clone();
                     self.new_preset_name.clear();
                 }
@@ -638,34 +650,50 @@ impl SynthApp {
         ui.separator();
 
         // Show all presets in a scrollable area
-        let presets = Synthesizer::list_presets();
-        if !presets.is_empty() {
-            ui.label("saved presets");
+        let presets_with_cats = Synthesizer::list_presets_with_categories();
+        if !presets_with_cats.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("filter:");
+                egui::ComboBox::from_id_salt("preset_cat_filter")
+                    .selected_text(&self.preset_category_filter)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.preset_category_filter, "All".to_string(), "All");
+                        for cat in &["Bass", "Lead", "Pad", "Brass", "FX", "Other"] {
+                            ui.selectable_value(
+                                &mut self.preset_category_filter,
+                                cat.to_string(),
+                                *cat,
+                            );
+                        }
+                    });
+            });
 
             egui::ScrollArea::vertical()
-                .max_height(100.0)
+                .max_height(120.0)
                 .show(ui, |ui| {
-                    for preset in presets.iter() {
+                    for (preset, category) in presets_with_cats.iter() {
+                        if self.preset_category_filter != "All"
+                            && category != &self.preset_category_filter
+                        {
+                            continue;
+                        }
                         let is_current = preset == &self.current_preset_name;
-                        let button_text = if is_current {
-                            format!("> {}", preset)
+                        let label = if is_current {
+                            format!("> {} [{}]", preset, category)
                         } else {
-                            preset.clone()
+                            format!("{} [{}]", preset, category)
                         };
-
-                        let button = egui::Button::new(button_text);
+                        let button = egui::Button::new(label);
                         let button = if is_current {
                             button.fill(egui::Color32::from_rgb(100, 150, 100))
                         } else {
                             button
                         };
-
                         if ui.add_sized([ui.available_width(), 18.0], button).clicked() {
                             let mut temp_synth = Synthesizer::new();
                             if let Err(e) = temp_synth.load_preset(preset) {
                                 log::error!("Error loading preset {}: {}", preset, e);
                             } else {
-                                log::info!("Preset '{}' loaded!", preset);
                                 self.params = temp_synth.to_synth_params();
                                 self.current_preset_name = preset.clone();
                             }
