@@ -156,6 +156,9 @@ pub struct SynthParameters {
 
     // Expression pedal (CC 11): scales master output level
     pub expression: f32, // 0.0..=1.0, default 1.0 (full)
+
+    // Mod wheel (CC 1): scales LFO depth to all active targets
+    pub mod_wheel: f32, // 0.0..=1.0
 }
 
 impl Default for SynthParameters {
@@ -252,6 +255,9 @@ impl Default for SynthParameters {
 
             // Expression pedal — abierta al máximo por defecto
             expression: 1.0,
+
+            // Mod wheel — centrado en cero por defecto
+            mod_wheel: 0.0,
         }
     }
 }

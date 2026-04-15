@@ -222,6 +222,8 @@ pub struct Synthesizer {
     pub aftertouch_to_amplitude: f32,
     // Expression pedal
     pub expression: f32, // 0.0..=1.0 multiplier on master output
+    // Mod wheel (CC 1): additional LFO depth scaler
+    pub mod_wheel: f32, // 0.0..=1.0
     // Master DC blocker (one-pole HPF, coeff ≈ 0.9999 → ~0.7 Hz cutoff at 44.1 kHz)
     pub master_dc_x: f32,
     pub master_dc_y: f32,
@@ -434,6 +436,7 @@ impl Synthesizer {
             aftertouch_to_cutoff: 0.5,
             aftertouch_to_amplitude: 0.0,
             expression: 1.0,
+            mod_wheel: 0.0,
             master_dc_x: 0.0,
             master_dc_y: 0.0,
         }
@@ -629,6 +632,7 @@ impl Synthesizer {
         let aftertouch_to_cutoff = self.aftertouch_to_cutoff;
         let aftertouch_to_amplitude = self.aftertouch_to_amplitude;
         let expression = self.expression;
+        let mod_wheel = self.mod_wheel;
 
         // Precompute values that are constant for the entire block.
         // Avoids transcendental calls (powf, exp) inside the per-sample voice loop.
@@ -685,9 +689,11 @@ impl Synthesizer {
             // Generate LFO value using the selected waveform
             // Convert accumulator to phase (0.0 to 1.0)
             let lfo_phase = (self.lfo_phase_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
+            // mod_wheel adds extra depth on top of lfo_amplitude (0 = unchanged, 1 = double)
             let lfo_value =
                 Self::generate_lfo_waveform(lfo_waveform, lfo_phase, self.lfo_sample_hold_value)
-                    * lfo_amplitude;
+                    * lfo_amplitude
+                    * (1.0 + mod_wheel);
 
             // Process all active voices
             for voice in &mut self.voices {
@@ -2708,6 +2714,7 @@ impl Synthesizer {
             aftertouch_to_cutoff: self.aftertouch_to_cutoff,
             aftertouch_to_amplitude: self.aftertouch_to_amplitude,
             expression: self.expression,
+            mod_wheel: self.mod_wheel,
         }
     }
 
@@ -2776,6 +2783,7 @@ impl Synthesizer {
         self.aftertouch_to_cutoff = params.aftertouch_to_cutoff;
         self.aftertouch_to_amplitude = params.aftertouch_to_amplitude;
         self.expression = params.expression;
+        self.mod_wheel = params.mod_wheel;
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {

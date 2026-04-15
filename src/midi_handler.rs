@@ -192,7 +192,7 @@ impl MidiHandler {
         let mut params = *lock_free_synth.get_params();
 
         match cc_number {
-            1 => params.osc1_level = normalized_value,
+            1 => params.mod_wheel = normalized_value,
             2 => params.osc2_level = normalized_value,
             3 => params.osc1_detune = -12.0 + (normalized_value * 24.0),
             4 => params.osc2_detune = -12.0 + (normalized_value * 24.0),
