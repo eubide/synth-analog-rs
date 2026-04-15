@@ -13,7 +13,6 @@ Sintetizador analógico tipo Prophet-5 en Rust. Esta lista prioriza el trabajo p
 
 ## P1 — GUI / UX
 
-- [ ] **Keyboard velocity curves humanizadas** — curvas soft/linear/hard configurables (hoy es lineal).
 - [ ] **Preset browser con categorías** — metadato de categoría en presets (Bass / Lead / Pad / Brass / FX) y agrupación en la UI.
 - [ ] **Randomización de preset** — botón "Random patch" para exploración de sonido; randomizar dentro de rangos razonables (evitar cutoff a 20 Hz o attack a 5 s).
 - [ ] **Patch A/B comparison**

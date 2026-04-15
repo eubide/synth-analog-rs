@@ -352,6 +352,21 @@ impl SynthApp {
             );
         });
 
+        ui.horizontal(|ui| {
+            ui.label("vel curve:");
+            egui::ComboBox::from_id_salt("velocity_curve")
+                .selected_text(match self.params.velocity_curve {
+                    1 => "Soft",
+                    2 => "Hard",
+                    _ => "Linear",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.params.velocity_curve, 0, "Linear");
+                    ui.selectable_value(&mut self.params.velocity_curve, 1, "Soft");
+                    ui.selectable_value(&mut self.params.velocity_curve, 2, "Hard");
+                });
+        });
+
         ui.separator();
         ui.label("aftertouch");
 

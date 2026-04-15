@@ -160,6 +160,9 @@ pub struct SynthParameters {
     // Mod wheel (CC 1): scales LFO depth to all active targets
     pub mod_wheel: f32, // 0.0..=1.0
 
+    // Velocity curve: 0=Linear, 1=Soft (sqrt), 2=Hard (square)
+    pub velocity_curve: u8,
+
     // Voice mode: 0=Poly, 1=Mono, 2=Legato, 3=Unison
     pub voice_mode: u8,
     // Note priority (for Mono/Legato): 0=Last, 1=Low, 2=High
@@ -273,6 +276,9 @@ impl Default for SynthParameters {
 
             // Mod wheel — centrado en cero por defecto
             mod_wheel: 0.0,
+
+            // Velocity curve — lineal por defecto
+            velocity_curve: 0,
 
             // Voice mode — polyphonic por defecto
             voice_mode: 0,

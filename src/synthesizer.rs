@@ -247,6 +247,8 @@ pub struct Synthesizer {
     pub expression: f32, // 0.0..=1.0 multiplier on master output
     // Mod wheel (CC 1): additional LFO depth scaler
     pub mod_wheel: f32, // 0.0..=1.0
+    // Velocity curve: 0=Linear, 1=Soft, 2=Hard
+    pub velocity_curve: u8,
     // LFO delay/fade-in (segundos, 0 = instantáneo)
     pub lfo_delay: f32,
     // MIDI clock sync
@@ -484,6 +486,7 @@ impl Synthesizer {
             aftertouch_to_amplitude: 0.0,
             expression: 1.0,
             mod_wheel: 0.0,
+            velocity_curve: 0,
             lfo_delay: 0.0,
             arp_sync_to_midi: false,
             midi_clock_running: false,
@@ -527,7 +530,7 @@ impl Synthesizer {
 
     fn trigger_note(&mut self, note: u8, velocity: u8) {
         let frequency = Self::note_to_frequency(note);
-        let velocity_normalized = velocity as f32 / 127.0;
+        let velocity_normalized = Self::apply_velocity_curve(velocity, self.velocity_curve);
 
         // Reset LFO phase if keyboard sync is enabled
         if self.lfo.sync {
@@ -635,7 +638,7 @@ impl Synthesizer {
     /// Si `legato` es true, no retriggeriza los envelopes.
     fn trigger_mono(&mut self, note: u8, velocity: u8, legato: bool) {
         let frequency = Self::note_to_frequency(note);
-        let vel = velocity as f32 / 127.0;
+        let vel = Self::apply_velocity_curve(velocity, self.velocity_curve);
 
         if self.lfo.sync && !legato {
             self.lfo_phase_accumulator = 0;
@@ -667,7 +670,7 @@ impl Synthesizer {
     /// Dispara todas las voces en modo unison con detune spread.
     fn trigger_unison(&mut self, note: u8, velocity: u8) {
         let frequency = Self::note_to_frequency(note);
-        let vel = velocity as f32 / 127.0;
+        let vel = Self::apply_velocity_curve(velocity, self.velocity_curve);
         let n_voices = self.max_polyphony.max(1);
         let spread = self.unison_spread;
 
@@ -764,6 +767,15 @@ impl Synthesizer {
 
     pub fn note_to_frequency(note: u8) -> f32 {
         OPTIMIZATION_TABLES.get_midi_frequency(note)
+    }
+
+    fn apply_velocity_curve(velocity: u8, curve: u8) -> f32 {
+        let v = velocity as f32 / 127.0;
+        match curve {
+            1 => v.sqrt(), // Soft: more sensitive at low velocities
+            2 => v * v,    // Hard: requires strong playing
+            _ => v,        // Linear (default)
+        }
     }
 
     fn generate_lfo_waveform(waveform: LfoWaveform, phase: f32, sample_hold_value: f32) -> f32 {
@@ -2961,6 +2973,7 @@ impl Synthesizer {
             aftertouch_to_amplitude: self.aftertouch_to_amplitude,
             expression: self.expression,
             mod_wheel: self.mod_wheel,
+            velocity_curve: self.velocity_curve,
             voice_mode: match self.voice_mode {
                 VoiceMode::Poly => 0,
                 VoiceMode::Mono => 1,
@@ -3045,6 +3058,7 @@ impl Synthesizer {
         self.aftertouch_to_amplitude = params.aftertouch_to_amplitude;
         self.expression = params.expression;
         self.mod_wheel = params.mod_wheel;
+        self.velocity_curve = params.velocity_curve;
         self.voice_mode = match params.voice_mode {
             1 => VoiceMode::Mono,
             2 => VoiceMode::Legato,
