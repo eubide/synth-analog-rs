@@ -261,6 +261,10 @@ pub struct Synthesizer {
     // Master DC blocker (one-pole HPF, coeff ≈ 0.9999 → ~0.7 Hz cutoff at 44.1 kHz)
     pub master_dc_x: f32,
     pub master_dc_y: f32,
+    // 1-pole parameter smoothers (anti-zipper noise for CC-controlled params)
+    pub filter_cutoff_smooth: f32,
+    pub filter_resonance_smooth: f32,
+    pub master_volume_smooth: f32,
 }
 
 impl Default for OscillatorParams {
@@ -496,6 +500,9 @@ impl Synthesizer {
             midi_clock_tick_count: 0,
             master_dc_x: 0.0,
             master_dc_y: 0.0,
+            filter_cutoff_smooth: 5000.0,
+            filter_resonance_smooth: 1.0,
+            master_volume_smooth: 0.7,
         }
     }
 
@@ -825,8 +832,13 @@ impl Synthesizer {
         let mixer_osc1_level = self.mixer.osc1_level;
         let mixer_osc2_level = self.mixer.osc2_level;
         let mixer_noise_level = self.mixer.noise_level;
-        let filter_cutoff = self.filter.cutoff;
-        let filter_resonance = self.filter.resonance;
+        // 1-pole smoothers: τ ≈ 1/(2π·20 Hz) ≈ 8ms — eliminates zipper noise from CC updates
+        let smooth_k = (1.0 - (-2.0 * std::f32::consts::PI * 20.0 / self.sample_rate).exp()).min(1.0);
+        self.filter_cutoff_smooth += smooth_k * (self.filter.cutoff - self.filter_cutoff_smooth);
+        self.filter_resonance_smooth += smooth_k * (self.filter.resonance - self.filter_resonance_smooth);
+        self.master_volume_smooth += smooth_k * (self.master_volume - self.master_volume_smooth);
+        let filter_cutoff = self.filter_cutoff_smooth;
+        let filter_resonance = self.filter_resonance_smooth;
         let filter_envelope_amount = self.filter.envelope_amount;
         let filter_keyboard_tracking = self.filter.keyboard_tracking;
         let envelope_attack = self.amp_envelope.attack;
@@ -845,7 +857,7 @@ impl Synthesizer {
         let lfo_target_filter = self.lfo.target_filter;
         let lfo_target_amplitude = self.lfo.target_amplitude;
         let modulation_matrix = self.modulation_matrix.clone();
-        let master_volume = self.master_volume;
+        let master_volume = self.master_volume_smooth;
         let sample_rate = self.sample_rate;
         let poly_mod_fe_freq = self.poly_mod_filter_env_to_osc_a_freq;
         let poly_mod_fe_pw = self.poly_mod_filter_env_to_osc_a_pw;
