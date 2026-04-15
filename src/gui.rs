@@ -17,6 +17,7 @@ pub struct SynthApp {
     current_preset_name: String,
     new_preset_name: String,
     params: SynthParameters,
+    peak_level: f32,
 }
 
 /// Altura del sub-panel ADSR (title + 4 sliders + curva 32 px).
@@ -83,6 +84,7 @@ impl SynthApp {
             current_preset_name: String::new(),
             new_preset_name: String::new(),
             params,
+            peak_level: 0.0,
         }
     }
 
@@ -789,6 +791,8 @@ impl eframe::App for SynthApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Read current params at start of frame
         self.params = *self.lock_free_synth.get_params();
+        let peak_bits = self.lock_free_synth.peak_level.load(std::sync::atomic::Ordering::Relaxed);
+        self.peak_level = f32::from_bits(peak_bits);
 
         // Handle keyboard input
         ctx.input(|i| {
@@ -878,6 +882,37 @@ impl eframe::App for SynthApp {
                     .size(18.0)
                     .strong(),
             );
+
+            // VU meter bar
+            let peak = self.peak_level;
+            let clipping = peak > 0.8;
+            let vu_color = if clipping {
+                egui::Color32::from_rgb(255, 60, 60)
+            } else if peak > 0.5 {
+                egui::Color32::from_rgb(255, 220, 40)
+            } else {
+                egui::Color32::from_rgb(60, 200, 60)
+            };
+            let (vu_rect, _) = ui.allocate_exact_size(egui::vec2(80.0, 12.0), egui::Sense::hover());
+            if ui.is_rect_visible(vu_rect) {
+                let painter = ui.painter();
+                painter.rect_filled(vu_rect, 2.0, egui::Color32::from_gray(25));
+                let filled_w = vu_rect.width() * peak.min(1.0);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(vu_rect.min, egui::vec2(filled_w, vu_rect.height())),
+                    2.0,
+                    vu_color,
+                );
+                if clipping {
+                    painter.text(
+                        vu_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "CLIP",
+                        egui::FontId::monospace(9.0),
+                        egui::Color32::WHITE,
+                    );
+                }
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self._midi_handler.is_some() {

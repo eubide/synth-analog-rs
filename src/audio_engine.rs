@@ -175,7 +175,14 @@ impl AudioEngine {
                         *sample = Self::soft_limiter(*sample);
                     }
 
-                    // 5. Convert mono to multi-channel
+                    // 5. Update VU meter peak with slow decay
+                    let block_peak = mono_buffer.iter().take(frames).fold(0.0f32, |a, &b| a.max(b.abs()));
+                    let stored = f32::from_bits(lock_free_synth.peak_level.load(std::sync::atomic::Ordering::Relaxed));
+                    let decayed = (stored - 0.003).max(0.0);
+                    let new_peak = block_peak.max(decayed);
+                    lock_free_synth.peak_level.store(new_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
+
+                    // 6. Convert mono to multi-channel
                     for (frame_idx, &sample) in mono_buffer.iter().take(frames).enumerate() {
                         for channel in 0..channels {
                             let output_idx = frame_idx * channels + channel;

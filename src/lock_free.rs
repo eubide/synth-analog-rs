@@ -292,12 +292,16 @@ impl Default for SynthParameters {
 /// Lock-free synthesizer state for real-time audio processing
 pub struct LockFreeSynth {
     pub params: TripleBuffer<SynthParameters>,
+    /// Peak output amplitude written by audio thread, read by GUI for VU meter.
+    /// Stored as f32 bits in an AtomicU32 for lock-free access.
+    pub peak_level: std::sync::atomic::AtomicU32,
 }
 
 impl LockFreeSynth {
     pub fn new() -> Self {
         Self {
             params: TripleBuffer::new(SynthParameters::default()),
+            peak_level: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
