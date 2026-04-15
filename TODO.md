@@ -14,27 +14,27 @@ Sintetizador analógico tipo Prophet-5 en Rust. Esta lista prioriza el trabajo p
 
 ## Bugs conocidos
 
-- [ ] **CC 1 mapeado a `osc1_level` en lugar de mod wheel.** `midi_handler.rs:195`. CC 1 es el estándar de Modulation Wheel; debería rutear a `lfo_amount` o a la profundidad de modulación del LFO, no al nivel del oscilador.
-- [ ] **`lfo_target_*` booleans son dead code.** Los campos `lfo_target_osc1_pitch / osc2_pitch / filter / amplitude` se guardan en presets y en el struct `LFO` pero el audio loop los ignora — solo los amounts `lfo_to_*` controlan el routing. Hay que o bien usarlos como gates booleanos (si el toggle está off, ignorar el amount) o eliminarlos del formato de preset.
-- [ ] **2 de 5 routings de Poly Mod no tienen slider en la GUI.** `poly_mod_osc_b_to_osc_a_pw` y `poly_mod_osc_b_to_filter_cutoff` están implementados en el motor de audio pero el panel POLY MOD solo muestra 3 de los 5 parámetros. `gui.rs:569-615`.
+- [x] **CC 1 mapeado a `osc1_level` en lugar de mod wheel.** Corregido: CC 1 → `mod_wheel`, escala profundidad LFO a todos los destinos activos.
+- [x] **`lfo_target_*` booleans son dead code.** Corregido: los booleans ahora gatean las rutas de modulación LFO en `process_block`.
+- [x] **2 de 5 routings de Poly Mod no tienen slider en la GUI.** Corregido: añadidos sliders para `poly_mod_osc_b_to_osc_a_pw` y `poly_mod_osc_b_to_filter_cutoff`.
 
 ## P3 — Features del Prophet-5 faltantes
 
-- [ ] **Sustain pedal.** El evento `MidiEvent::SustainPedal` llega pero se ignora (`audio_engine.rs:103`). Falta: flag de sustain por voz; si el pedal está pulsado, las notas liberadas entran en sustain extendido en lugar de pasar a release.
-- [ ] **Modo monofónico + legato.** Voz única con prioridad configurable (last/low/high). En legato, cambiar nota no retriggeriza los envelopes — solo glisa el pitch. Complementa el glide ya existente.
-- [ ] **Unison mode** — todas las voces apiladas sobre una sola nota con detune escalonado (spread configurable)
-- [ ] **Modo 5-voice auténtico** como opción (actualmente 8)
-- [ ] **Vintage voice allocation modes:**
-  - [ ] Last-note priority
-  - [ ] Low-note priority
-  - [ ] High-note priority
-- [ ] **LFO delay / fade-in** — el LFO entra suavemente tras un retardo configurable post-note-on
+- [x] **Sustain pedal.** Implementado: `is_sustained` por voz, `sustain_held` en Synthesizer, manejo real en `audio_engine.rs`.
+- [x] **Modo monofónico + legato.** Implementado: `VoiceMode::Mono/Legato`, note stack, prioridad configurable (Last/Low/High). En legato, no retriggeriza envelopes.
+- [x] **Unison mode** — implementado: todas las voces apiladas con detune spread configurable en cents.
+- [x] **Modo 5-voice auténtico** — implementado: `max_voices` configurable 1–8 vía GUI y CC.
+- [x] **Vintage voice allocation modes:**
+  - [x] Last-note priority
+  - [x] Low-note priority
+  - [x] High-note priority
+- [x] **LFO delay / fade-in** — implementado: ramp per-voz desde 0 hasta plena profundidad en `lfo_delay` segundos.
 
 ## P4 — MIDI pendiente
 
-- [ ] **Mod wheel routing real (CC 1).** Una vez corregido el bug, mapear CC 1 a `lfo_amount` o crear un parámetro de "mod depth" independiente que escale el LFO hacia los destinos activos.
-- [ ] **MIDI clock sync para el arpeggiador.** El arpeggiador usa BPM interno; debería poderse sincronizar a MIDI clock externo (DAW / drum machine).
-- [ ] **MIDI SysEx** para patch dump/load
+- [x] **Mod wheel routing real (CC 1).** Implementado: `mod_wheel` param, CC 1 → `mod_wheel`, escala LFO a todos los destinos activos (0=unchanged, 1=double depth).
+- [x] **MIDI clock sync para el arpeggiador.** Implementado: eventos `MidiClock/Start/Continue/Stop` (0xF8/FA/FB/FC), 24ppq → BPM, toggle `arp_sync_to_midi` en GUI y ARP panel.
+- [x] **MIDI SysEx** para patch dump/load. Implementado: F0 7D 01 F7 = dump (save), F0 7D 02 [json] F7 = load.
 
 ## P5 — GUI / UX
 
@@ -116,18 +116,34 @@ Sintetizador analógico tipo Prophet-5 en Rust. Esta lista prioriza el trabajo p
 ### MIDI
 - [x] Note on/off
 - [x] CC mapping completo (CC 1-54) para parámetros de synth
-- [x] Sustain pedal (CC 64) — evento recibido y parseado
+- [x] **Sustain pedal (CC 64)** — `is_sustained` por voz, `sustain_held` en Synthesizer; release real al soltar
 - [x] Auto-conexión al primer MIDI input disponible
 - [x] **Pitch bend** (0xE0) — ±`pitch_bend_range` semitones, ratio precomputado por bloque
 - [x] **Aftertouch** (0xD0) — modulación aditiva al cutoff (×4 kHz máx) y multiplicativa a amplitud
 - [x] **Program Change** (0xC0) — carga preset por índice `program % len`, lista cacheada al inicio
 - [x] **Expression pedal** (CC 11) — escala `master_volume` en el bus maestro
+- [x] **Mod wheel (CC 1)** — `mod_wheel` param escala profundidad LFO a destinos activos
+- [x] **MIDI clock sync** (0xF8/FA/FB/FC) — 24ppq → BPM, toggle `arp_sync_to_midi`
+- [x] **MIDI SysEx** — F0 7D 01 F7 dump / F0 7D 02 [json] F7 load
 
 ### Presets
 - [x] Save/load system con formato propio
 - [x] 26 presets clásicos (Moog Bass, Warm Pad, Brass Stab, Sax Lead, etc.)
+- [x] `load_preset_from_json` — carga desde memoria (sin I/O), usado por SysEx
+
+### Voces y modulación
+- [x] **Voice modes** — Poly / Mono / Legato / Unison con note stack
+- [x] **Note priority** — Last / Low / High (para Mono/Legato)
+- [x] **Unison spread** — detune escalonado configurable en cents
+- [x] **Max voices** — configurable 1–8 (opción 5-voice auténtico)
+- [x] **LFO delay / fade-in** — ramp per-voz, lfo_delay_elapsed reset en retrigger
+- [x] **lfo_target booleans** — now gate LFO routing in process_block
 
 ### GUI
 - [x] Layout vintage analógico con egui
 - [x] Oscilloscope/waveform display
 - [x] MIDI activity indicators
+- [x] **Poly Mod panel** — 5 sliders completos (todos los routings visibles)
+- [x] **LFO panel** — delay slider + target toggles checkbox por destino
+- [x] **Voice Mode panel** — ComboBox mode, note priority, unison spread, max voices
+- [x] **Arpeggiator panel** — toggle MIDI clock sync
