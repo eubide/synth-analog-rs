@@ -394,6 +394,17 @@ pub struct Synthesizer {
     pub stereo_spread: f32,
     // Tuning mode: 0=Equal Temperament, 1=Just Intonation, 2=Pythagorean, 3=Werckmeister III
     pub tuning_mode: u8,
+    // Biquad LP decimation filter state (two cascaded stages for 4× support)
+    pub decim_x1_l: f32, pub decim_x2_l: f32,
+    pub decim_y1_l: f32, pub decim_y2_l: f32,
+    pub decim_x1_r: f32, pub decim_x2_r: f32,
+    pub decim_y1_r: f32, pub decim_y2_r: f32,
+    // Second cascade stage (4× oversampling only)
+    pub decim2_x1_l: f32, pub decim2_x2_l: f32,
+    pub decim2_y1_l: f32, pub decim2_y2_l: f32,
+    pub decim2_x1_r: f32, pub decim2_x2_r: f32,
+    pub decim2_y1_r: f32, pub decim2_y2_r: f32,
+    pub oversampling: u8,
 }
 
 impl Default for OscillatorParams {
@@ -672,6 +683,15 @@ impl Synthesizer {
             master_noise_b2: 0.0,
             stereo_spread: 0.0,
             tuning_mode: 0,
+            decim_x1_l: 0.0, decim_x2_l: 0.0,
+            decim_y1_l: 0.0, decim_y2_l: 0.0,
+            decim_x1_r: 0.0, decim_x2_r: 0.0,
+            decim_y1_r: 0.0, decim_y2_r: 0.0,
+            decim2_x1_l: 0.0, decim2_x2_l: 0.0,
+            decim2_y1_l: 0.0, decim2_y2_l: 0.0,
+            decim2_x1_r: 0.0, decim2_x2_r: 0.0,
+            decim2_y1_r: 0.0, decim2_y2_r: 0.0,
+            oversampling: 1,
         }
     }
 
@@ -3534,6 +3554,7 @@ impl Synthesizer {
             // reference_tone is GUI-only state, not part of the synthesizer engine
             reference_tone: false,
             tuning_mode: self.tuning_mode,
+            oversampling: self.oversampling,
         }
     }
 
@@ -3628,6 +3649,7 @@ impl Synthesizer {
         self.analog.noise_floor = params.analog_noise_floor;
         self.stereo_spread = params.stereo_spread;
         self.tuning_mode = params.tuning_mode;
+        self.oversampling = params.oversampling.max(1);
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {
@@ -3686,6 +3708,87 @@ impl Synthesizer {
             2 => ArpPattern::UpDown,
             3 => ArpPattern::Random,
             _ => ArpPattern::Up,
+        }
+    }
+
+    // 2nd-order Butterworth LP at fc=sample_rate/4 (for 2× oversampling).
+    // Coefficients: b=[0.2929, 0.5858, 0.2929], a2=0.1716, a1=0.0 (symmetric).
+    // Direct Form II Transposed.
+    #[inline(always)]
+    fn decimate_biquad(x: f32, x1: &mut f32, x2: &mut f32, y1: &mut f32, y2: &mut f32) -> f32 {
+        const B0: f32 = 0.2929;
+        const B1: f32 = 0.5858;
+        const B2: f32 = 0.2929;
+        const A2: f32 = 0.1716;
+        // a1 = 0.0, so omitted
+        let y = B0 * x + B1 * *x1 + B2 * *x2 - A2 * *y2;
+        *x2 = *x1;
+        *x1 = x;
+        *y2 = *y1;
+        *y1 = y;
+        y
+    }
+
+    pub fn process_block_oversampled(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        over_left: &mut Vec<f32>,
+        over_right: &mut Vec<f32>,
+    ) {
+        let factor = self.oversampling as usize;
+        let frames = left.len();
+
+        if factor <= 1 {
+            self.process_block(left, right);
+            return;
+        }
+
+        let inner = frames * factor;
+        if over_left.len() < inner {
+            over_left.resize(inner, 0.0);
+            over_right.resize(inner, 0.0);
+        }
+
+        // Synthesize at N× sample rate
+        let orig_rate = self.sample_rate;
+        self.sample_rate = orig_rate * factor as f32;
+        self.process_block(&mut over_left[..inner], &mut over_right[..inner]);
+        self.sample_rate = orig_rate;
+
+        // Decimate: apply biquad LP filter and pick every factor-th sample
+        for i in 0..inner {
+            let l = over_left[i];
+            let r = over_right[i];
+
+            let lf = Self::decimate_biquad(
+                l, &mut self.decim_x1_l, &mut self.decim_x2_l,
+                &mut self.decim_y1_l, &mut self.decim_y2_l,
+            );
+            let rf = Self::decimate_biquad(
+                r, &mut self.decim_x1_r, &mut self.decim_x2_r,
+                &mut self.decim_y1_r, &mut self.decim_y2_r,
+            );
+
+            let (lf, rf) = if factor == 4 {
+                let l2 = Self::decimate_biquad(
+                    lf, &mut self.decim2_x1_l, &mut self.decim2_x2_l,
+                    &mut self.decim2_y1_l, &mut self.decim2_y2_l,
+                );
+                let r2 = Self::decimate_biquad(
+                    rf, &mut self.decim2_x1_r, &mut self.decim2_x2_r,
+                    &mut self.decim2_y1_r, &mut self.decim2_y2_r,
+                );
+                (l2, r2)
+            } else {
+                (lf, rf)
+            };
+
+            if i % factor == factor - 1 {
+                let out = i / factor;
+                left[out] = lf;
+                right[out] = rf;
+            }
         }
     }
 }
@@ -4947,5 +5050,28 @@ false
         let right = ((1.0 + pan) / 2.0_f32).sqrt();
         assert!(left.abs() < 1e-5, "full right: L≈0, got {}", left);
         assert!((right - 1.0).abs() < 1e-5, "full right: R=1, got {}", right);
+    }
+
+    #[test]
+    fn test_decimate_biquad_dc_gain_unity() {
+        let mut x1 = 0.0f32; let mut x2 = 0.0f32;
+        let mut y1 = 0.0f32; let mut y2 = 0.0f32;
+        let mut out = 0.0f32;
+        for _ in 0..2000 {
+            out = Synthesizer::decimate_biquad(1.0, &mut x1, &mut x2, &mut y1, &mut y2);
+        }
+        assert!((out - 1.0).abs() < 1e-3, "DC gain=1.0, got {}", out);
+    }
+
+    #[test]
+    fn test_decimate_biquad_nyquist_attenuated() {
+        let mut x1 = 0.0f32; let mut x2 = 0.0f32;
+        let mut y1 = 0.0f32; let mut y2 = 0.0f32;
+        let mut out = 0.0f32;
+        for i in 0..2000 {
+            let x = if i % 2 == 0 { 1.0f32 } else { -1.0f32 };
+            out = Synthesizer::decimate_biquad(x, &mut x1, &mut x2, &mut y1, &mut y2);
+        }
+        assert!(out.abs() < 0.01, "Nyquist fully attenuated, got {}", out);
     }
 }

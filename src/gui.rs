@@ -488,6 +488,15 @@ impl SynthApp {
                 .response
         })
         .on_hover_text("Alternate tuning system — all anchored to A4 = 440 Hz");
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("oversamp:").size(10.0));
+            ui.selectable_value(&mut self.params.oversampling, 1u8, "1×");
+            ui.selectable_value(&mut self.params.oversampling, 2u8, "2×");
+            ui.selectable_value(&mut self.params.oversampling, 4u8, "4×");
+        });
+
         labeled(ui, "spread (st):", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.stereo_spread, 0.0..=1.0)

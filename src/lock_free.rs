@@ -198,6 +198,9 @@ pub struct SynthParameters {
     // Tuning mode: 0=Equal Temperament, 1=Just Intonation (5-limit),
     //              2=Pythagorean, 3=Werckmeister III
     pub tuning_mode: u8,
+
+    // Oversampling factor: 1 = off, 2 = 2×, 4 = 4× (increases CPU proportionally)
+    pub oversampling: u8,
 }
 
 impl Default for SynthParameters {
@@ -332,6 +335,9 @@ impl Default for SynthParameters {
 
             // Tuning mode — Equal Temperament by default
             tuning_mode: 0,
+
+            // Oversampling — off by default
+            oversampling: 1,
         }
     }
 }

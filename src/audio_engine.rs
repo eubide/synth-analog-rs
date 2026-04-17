@@ -85,6 +85,8 @@ impl AudioEngine {
         // Pre-allocated stereo buffers
         let mut left_buffer = vec![0.0f32; 1024];
         let mut right_buffer = vec![0.0f32; 1024];
+        let mut over_left: Vec<f32> = Vec::with_capacity(4096);
+        let mut over_right: Vec<f32> = Vec::with_capacity(4096);
 
         // MIDI clock timing: tracks time between ticks using Instant (acceptable overhead at 24ppq)
         let mut last_clock_instant = std::time::Instant::now();
@@ -187,7 +189,12 @@ impl AudioEngine {
                             ref_tone_phase = (ref_tone_phase + phase_inc) % 1.0;
                         }
                     } else {
-                        synthesizer.process_block(&mut left_buffer[..frames], &mut right_buffer[..frames]);
+                        synthesizer.process_block_oversampled(
+                            &mut left_buffer[..frames],
+                            &mut right_buffer[..frames],
+                            &mut over_left,
+                            &mut over_right,
+                        );
                     }
 
                     // 4. Apply limiting
