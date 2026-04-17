@@ -82,8 +82,9 @@ impl AudioEngine {
         let preset_names: std::sync::Arc<Vec<String>> =
             std::sync::Arc::new(Synthesizer::list_presets());
 
-        // Pre-allocated mono buffer
-        let mut mono_buffer = vec![0.0f32; 1024];
+        // Pre-allocated stereo buffers
+        let mut left_buffer = vec![0.0f32; 1024];
+        let mut right_buffer = vec![0.0f32; 1024];
 
         // MIDI clock timing: tracks time between ticks using Instant (acceptable overhead at 24ppq)
         let mut last_clock_instant = std::time::Instant::now();
@@ -166,44 +167,57 @@ impl AudioEngine {
 
                     // 3. Process audio
                     let frames = data.len() / channels;
-                    if mono_buffer.len() < frames {
-                        mono_buffer.resize(frames, 0.0);
+                    if left_buffer.len() < frames {
+                        left_buffer.resize(frames, 0.0);
+                        right_buffer.resize(frames, 0.0);
                     }
-                    for sample in mono_buffer.iter_mut().take(frames) {
-                        *sample = 0.0;
+                    for i in 0..frames {
+                        left_buffer[i] = 0.0;
+                        right_buffer[i] = 0.0;
                     }
 
                     let cur_params = lock_free_synth.get_params();
                     if cur_params.reference_tone {
                         let phase_inc = 440.0 / sample_rate as f32;
                         let vol = cur_params.master_volume;
-                        for sample in mono_buffer.iter_mut().take(frames) {
-                            *sample = (ref_tone_phase * 2.0 * std::f32::consts::PI).sin() * vol;
+                        for i in 0..frames {
+                            let s = (ref_tone_phase * 2.0 * std::f32::consts::PI).sin() * vol;
+                            left_buffer[i] = s;
+                            right_buffer[i] = s;
                             ref_tone_phase = (ref_tone_phase + phase_inc) % 1.0;
                         }
                     } else {
-                        synthesizer.process_block(&mut mono_buffer[..frames]);
+                        synthesizer.process_block(&mut left_buffer[..frames], &mut right_buffer[..frames]);
                     }
 
                     // 4. Apply limiting
-                    for sample in mono_buffer.iter_mut().take(frames) {
-                        *sample = sample.clamp(-1.0, 1.0);
-                        *sample = Self::soft_limiter(*sample);
+                    for i in 0..frames {
+                        left_buffer[i] = Self::soft_limiter(left_buffer[i].clamp(-1.0, 1.0));
+                        right_buffer[i] = Self::soft_limiter(right_buffer[i].clamp(-1.0, 1.0));
                     }
 
-                    // 5. Update VU meter peak with slow decay
-                    let block_peak = mono_buffer.iter().take(frames).fold(0.0f32, |a, &b| a.max(b.abs()));
+                    // 5. Update VU meter peak with slow decay (max of both channels)
+                    let block_peak = (0..frames).fold(0.0f32, |a, i| {
+                        a.max(left_buffer[i].abs()).max(right_buffer[i].abs())
+                    });
                     let stored = f32::from_bits(lock_free_synth.peak_level.load(std::sync::atomic::Ordering::Relaxed));
                     let decayed = (stored - 0.003).max(0.0);
                     let new_peak = block_peak.max(decayed);
                     lock_free_synth.peak_level.store(new_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
 
-                    // 6. Convert mono to multi-channel
-                    for (frame_idx, &sample) in mono_buffer.iter().take(frames).enumerate() {
-                        for channel in 0..channels {
-                            let output_idx = frame_idx * channels + channel;
-                            if output_idx < data.len() {
-                                data[output_idx] = T::from_sample(sample);
+                    // 6. Convert stereo to multi-channel output
+                    for frame_idx in 0..frames {
+                        let l = left_buffer[frame_idx];
+                        let r = right_buffer[frame_idx];
+                        for ch in 0..channels {
+                            let out_idx = frame_idx * channels + ch;
+                            if out_idx < data.len() {
+                                let s = match ch {
+                                    0 => l,
+                                    1 => r,
+                                    _ => (l + r) * 0.5,
+                                };
+                                data[out_idx] = T::from_sample(s);
                             }
                         }
                     }

@@ -230,6 +230,10 @@ pub struct Voice {
     pub filter_drift_value: f32,  // current smoothed multiplier (~1.0)
     pub filter_drift_target: f32, // target we're interpolating toward
     pub filter_drift_timer: f32,  // seconds until a new target is picked
+    // Stereo panning: assigned at note trigger, equal-power L/R gains precomputed.
+    pub pan: f32,
+    pub pan_left: f32,
+    pub pan_right: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -335,6 +339,8 @@ pub struct Synthesizer {
     pub master_noise_b0: f32,
     pub master_noise_b1: f32,
     pub master_noise_b2: f32,
+    // Stereo spread: 0.0 = mono, 1.0 = full alternating L/R spread across voices.
+    pub stereo_spread: f32,
 }
 
 impl Default for OscillatorParams {
@@ -490,6 +496,9 @@ impl Voice {
             // Stagger initial timers so voices re-pick targets at different times.
             filter_drift_timer: FILTER_DRIFT_MIN_PERIOD
                 + rand::random::<f32>() * (FILTER_DRIFT_MAX_PERIOD - FILTER_DRIFT_MIN_PERIOD),
+            pan: 0.0,
+            pan_left: std::f32::consts::FRAC_1_SQRT_2,
+            pan_right: std::f32::consts::FRAC_1_SQRT_2,
         }
     }
 
@@ -608,6 +617,7 @@ impl Synthesizer {
             master_noise_b0: 0.0,
             master_noise_b1: 0.0,
             master_noise_b2: 0.0,
+            stereo_spread: 0.0,
         }
     }
 
@@ -681,6 +691,13 @@ impl Synthesizer {
             // Voice stealing: find the best voice to replace
             let steal_index = self.find_voice_to_steal();
             self.voices[steal_index] = Voice::new(note, frequency, velocity_normalized);
+        }
+
+        // Assign pan based on voice index (alternating L/R for natural spread)
+        if let Some(idx) = self.voices.iter().position(|v| v.is_active && v.note == note) {
+            let sign = if idx % 2 == 0 { 1.0_f32 } else { -1.0_f32 };
+            let spread = self.stereo_spread;
+            Self::set_voice_pan(&mut self.voices[idx], sign * spread);
         }
     }
 
@@ -778,6 +795,10 @@ impl Synthesizer {
         } else {
             self.voices[0] = Voice::new(note, frequency, vel);
         }
+        // Mono mode: always centered
+        if let Some(v) = self.voices.first_mut() {
+            Self::set_voice_pan(v, 0.0);
+        }
     }
 
     /// Dispara todas las voces en modo unison con detune spread.
@@ -806,7 +827,9 @@ impl Synthesizer {
                 spread * (2.0 * i as f32 / (n_voices - 1) as f32 - 1.0)
             };
             let detuned_freq = frequency * Self::semitones_to_ratio(detune_cents / 100.0);
-            let v = Voice::new(note, detuned_freq, vel);
+            let mut v = Voice::new(note, detuned_freq, vel);
+            // Unison: always centered pan
+            Self::set_voice_pan(&mut v, 0.0);
             if i < self.voices.len() {
                 self.voices[i] = v;
             } else {
@@ -896,6 +919,13 @@ impl Synthesizer {
         OPTIMIZATION_TABLES.get_midi_frequency(note)
     }
 
+    /// Set equal-power panning for a voice. pan ∈ [-1.0, 1.0], -1=full left, +1=full right.
+    fn set_voice_pan(voice: &mut Voice, pan: f32) {
+        voice.pan = pan.clamp(-1.0, 1.0);
+        voice.pan_left = ((1.0 - voice.pan) / 2.0).sqrt();
+        voice.pan_right = ((1.0 + voice.pan) / 2.0).sqrt();
+    }
+
     fn apply_velocity_curve(velocity: u8, curve: u8) -> f32 {
         let v = velocity as f32 / 127.0;
         match curve {
@@ -935,7 +965,7 @@ impl Synthesizer {
         }
     }
 
-    pub fn process_block(&mut self, buffer: &mut [f32]) {
+    pub fn process_block(&mut self, left: &mut [f32], right: &mut [f32]) {
         let dt = 1.0 / self.sample_rate;
 
         // Copy synth parameters to avoid borrowing issues
@@ -1029,8 +1059,16 @@ impl Synthesizer {
             0.0
         };
 
-        for sample in buffer.iter_mut() {
-            *sample = 0.0;
+        debug_assert_eq!(left.len(), right.len());
+        let n = left.len();
+        for i in 0..n {
+            left[i] = 0.0;
+            right[i] = 0.0;
+        }
+
+        for si in 0..n {
+            let mut left_acc = 0.0f32;
+            let mut right_acc = 0.0f32;
 
             // Update arpeggiator
             self.update_arpeggiator(dt);
@@ -1280,41 +1318,48 @@ impl Synthesizer {
                 let amp_gain = envelope_value + vca_bleed;
                 mixed *= amp_gain * lfo_amplitude_mod * velocity_amplitude_mod * aftertouch_amplitude_mod;
 
-                *sample += mixed;
+                left_acc += mixed * voice.pan_left;
+                right_acc += mixed * voice.pan_right;
             }
 
             // Normalize voice sum: keeps chords at comparable loudness to single notes.
-            // Without this, 8 voices × ±2 amplitude = ±16 and tanh crushes all dynamics.
-            *sample *= voice_norm;
+            left_acc *= voice_norm;
+            right_acc *= voice_norm;
+
+            // M/S decode: compute mono mid and stereo side signals.
+            let stereo_s = right_acc - left_acc;
+            let mut mono_m = (left_acc + right_acc) * std::f32::consts::FRAC_1_SQRT_2;
 
             // Apply master volume with gentle compression; expression pedal scales on top
-            *sample *= master_volume * expression;
+            mono_m *= master_volume * expression;
 
             // Apply effects processing. Chorus sits before delay/reverb so the
             // delay taps and reverb tail inherit the ensemble thickness.
-            *sample = self.apply_chorus(*sample);
-            *sample = self.apply_delay(*sample);
-            *sample = self.apply_reverb(*sample);
+            mono_m = self.apply_chorus(mono_m);
+            mono_m = self.apply_delay(mono_m);
+            mono_m = self.apply_reverb(mono_m);
 
             // Analog circuit hiss — the faint background the player never notices
             // until it's missing. Added after the effects so the noise feels like
             // it's coming from the amplifier, not the delay line.
             let noise_floor = self.analog.noise_floor;
             if noise_floor > 0.0 {
-                *sample += self.master_noise_sample() * noise_floor;
+                mono_m += self.master_noise_sample() * noise_floor;
             }
 
             // Continuous saturation. The previous threshold clipper jumped
             // by ~0.18 at |x|=0.7 and buzzed on every loud peak.
-            *sample = sample.tanh();
+            mono_m = mono_m.tanh();
 
             // Master DC blocker: removes DC offset from self-oscillation or asymmetric saturation.
-            let dc_x = *sample;
-            *sample = dc_x - self.master_dc_x + MASTER_DC_COEFF * self.master_dc_y;
+            let dc_x = mono_m;
+            mono_m = dc_x - self.master_dc_x + MASTER_DC_COEFF * self.master_dc_y;
             self.master_dc_x = dc_x;
-            self.master_dc_y = *sample;
+            self.master_dc_y = mono_m;
 
-            *sample = (*sample).clamp(-1.0, 1.0);
+            // Reconstruct L/R from mono mid and stereo side.
+            left[si] = (mono_m - stereo_s * std::f32::consts::FRAC_1_SQRT_2).clamp(-1.0, 1.0);
+            right[si] = (mono_m + stereo_s * std::f32::consts::FRAC_1_SQRT_2).clamp(-1.0, 1.0);
         }
     }
 
@@ -3396,6 +3441,7 @@ impl Synthesizer {
             analog_filter_drift: self.analog.filter_drift_amount,
             analog_vca_bleed: self.analog.vca_bleed,
             analog_noise_floor: self.analog.noise_floor,
+            stereo_spread: self.stereo_spread,
             // reference_tone is GUI-only state, not part of the synthesizer engine
             reference_tone: false,
         }
@@ -3490,6 +3536,7 @@ impl Synthesizer {
         self.analog.filter_drift_amount = params.analog_filter_drift;
         self.analog.vca_bleed = params.analog_vca_bleed;
         self.analog.noise_floor = params.analog_noise_floor;
+        self.stereo_spread = params.stereo_spread;
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {
@@ -3654,16 +3701,16 @@ mod tests {
         synth.apply_params(&params);
 
         // Step 3: Process audio blocks (like process_block in callback)
-        let mut buffer = vec![0.0f32; 512];
+        let mut buf_l = vec![0.0f32; 512];
+        let mut buf_r = vec![0.0f32; 512];
         let mut max_peak = 0.0f32;
 
         // Process 20 blocks (about 213ms at 48kHz) to get past the attack phase
         for _ in 0..20 {
-            for s in buffer.iter_mut() {
-                *s = 0.0;
-            }
-            synth.process_block(&mut buffer);
-            let peak = buffer.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+            for s in buf_l.iter_mut() { *s = 0.0; }
+            for s in buf_r.iter_mut() { *s = 0.0; }
+            synth.process_block(&mut buf_l, &mut buf_r);
+            let peak = buf_l.iter().chain(buf_r.iter()).fold(0.0f32, |max, &s| max.max(s.abs()));
             max_peak = max_peak.max(peak);
         }
 
@@ -3683,13 +3730,14 @@ mod tests {
         synth_old.note_on(60, 100);
         // NO apply_params call - this is what the old code did
 
+        let mut buf_l_old = vec![0.0f32; 512];
+        let mut buf_r_old = vec![0.0f32; 512];
         let mut max_peak_old = 0.0f32;
         for _ in 0..20 {
-            for s in buffer.iter_mut() {
-                *s = 0.0;
-            }
-            synth_old.process_block(&mut buffer);
-            let peak = buffer.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+            for s in buf_l_old.iter_mut() { *s = 0.0; }
+            for s in buf_r_old.iter_mut() { *s = 0.0; }
+            synth_old.process_block(&mut buf_l_old, &mut buf_r_old);
+            let peak = buf_l_old.iter().chain(buf_r_old.iter()).fold(0.0f32, |max, &s| max.max(s.abs()));
             max_peak_old = max_peak_old.max(peak);
         }
 
@@ -3823,9 +3871,10 @@ mod tests {
         let mut synth = Synthesizer::new();
         synth.analog.noise_floor = 0.0;
         // Also disable VCA bleed (bleed*0 envelope doesn't emit because voice inactive).
-        let mut buffer = vec![0.0_f32; 512];
-        synth.process_block(&mut buffer);
-        let peak = buffer.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+        let mut buf_l = vec![0.0_f32; 512];
+        let mut buf_r = vec![0.0_f32; 512];
+        synth.process_block(&mut buf_l, &mut buf_r);
+        let peak = buf_l.iter().chain(buf_r.iter()).fold(0.0_f32, |m, &s| m.max(s.abs()));
         assert!(peak < 1e-6, "silence expected, got peak={}", peak);
     }
 
@@ -3834,9 +3883,11 @@ mod tests {
         // No voices but noise_floor > 0 should put hiss on the master bus.
         let mut synth = Synthesizer::new();
         synth.analog.noise_floor = 0.005;
-        let mut buffer = vec![0.0_f32; 2048];
-        synth.process_block(&mut buffer);
-        let rms = (buffer.iter().map(|s| s * s).sum::<f32>() / buffer.len() as f32).sqrt();
+        let mut buf_l = vec![0.0_f32; 2048];
+        let mut buf_r = vec![0.0_f32; 2048];
+        synth.process_block(&mut buf_l, &mut buf_r);
+        let all: Vec<f32> = buf_l.iter().chain(buf_r.iter()).copied().collect();
+        let rms = (all.iter().map(|s| s * s).sum::<f32>() / all.len() as f32).sqrt();
         assert!(rms > 1e-5, "noise floor should produce audible hiss, rms={}", rms);
     }
 
@@ -4266,16 +4317,19 @@ mod tests {
         let mut synth_no_bend = Synthesizer::new();
         synth_no_bend.note_on(60, 100);
         synth_no_bend.pitch_bend = 0.0;
-        let mut buf_no_bend = vec![0.0f32; 256];
-        synth_no_bend.process_block(&mut buf_no_bend);
+        let mut buf_no_bend_l = vec![0.0f32; 256];
+        let mut buf_no_bend_r = vec![0.0f32; 256];
+        synth_no_bend.process_block(&mut buf_no_bend_l, &mut buf_no_bend_r);
 
         let mut synth_bent = Synthesizer::new();
         synth_bent.note_on(60, 100);
         synth_bent.pitch_bend = 1.0; // full bend up
-        let mut buf_bent = vec![0.0f32; 256];
-        synth_bent.process_block(&mut buf_bent);
+        let mut buf_bent_l = vec![0.0f32; 256];
+        let mut buf_bent_r = vec![0.0f32; 256];
+        synth_bent.process_block(&mut buf_bent_l, &mut buf_bent_r);
 
-        let diff: f32 = buf_no_bend.iter().zip(&buf_bent).map(|(a, b)| (a - b).abs()).sum();
+        let diff: f32 = buf_no_bend_l.iter().zip(&buf_bent_l).map(|(a, b)| (a - b).abs()).sum::<f32>()
+            + buf_no_bend_r.iter().zip(&buf_bent_r).map(|(a, b)| (a - b).abs()).sum::<f32>();
         assert!(diff > 0.001, "pitch bend should alter audio output, diff={}", diff);
     }
 
@@ -4549,8 +4603,9 @@ mod tests {
         synth.note_on(60, 100);
         // Process enough samples to leave Attack and enter Decay/Sustain.
         // 1024 samples @ 44100 Hz ≈ 23 ms >> 1 ms attack.
-        let mut buf = vec![0.0f32; 1024];
-        synth.process_block(&mut buf);
+        let mut buf_l = vec![0.0f32; 1024];
+        let mut buf_r = vec![0.0f32; 1024];
+        synth.process_block(&mut buf_l, &mut buf_r);
 
         let state_before = synth.voices.iter()
             .find(|v| v.is_active)
@@ -4739,5 +4794,28 @@ false
         assert_eq!(synth.poly_mod_osc_b_to_filter_cutoff, 0.0);
         assert_eq!(synth.filter.keyboard_tracking, 0.0);
         assert_eq!(synth.modulation_matrix.velocity_to_cutoff, 0.0);
+    }
+
+    #[test]
+    fn test_set_voice_pan_center_equal_power() {
+        let pan = 0.0f32;
+        let left = ((1.0 - pan) / 2.0_f32).sqrt();
+        let right = ((1.0 + pan) / 2.0_f32).sqrt();
+        let sum_sq = left * left + right * right;
+        assert!(
+            (sum_sq - 1.0).abs() < 1e-5,
+            "equal power at center: L²+R²=1, got {}",
+            sum_sq
+        );
+        assert!((left - right).abs() < 1e-5, "center: L==R");
+    }
+
+    #[test]
+    fn test_set_voice_pan_full_right() {
+        let pan = 1.0f32;
+        let left = ((1.0 - pan) / 2.0_f32).sqrt();
+        let right = ((1.0 + pan) / 2.0_f32).sqrt();
+        assert!(left.abs() < 1e-5, "full right: L≈0, got {}", left);
+        assert!((right - 1.0).abs() < 1e-5, "full right: R=1, got {}", right);
     }
 }

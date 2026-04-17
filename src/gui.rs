@@ -475,6 +475,15 @@ impl SynthApp {
         })
         .on_hover_text("Channel pressure modulates loudness (press harder = louder)");
 
+        ui.add_space(2.0);
+        labeled(ui, "spread (st):", |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.params.stereo_spread, 0.0..=1.0)
+                    .fixed_decimals(2),
+            )
+        })
+        .on_hover_text("Stereo spread: distributes voices across L/R field (0 = mono, 1 = full spread)");
+
         ui.add_space(4.0);
         let btn_text = if self.params.reference_tone { "A-440 [ON]" } else { "A-440" };
         let btn = egui::Button::new(btn_text);

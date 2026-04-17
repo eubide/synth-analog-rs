@@ -189,6 +189,9 @@ pub struct SynthParameters {
     pub analog_vca_bleed: f32,           // 0.0..=0.01 leakage through closed VCA
     pub analog_noise_floor: f32,         // 0.0..=0.01 background hiss level
 
+    // Stereo spread: distributes voices across L/R field. 0.0 = mono, 1.0 = full spread.
+    pub stereo_spread: f32,
+
     // A-440 Hz calibration tone: bypasses all synthesis, outputs a pure sine at 440 Hz
     pub reference_tone: bool,
 }
@@ -316,6 +319,9 @@ impl Default for SynthParameters {
             analog_filter_drift: 0.3,
             analog_vca_bleed: 0.002,
             analog_noise_floor: 0.0008,
+
+            // Stereo spread — off by default (mono)
+            stereo_spread: 0.0,
 
             // A-440 reference tone — off by default
             reference_tone: false,
