@@ -24,16 +24,21 @@ pub struct SynthApp {
     new_preset_name: String,
     preset_category: String,
     preset_category_filter: String,
+    preset_search: String,
+    show_preset_editor: bool,
     params: SynthParameters,
     params_a: Option<SynthParameters>,
     params_b: Option<SynthParameters>,
     peak_level: f32,
 }
 
-/// Altura del sub-panel ADSR (title + 4 sliders + curva 32 px).
-/// Usada para dimensionar el separador manual y evitar que ui.separator()
-/// expanda el grupo con available_height().
-const ADSR_PANEL_HEIGHT: f32 = 106.0;
+/// Ancho fijo de las etiquetas (incluyen unidad entre paréntesis). El layout
+/// reserva exactamente `LABEL_WIDTH + WIDGET_WIDTH` por fila — etiqueta a la
+/// izquierda con unidad, slider+valor a la derecha en un slot de ancho fijo.
+/// Mover la unidad a la etiqueta libera al slider de tener que reservar ancho
+/// para sufijos largos como " 5000 Hz" o " 240 BPM" que rompían el layout.
+const LABEL_WIDTH: f32 = 95.0;
+const WIDGET_WIDTH: f32 = 105.0;
 
 /// Renderiza un grupo con título uniforme — elimina el boilerplate
 /// `ui.group { label(title); content }` repetido en cada sección.
@@ -42,6 +47,75 @@ fn section(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::
         ui.label(egui::RichText::new(title).size(11.0).strong());
         add_contents(ui);
     });
+}
+
+/// Fila etiquetada: etiqueta de ancho fijo right-aligned + widget en slot de
+/// ancho fijo. Sustituye al patrón
+/// `ui.horizontal { ui.label("x:"); ui.add(slider); }` para alinear sliders y
+/// valores numéricos. Cada fila ocupa exactamente `LABEL_WIDTH + WIDGET_WIDTH`.
+fn labeled<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    add_widget: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        let h = ui.spacing().interact_size.y;
+        ui.allocate_ui_with_layout(
+            egui::vec2(LABEL_WIDTH, h),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.label(label);
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(WIDGET_WIDTH, h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| add_widget(ui),
+        )
+        .inner
+    })
+    .inner
+}
+
+/// Variante con checkbox prefijo (usada en LFO MOD). El slot del checkbox se
+/// reserva siempre — si `target` es `None`, se deja en blanco para que las
+/// filas con y sin checkbox queden alineadas. Total ancho fila igual que
+/// `labeled` (`LABEL_WIDTH + WIDGET_WIDTH`).
+fn labeled_check<R>(
+    ui: &mut egui::Ui,
+    target: Option<&mut bool>,
+    label: &str,
+    add_widget: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        let h = ui.spacing().interact_size.y;
+        let check_w = 16.0;
+        if let Some(t) = target {
+            ui.allocate_ui_with_layout(
+                egui::vec2(check_w, h),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.checkbox(t, "");
+                },
+            );
+        } else {
+            ui.allocate_exact_size(egui::vec2(check_w, h), egui::Sense::hover());
+        }
+        ui.allocate_ui_with_layout(
+            egui::vec2(LABEL_WIDTH - check_w, h),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.label(label);
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(WIDGET_WIDTH, h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| add_widget(ui),
+        )
+        .inner
+    })
+    .inner
 }
 
 /// Panel ADSR compacto sin título. Unifica filter/amp envelope que son idénticos
@@ -56,22 +130,34 @@ fn draw_envelope_panel(
     ui.spacing_mut().item_spacing = egui::vec2(4.0, 1.0);
     ui.spacing_mut().interact_size.y = 14.0;
 
-    ui.horizontal(|ui| {
-        ui.label("A:");
-        ui.add(egui::Slider::new(attack, 0.001..=2.0).logarithmic(true).step_by(0.001).suffix(" s"));
-    });
-    ui.horizontal(|ui| {
-        ui.label("D:");
-        ui.add(egui::Slider::new(decay, 0.001..=3.0).logarithmic(true).step_by(0.001).suffix(" s"));
-    });
-    ui.horizontal(|ui| {
-        ui.label("S:");
-        ui.add(egui::Slider::new(sustain, 0.0..=1.0).step_by(0.01));
-    });
-    ui.horizontal(|ui| {
-        ui.label("R:");
-        ui.add(egui::Slider::new(release, 0.001..=5.0).logarithmic(true).step_by(0.001).suffix(" s"));
-    });
+    labeled(ui, "attack (s):", |ui| {
+        ui.add(
+            egui::Slider::new(attack, 0.001..=2.0)
+                .logarithmic(true)
+                .step_by(0.001),
+        )
+    })
+    .on_hover_text("Attack — time from note-on to peak level");
+    labeled(ui, "decay (s):", |ui| {
+        ui.add(
+            egui::Slider::new(decay, 0.001..=3.0)
+                .logarithmic(true)
+                .step_by(0.001),
+        )
+    })
+    .on_hover_text("Decay — time to fall from peak down to the sustain level");
+    labeled(ui, "sustain:", |ui| {
+        ui.add(egui::Slider::new(sustain, 0.0..=1.0).step_by(0.01))
+    })
+    .on_hover_text("Sustain — level held while the note is pressed");
+    labeled(ui, "release (s):", |ui| {
+        ui.add(
+            egui::Slider::new(release, 0.001..=5.0)
+                .logarithmic(true)
+                .step_by(0.001),
+        )
+    })
+    .on_hover_text("Release — time to fade to silence after note-off");
 }
 
 impl SynthApp {
@@ -98,6 +184,8 @@ impl SynthApp {
             new_preset_name: String::new(),
             preset_category: "Other".to_string(),
             preset_category_filter: "All".to_string(),
+            preset_search: String::new(),
+            show_preset_editor: false,
             params,
             params_a: None,
             params_b: None,
@@ -106,7 +194,7 @@ impl SynthApp {
     }
 
     fn draw_vintage_oscillator_panel(&mut self, ui: &mut egui::Ui, osc_num: u8) {
-        ui.spacing_mut().item_spacing = egui::vec2(1.0, 1.0);
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
         let (waveform, detune, pulse_width) = if osc_num == 1 {
             (
@@ -122,19 +210,13 @@ impl SynthApp {
             )
         };
 
-        ui.horizontal(|ui| {
-            ui.label("tune:");
-            ui.add_sized(
-                [70.0, 16.0],
-                egui::Slider::new(detune, -24.0..=24.0)
-                    .step_by(0.1)
-                    .suffix(" st"),
-            );
-        });
+        labeled(ui, "tune (st):", |ui| {
+            ui.add(egui::Slider::new(detune, -24.0..=24.0).step_by(0.1))
+        })
+        .on_hover_text("Pitch detune in semitones (-24 to +24)");
 
         let mut wave_type = Synthesizer::u8_to_wave_type_pub(*waveform);
-        ui.horizontal(|ui| {
-            ui.label("wave:");
+        labeled(ui, "wave:", |ui| {
             egui::ComboBox::from_id_salt(format!("wave_{}", osc_num))
                 .selected_text(match wave_type {
                     WaveType::Sawtooth => "Saw",
@@ -147,99 +229,89 @@ impl SynthApp {
                     ui.selectable_value(&mut wave_type, WaveType::Triangle, "Triangle");
                     ui.selectable_value(&mut wave_type, WaveType::Square, "Square");
                     ui.selectable_value(&mut wave_type, WaveType::Sine, "Sine");
-                });
-        });
+                })
+                .response
+        })
+        .on_hover_text("Oscillator waveform shape");
         *waveform = Synthesizer::wave_type_to_u8_pub(wave_type);
 
         if wave_type == WaveType::Square {
-            ui.horizontal(|ui| {
-                ui.label("pw:");
-                ui.add_sized(
-                    [70.0, 16.0],
-                    egui::Slider::new(pulse_width, 0.1..=0.9).step_by(0.01),
-                );
-            });
+            labeled(ui, "pw:", |ui| {
+                ui.add(egui::Slider::new(pulse_width, 0.1..=0.9).step_by(0.01))
+            })
+            .on_hover_text("Pulse width — 0.5 = symmetric square, off-center = nasal/PWM");
         }
 
         if osc_num == 2 {
-            ui.horizontal(|ui| {
-                ui.label("sync:");
-                ui.checkbox(&mut self.params.osc2_sync, "-> A");
-            });
+            labeled(ui, "sync:", |ui| ui.checkbox(&mut self.params.osc2_sync, "-> A"))
+                .on_hover_text(
+                    "Hard sync osc B to osc A — every osc A cycle resets osc B (classic lead sound)",
+                );
         }
     }
 
     fn draw_mixer_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
 
-        ui.horizontal(|ui| {
-            ui.label("oscillator A:");
-            ui.add(egui::Slider::new(&mut self.params.mixer_osc1_level, 0.0..=1.0).step_by(0.01));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("oscillator B:");
-            ui.add(egui::Slider::new(&mut self.params.mixer_osc2_level, 0.0..=1.0).step_by(0.01));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("noise:");
-            ui.add(egui::Slider::new(&mut self.params.noise_level, 0.0..=1.0).step_by(0.01));
-        });
+        labeled(ui, "osc A:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.mixer_osc1_level, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Oscillator A level into the filter");
+        labeled(ui, "osc B:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.mixer_osc2_level, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Oscillator B level into the filter");
+        labeled(ui, "noise:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.noise_level, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("White noise generator level (great for percussion or wind effects)");
     }
 
     fn draw_prophet_filter_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
 
-        ui.horizontal(|ui| {
-            ui.label("cutoff:");
+        labeled(ui, "cutoff (Hz):", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.filter_cutoff, 20.0..=20000.0)
                     .logarithmic(true)
-                    .step_by(1.0)
-                    .suffix(" Hz"),
-            );
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("resonance:");
-            ui.add(egui::Slider::new(&mut self.params.filter_resonance, 0.0..=4.0).step_by(0.05));
-            if self.params.filter_resonance >= 3.8 {
-                ui.colored_label(egui::Color32::from_rgb(255, 160, 60), "self-osc");
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("envelope:");
+                    .step_by(1.0),
+            )
+        })
+        .on_hover_text("Low-pass cutoff frequency — closes the filter to darken the sound");
+        labeled(ui, "resonance:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.filter_resonance, 0.0..=4.0).step_by(0.05))
+        })
+        .on_hover_text("Filter resonance / Q — emphasises cutoff frequency. >=3.8 self-oscillates");
+        if self.params.filter_resonance >= 3.8 {
+            ui.colored_label(egui::Color32::from_rgb(255, 160, 60), "self-osc");
+        }
+        labeled(ui, "envelope:", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.filter_envelope_amount, -1.0..=1.0)
                     .step_by(0.01),
-            );
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("keyboard:");
+            )
+        })
+        .on_hover_text("How much the FILTER ENV modulates cutoff (negative inverts the envelope)");
+        labeled(ui, "keyboard:", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.filter_keyboard_tracking, 0.0..=1.0)
                     .step_by(0.01),
-            );
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("velocity:");
-            ui.add(
-                egui::Slider::new(&mut self.params.velocity_to_cutoff, 0.0..=1.0).step_by(0.01),
-            );
-        });
+            )
+        })
+        .on_hover_text("Keyboard tracking — higher notes open the filter more");
+        labeled(ui, "velocity:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.velocity_to_cutoff, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("How much MIDI velocity opens the filter (harder = brighter)");
     }
 
-    fn draw_vintage_lfo_panel(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing = egui::vec2(3.0, 1.0);
+    /// LFO timing — waveform, rate, amount, sync, delay. Pareja con
+    /// `draw_lfo_mod_panel` (los destinos de modulación viven en otro panel).
+    fn draw_lfo_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
-        // Waveform selector (vintage analog style)
         let mut lfo_waveform = Synthesizer::u8_to_lfo_waveform_pub(self.params.lfo_waveform);
-        ui.horizontal(|ui| {
-            ui.label("waveform:");
+        labeled(ui, "wave:", |ui| {
             egui::ComboBox::from_id_salt("lfo_waveform")
                 .selected_text(match lfo_waveform {
                     LfoWaveform::Triangle => "Triangle",
@@ -262,115 +334,115 @@ impl SynthApp {
                         LfoWaveform::SampleAndHold,
                         "Sample & Hold",
                     );
-                });
-        });
+                })
+                .response
+        })
+        .on_hover_text("LFO waveform — Triangle/Square/Saw for periodic modulation, S&H for random steps");
         self.params.lfo_waveform = Synthesizer::lfo_waveform_to_u8_pub(lfo_waveform);
 
-        ui.horizontal(|ui| {
-            ui.label("rate:");
+        labeled(ui, "rate (Hz):", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.lfo_rate, 0.05..=30.0)
                     .logarithmic(true)
-                    .step_by(0.05)
-                    .suffix(" Hz"),
-            );
-        });
+                    .step_by(0.05),
+            )
+        })
+        .on_hover_text("LFO frequency (cycles per second)");
+        labeled(ui, "amount:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.lfo_amount, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Global LFO depth — multiplies all routing amounts in LFO MOD");
+        labeled(ui, "delay (s):", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.lfo_delay, 0.0..=5.0).step_by(0.01))
+        })
+        .on_hover_text("Time after note-on before the LFO fades in (delayed vibrato)");
+        ui.checkbox(&mut self.params.lfo_sync, "key sync (reset on note)")
+            .on_hover_text("Reset LFO phase on every note (vs free-running across notes)");
+    }
 
-        ui.horizontal(|ui| {
-            ui.label("amount:");
-            ui.add(egui::Slider::new(&mut self.params.lfo_amount, 0.0..=1.0).step_by(0.01));
-        });
+    /// LFO mod destinations — 5 rutas con toggle de target y amount. Cada fila
+    /// reserva slot de checkbox para que las rutas con y sin toggle queden
+    /// alineadas (filter res hereda el target de filter cutoff).
+    fn draw_lfo_mod_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
-        ui.checkbox(&mut self.params.lfo_sync, "keyboard sync (resets on note)");
-
-        ui.horizontal(|ui| {
-            ui.label("delay:");
-            ui.add(
-                egui::Slider::new(&mut self.params.lfo_delay, 0.0..=5.0)
-                    .step_by(0.01)
-                    .suffix(" s"),
-            );
-        });
-
-        ui.separator();
-        ui.label(egui::RichText::new("mod destinations").size(10.0).strong());
-
-        // Modulation routing con toggles de target
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.params.lfo_target_filter, "");
-                ui.label("filter cutoff:");
-                ui.add(
-                    egui::Slider::new(&mut self.params.lfo_to_cutoff, 0.0..=1.0).step_by(0.01),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("   filter res:");
-                ui.add(
-                    egui::Slider::new(&mut self.params.lfo_to_resonance, 0.0..=1.0).step_by(0.01),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.params.lfo_target_osc1_pitch, "");
-                ui.label("osc A pitch:");
+        labeled_check(
+            ui,
+            Some(&mut self.params.lfo_target_filter),
+            "cutoff:",
+            |ui| {
+                ui.add(egui::Slider::new(&mut self.params.lfo_to_cutoff, 0.0..=1.0).step_by(0.01))
+            },
+        )
+        .on_hover_text("LFO modulation depth on filter cutoff (wah-wah). Toggle enables routing");
+        labeled_check(ui, None, "res:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.lfo_to_resonance, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("LFO depth on filter resonance (uses the filter target above)");
+        labeled_check(
+            ui,
+            Some(&mut self.params.lfo_target_osc1_pitch),
+            "osc A pitch:",
+            |ui| {
                 ui.add(
                     egui::Slider::new(&mut self.params.lfo_to_osc1_pitch, 0.0..=1.0).step_by(0.01),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.params.lfo_target_osc2_pitch, "");
-                ui.label("osc B pitch:");
+                )
+            },
+        )
+        .on_hover_text("LFO depth on osc A pitch (vibrato). Toggle enables routing");
+        labeled_check(
+            ui,
+            Some(&mut self.params.lfo_target_osc2_pitch),
+            "osc B pitch:",
+            |ui| {
                 ui.add(
                     egui::Slider::new(&mut self.params.lfo_to_osc2_pitch, 0.0..=1.0).step_by(0.01),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.params.lfo_target_amplitude, "");
-                ui.label("amplitude:");
+                )
+            },
+        )
+        .on_hover_text("LFO depth on osc B pitch (vibrato). Toggle enables routing");
+        labeled_check(
+            ui,
+            Some(&mut self.params.lfo_target_amplitude),
+            "amplitude:",
+            |ui| {
                 ui.add(
                     egui::Slider::new(&mut self.params.lfo_to_amplitude, 0.0..=1.0).step_by(0.01),
-                );
-            });
-        });
+                )
+            },
+        )
+        .on_hover_text("LFO depth on amplitude (tremolo). Toggle enables routing");
     }
 
 
     fn draw_master_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
-        ui.horizontal(|ui| {
-            ui.label("volume:");
-            ui.add(egui::Slider::new(&mut self.params.master_volume, 0.0..=1.0).step_by(0.01));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("glide:");
-            ui.add(
-                egui::Slider::new(&mut self.params.glide_time, 0.0..=2.0)
-                    .step_by(0.01)
-                    .suffix(" s"),
-            );
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("bend range:");
-            let mut range_f32 = self.params.pitch_bend_range as f32;
-            ui.add(egui::Slider::new(&mut range_f32, 1.0..=24.0).step_by(1.0).suffix(" st"));
-            self.params.pitch_bend_range = range_f32 as u8;
-        });
+        labeled(ui, "volume:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.master_volume, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Master output level");
+        labeled(ui, "glide (s):", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.glide_time, 0.0..=2.0).step_by(0.01))
+        })
+        .on_hover_text("Portamento — pitch slide time between consecutive notes");
+        let mut range_f32 = self.params.pitch_bend_range as f32;
+        labeled(ui, "bend (st):", |ui| {
+            ui.add(egui::Slider::new(&mut range_f32, 1.0..=24.0).step_by(1.0))
+        })
+        .on_hover_text("Pitch bend wheel range in semitones");
+        self.params.pitch_bend_range = range_f32 as u8;
 
         ui.separator();
-        ui.label("velocity sensitivity");
+        ui.label(egui::RichText::new("velocity").size(10.0).strong());
 
-        ui.horizontal(|ui| {
-            ui.label("-> volume:");
+        labeled(ui, "-> vol:", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.velocity_to_amplitude, 0.0..=1.0).step_by(0.01),
-            );
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("vel curve:");
+            )
+        })
+        .on_hover_text("How much MIDI velocity affects note loudness");
+        labeled(ui, "curve:", |ui| {
             egui::ComboBox::from_id_salt("velocity_curve")
                 .selected_text(match self.params.velocity_curve {
                     1 => "Soft",
@@ -381,116 +453,157 @@ impl SynthApp {
                     ui.selectable_value(&mut self.params.velocity_curve, 0, "Linear");
                     ui.selectable_value(&mut self.params.velocity_curve, 1, "Soft");
                     ui.selectable_value(&mut self.params.velocity_curve, 2, "Hard");
-                });
-        });
+                })
+                .response
+        })
+        .on_hover_text("Velocity response curve — Soft = expressive, Hard = aggressive, Linear = neutral");
 
         ui.separator();
-        ui.label("aftertouch");
+        ui.label(egui::RichText::new("aftertouch").size(10.0).strong());
 
-        ui.horizontal(|ui| {
-            ui.label("-> cutoff:");
+        labeled(ui, "-> cutoff:", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.aftertouch_to_cutoff, 0.0..=1.0).step_by(0.01),
-            );
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("-> amp:");
+            )
+        })
+        .on_hover_text("Channel pressure modulates filter cutoff (press harder = brighter)");
+        labeled(ui, "-> amp:", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.aftertouch_to_amplitude, 0.0..=1.0)
                     .step_by(0.01),
-            );
-        });
+            )
+        })
+        .on_hover_text("Channel pressure modulates loudness (press harder = louder)");
     }
 
     fn draw_effects_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
-        ui.label("reverb");
-        ui.horizontal(|ui| {
-            ui.label("amount:");
-            ui.add(egui::Slider::new(&mut self.params.reverb_amount, 0.0..=1.0).step_by(0.01));
-        });
-        ui.horizontal(|ui| {
-            ui.label("size:");
-            ui.add(egui::Slider::new(&mut self.params.reverb_size, 0.0..=1.0).step_by(0.01));
-        });
+        ui.label(egui::RichText::new("chorus").size(10.0).strong());
+        labeled(ui, "mix:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.chorus_mix, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Chorus dry/wet mix (0 = bypass, 1 = full wet)");
+        labeled(ui, "rate (Hz):", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.chorus_rate, 0.1..=3.0).step_by(0.01))
+        })
+        .on_hover_text("Chorus modulation rate (slow = lush, fast = warbly)");
+        labeled(ui, "depth:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.chorus_depth, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Chorus modulation depth — how much the delay time wobbles");
 
-        ui.label("delay");
-        ui.horizontal(|ui| {
-            ui.label("time:");
+        ui.label(egui::RichText::new("reverb").size(10.0).strong());
+        labeled(ui, "amount:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.reverb_amount, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Reverb dry/wet mix");
+        labeled(ui, "size:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.reverb_size, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Reverb room size — small = booth, large = cathedral");
+
+        ui.label(egui::RichText::new("delay").size(10.0).strong());
+        labeled(ui, "time (s):", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.delay_time, 0.01..=2.0).step_by(0.01))
+        })
+        .on_hover_text("Delay time between echoes");
+        labeled(ui, "feedback:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.delay_feedback, 0.0..=0.95).step_by(0.01))
+        })
+        .on_hover_text("Echo feedback — higher = more repetitions (capped at 0.95 to avoid runaway)");
+        labeled(ui, "amount:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.delay_amount, 0.0..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Delay dry/wet mix");
+    }
+
+    /// Analog character panel — the subtle imperfections that break the
+    /// mathematical cleanliness of a digital synth: component tolerances, slow
+    /// filter temperature drift, VCA bleed, and circuit hiss.
+    fn draw_analog_panel(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+
+        labeled(ui, "tolerance:", |ui| {
             ui.add(
-                egui::Slider::new(&mut self.params.delay_time, 0.01..=2.0)
-                    .step_by(0.01)
-                    .suffix(" s"),
-            );
+                egui::Slider::new(&mut self.params.analog_component_tolerance, 0.0..=1.0)
+                    .step_by(0.01),
+            )
+            .on_hover_text("Per-voice filter tolerance (±2% cutoff / ±3% Q)")
         });
-        ui.horizontal(|ui| {
-            ui.label("feedback:");
-            ui.add(egui::Slider::new(&mut self.params.delay_feedback, 0.0..=0.95).step_by(0.01));
+        labeled(ui, "drift:", |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.params.analog_filter_drift, 0.0..=1.0).step_by(0.01),
+            )
+            .on_hover_text("Slow filter-temperature drift")
         });
-        ui.horizontal(|ui| {
-            ui.label("amount:");
-            ui.add(egui::Slider::new(&mut self.params.delay_amount, 0.0..=1.0).step_by(0.01));
+        labeled(ui, "vca bleed:", |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.params.analog_vca_bleed, 0.0..=0.01).step_by(0.0001),
+            )
+            .on_hover_text("Oscillator leakage through closed VCA")
+        });
+        labeled(ui, "hiss:", |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.params.analog_noise_floor, 0.0..=0.01).step_by(0.0001),
+            )
+            .on_hover_text("Constant background noise floor")
         });
     }
 
     fn draw_arpeggiator_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
-        ui.checkbox(&mut self.params.arp_enabled, "enable");
+        ui.checkbox(&mut self.params.arp_enabled, "enable")
+            .on_hover_text("Activate the arpeggiator — held notes play as a sequence");
 
-        ui.horizontal(|ui| {
-            ui.label("rate:");
-            ui.add(
-                egui::Slider::new(&mut self.params.arp_rate, 60.0..=240.0)
-                    .step_by(1.0)
-                    .suffix(" BPM"),
-            );
-        });
+        labeled(ui, "rate (BPM):", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.arp_rate, 60.0..=240.0).step_by(1.0))
+        })
+        .on_hover_text("Arpeggiator tempo (steps per minute)");
 
-        ui.horizontal(|ui| {
-            ui.label("pattern:");
-            let mut arp_pattern = Synthesizer::u8_to_arp_pattern_pub(self.params.arp_pattern);
+        let mut arp_pattern = Synthesizer::u8_to_arp_pattern_pub(self.params.arp_pattern);
+        labeled(ui, "pattern:", |ui| {
             let pattern_text = match arp_pattern {
                 ArpPattern::Up => "Up",
                 ArpPattern::Down => "Down",
                 ArpPattern::UpDown => "Up-Down",
                 ArpPattern::Random => "Random",
             };
-
-            egui::ComboBox::from_label("")
+            egui::ComboBox::from_id_salt("arp_pattern")
                 .selected_text(pattern_text)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut arp_pattern, ArpPattern::Up, "Up");
                     ui.selectable_value(&mut arp_pattern, ArpPattern::Down, "Down");
                     ui.selectable_value(&mut arp_pattern, ArpPattern::UpDown, "Up-Down");
                     ui.selectable_value(&mut arp_pattern, ArpPattern::Random, "Random");
-                });
-            self.params.arp_pattern = Synthesizer::arp_pattern_to_u8_pub(arp_pattern);
-        });
+                })
+                .response
+        })
+        .on_hover_text("Note order: Up = ascending, Down = descending, Up-Down = bounce, Random = shuffle");
+        self.params.arp_pattern = Synthesizer::arp_pattern_to_u8_pub(arp_pattern);
 
-        ui.horizontal(|ui| {
-            ui.label("octaves:");
-            let mut octaves_f32 = self.params.arp_octaves as f32;
-            ui.add(egui::Slider::new(&mut octaves_f32, 1.0..=4.0).step_by(1.0));
-            self.params.arp_octaves = octaves_f32 as u8;
-        });
+        let mut octaves_f32 = self.params.arp_octaves as f32;
+        labeled(ui, "octaves:", |ui| {
+            ui.add(egui::Slider::new(&mut octaves_f32, 1.0..=4.0).step_by(1.0))
+        })
+        .on_hover_text("Octave range — 1 = within the held chord, 4 = up to 4 octaves above");
+        self.params.arp_octaves = octaves_f32 as u8;
 
-        ui.horizontal(|ui| {
-            ui.label("gate:");
-            ui.add(egui::Slider::new(&mut self.params.arp_gate_length, 0.1..=1.0).step_by(0.01));
-        });
+        labeled(ui, "gate:", |ui| {
+            ui.add(egui::Slider::new(&mut self.params.arp_gate_length, 0.1..=1.0).step_by(0.01))
+        })
+        .on_hover_text("Note duration as a fraction of one step (1.0 = legato, 0.1 = staccato)");
 
         ui.separator();
-        ui.checkbox(&mut self.params.arp_sync_to_midi, "sync to MIDI clock");
+        ui.checkbox(&mut self.params.arp_sync_to_midi, "sync to MIDI clock")
+            .on_hover_text("Lock arpeggiator rate to incoming MIDI clock instead of internal BPM");
     }
 
     fn draw_voice_mode_panel(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
 
-        ui.horizontal(|ui| {
-            ui.label("mode:");
+        labeled(ui, "mode:", |ui| {
             egui::ComboBox::from_id_salt("voice_mode")
                 .selected_text(match self.params.voice_mode {
                     1 => "Mono",
@@ -503,13 +616,14 @@ impl SynthApp {
                     ui.selectable_value(&mut self.params.voice_mode, 1, "Mono");
                     ui.selectable_value(&mut self.params.voice_mode, 2, "Legato");
                     ui.selectable_value(&mut self.params.voice_mode, 3, "Unison");
-                });
-        });
+                })
+                .response
+        })
+        .on_hover_text("Poly: chords / Mono: 1 voice retrigs / Legato: 1 voice slides / Unison: all voices stacked on one note");
 
         // Note priority — solo relevante en Mono/Legato
         if self.params.voice_mode == 1 || self.params.voice_mode == 2 {
-            ui.horizontal(|ui| {
-                ui.label("priority:");
+            labeled(ui, "priority:", |ui| {
                 egui::ComboBox::from_id_salt("note_priority")
                     .selected_text(match self.params.note_priority {
                         1 => "Low",
@@ -520,179 +634,126 @@ impl SynthApp {
                         ui.selectable_value(&mut self.params.note_priority, 0, "Last");
                         ui.selectable_value(&mut self.params.note_priority, 1, "Low");
                         ui.selectable_value(&mut self.params.note_priority, 2, "High");
-                    });
-            });
+                    })
+                    .response
+            })
+            .on_hover_text("Which note wins when several are held — Last/Low/High pitch");
         }
 
         // Unison spread — solo relevante en Unison
         if self.params.voice_mode == 3 {
-            ui.horizontal(|ui| {
-                ui.label("spread:");
-                ui.add(
-                    egui::Slider::new(&mut self.params.unison_spread, 0.0..=50.0)
-                        .step_by(0.5)
-                        .suffix(" c"),
-                );
-            });
+            labeled(ui, "spread (c):", |ui| {
+                ui.add(egui::Slider::new(&mut self.params.unison_spread, 0.0..=50.0).step_by(0.5))
+            })
+            .on_hover_text("Detune between unison voices in cents (100 c = 1 semitone)");
         }
 
-        ui.horizontal(|ui| {
-            ui.label("voices:");
-            let mut max_v = self.params.max_voices as f32;
-            ui.add(egui::Slider::new(&mut max_v, 1.0..=8.0).step_by(1.0));
-            self.params.max_voices = max_v as u8;
-        });
+        let mut max_v = self.params.max_voices as f32;
+        labeled(ui, "voices:", |ui| {
+            ui.add(egui::Slider::new(&mut max_v, 1.0..=8.0).step_by(1.0))
+        })
+        .on_hover_text("Maximum simultaneous voices (1-8). Lower = older notes get stolen sooner");
+        self.params.max_voices = max_v as u8;
     }
 
+    /// All category names used by built-in and user presets. Order defines
+    /// how groups are rendered in the browser and listed in the save combo.
+    const PRESET_CATEGORIES: &'static [&'static str] =
+        &["Bass", "Lead", "Pad", "Strings", "Brass", "FX", "Sequence", "Other"];
+
     fn draw_preset_panel(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
 
-        ui.label(egui::RichText::new("A/B comparison").size(10.0).strong());
+        // Header: current preset status — always visible at the top.
         ui.horizontal(|ui| {
-            if ui.button("-> A").on_hover_text("Store current patch to slot A").clicked() {
-                self.params_a = Some(self.params);
-            }
-            if ui.add_enabled(self.params_a.is_some(), egui::Button::new("A"))
-                .on_hover_text("Load slot A")
-                .clicked()
-            {
-                self.params = self.params_a.unwrap();
-            }
-            ui.separator();
-            if ui.button("-> B").on_hover_text("Store current patch to slot B").clicked() {
-                self.params_b = Some(self.params);
-            }
-            if ui.add_enabled(self.params_b.is_some(), egui::Button::new("B"))
-                .on_hover_text("Load slot B")
-                .clicked()
-            {
-                self.params = self.params_b.unwrap();
-            }
-        });
-        ui.separator();
-
-        if ui.button("Random patch").clicked() {
-            self.params = Self::random_params();
-            self.current_preset_name.clear();
-        }
-        ui.separator();
-
-        // Show current preset status
-        ui.horizontal(|ui| {
-            ui.label("current:");
+            ui.label(egui::RichText::new("current:").size(11.0).strong());
             if self.current_preset_name.is_empty() {
-                ui.colored_label(egui::Color32::GRAY, "no preset loaded");
+                ui.colored_label(egui::Color32::GRAY, "(no preset loaded)");
             } else {
-                ui.colored_label(egui::Color32::GREEN, &self.current_preset_name);
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 220, 100),
+                    &self.current_preset_name,
+                );
+            }
+        });
+        ui.separator();
+
+        // ── Primary action: browse & select ───────────────────────────────
+        ui.horizontal(|ui| {
+            ui.label("search:");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.preset_search)
+                    .hint_text("type to filter...")
+                    .desired_width(140.0),
+            );
+            if resp.changed() {
+                // Kept for future: debounce / live preview hooks.
+            }
+            if ui.small_button("x").on_hover_text("Clear search").clicked() {
+                self.preset_search.clear();
             }
         });
 
-        ui.separator();
-
-        // Create new preset
-        // Category for new preset
         ui.horizontal(|ui| {
             ui.label("category:");
-            egui::ComboBox::from_id_salt("preset_cat_save")
-                .selected_text(&self.preset_category)
+            egui::ComboBox::from_id_salt("preset_cat_filter")
+                .selected_text(&self.preset_category_filter)
                 .show_ui(ui, |ui| {
-                    for cat in &["Bass", "Lead", "Pad", "Brass", "FX", "Other"] {
-                        ui.selectable_value(&mut self.preset_category, cat.to_string(), *cat);
+                    ui.selectable_value(&mut self.preset_category_filter, "All".to_string(), "All");
+                    for cat in Self::PRESET_CATEGORIES {
+                        ui.selectable_value(
+                            &mut self.preset_category_filter,
+                            cat.to_string(),
+                            *cat,
+                        );
                     }
                 });
         });
 
-        ui.horizontal(|ui| {
-            ui.label("new name:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.new_preset_name)
-                    .hint_text("Enter name...")
-                    .desired_width(80.0),
-            );
-            let save_enabled = !self.new_preset_name.is_empty();
-            if ui.add_enabled(save_enabled, egui::Button::new("Save")).clicked() {
-                let mut temp_synth = Synthesizer::new();
-                temp_synth.apply_params(&self.params);
-                if let Err(e) = temp_synth.save_preset_with_category(&self.new_preset_name, &self.preset_category) {
-                    log::error!("Error saving preset: {}", e);
-                } else {
-                    log::info!("Preset '{}' [{}] saved!", self.new_preset_name, self.preset_category);
-                    self.current_preset_name = self.new_preset_name.clone();
-                    self.new_preset_name.clear();
-                }
-            }
-        });
-
-        ui.horizontal(|ui| {
-            if ui.button("save default").clicked() {
-                let mut temp_synth = Synthesizer::new();
-                temp_synth.apply_params(&self.params);
-                if let Err(e) = temp_synth.save_preset("default") {
-                    log::error!("Error saving default: {}", e);
-                } else {
-                    log::info!("Default preset saved!");
-                    self.current_preset_name = "default".to_string();
-                }
-            }
-
-            if ui.button("load default").clicked() {
-                let mut temp_synth = Synthesizer::new();
-                if let Err(e) = temp_synth.load_preset("default") {
-                    log::error!("Error loading default: {}", e);
-                } else {
-                    log::info!("Default preset loaded!");
-                    self.params = temp_synth.to_synth_params();
-                    self.current_preset_name = "default".to_string();
-                }
-            }
-        });
-
-        if ui.button("create classic presets").clicked() {
-            let mut temp_synth = Synthesizer::new();
-            if let Err(e) = temp_synth.create_all_classic_presets() {
-                log::error!("Error creating classic presets: {}", e);
-            } else {
-                log::info!("All classic presets created successfully!");
-            }
-        }
-
         ui.separator();
 
-        // Show all presets in a scrollable area
-        let presets_with_cats = Synthesizer::list_presets_with_categories();
-        if !presets_with_cats.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label("filter:");
-                egui::ComboBox::from_id_salt("preset_cat_filter")
-                    .selected_text(&self.preset_category_filter)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.preset_category_filter, "All".to_string(), "All");
-                        for cat in &["Bass", "Lead", "Pad", "Brass", "FX", "Other"] {
-                            ui.selectable_value(
-                                &mut self.preset_category_filter,
-                                cat.to_string(),
-                                *cat,
-                            );
-                        }
-                    });
-            });
+        // Group presets by category after applying search + category filters.
+        let all_presets = Synthesizer::list_presets_with_categories();
+        let search_lower = self.preset_search.to_lowercase();
+        let filtered: Vec<(String, String)> = all_presets
+            .into_iter()
+            .filter(|(name, cat)| {
+                let cat_ok = self.preset_category_filter == "All"
+                    || cat == &self.preset_category_filter;
+                let name_ok = search_lower.is_empty()
+                    || name.to_lowercase().contains(&search_lower);
+                cat_ok && name_ok
+            })
+            .collect();
 
+        if filtered.is_empty() {
+            ui.label(
+                egui::RichText::new("no presets match")
+                    .color(egui::Color32::GRAY)
+                    .italics(),
+            );
+        } else {
             egui::ScrollArea::vertical()
-                .max_height(120.0)
+                .max_height(260.0)
                 .show(ui, |ui| {
-                    for (preset, category) in presets_with_cats.iter() {
-                        if self.preset_category_filter != "All"
-                            && category != &self.preset_category_filter
-                        {
-                            continue;
+                    let mut last_category: Option<&str> = None;
+                    for (preset, category) in &filtered {
+                        // Category header (only when category changes).
+                        if last_category != Some(category.as_str()) {
+                            if last_category.is_some() {
+                                ui.add_space(4.0);
+                            }
+                            ui.label(
+                                egui::RichText::new(category.to_uppercase())
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(180, 180, 80))
+                                    .strong(),
+                            );
+                            last_category = Some(category.as_str());
                         }
+
                         let is_current = preset == &self.current_preset_name;
-                        let label = if is_current {
-                            format!("> {} [{}]", preset, category)
-                        } else {
-                            format!("{} [{}]", preset, category)
-                        };
-                        let button = egui::Button::new(label);
+                        let button = egui::Button::new(preset).wrap_mode(egui::TextWrapMode::Truncate);
                         let button = if is_current {
                             button.fill(egui::Color32::from_rgb(100, 150, 100))
                         } else {
@@ -709,9 +770,128 @@ impl SynthApp {
                         }
                     }
                 });
-        } else {
-            ui.label("no saved presets yet");
         }
+
+        ui.separator();
+
+        // ── Secondary: create / edit (collapsed by default) ───────────────
+        egui::CollapsingHeader::new("Create / Edit")
+            .id_salt("preset_editor_section")
+            .default_open(self.show_preset_editor)
+            .show(ui, |ui| {
+                // Save current patch as a new preset.
+                ui.horizontal(|ui| {
+                    ui.label("category:");
+                    egui::ComboBox::from_id_salt("preset_cat_save")
+                        .selected_text(&self.preset_category)
+                        .show_ui(ui, |ui| {
+                            for cat in Self::PRESET_CATEGORIES {
+                                ui.selectable_value(
+                                    &mut self.preset_category,
+                                    cat.to_string(),
+                                    *cat,
+                                );
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("name:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_preset_name)
+                            .hint_text("preset name...")
+                            .desired_width(130.0),
+                    );
+                    let save_enabled = !self.new_preset_name.is_empty();
+                    if ui.add_enabled(save_enabled, egui::Button::new("Save")).clicked() {
+                        let mut temp_synth = Synthesizer::new();
+                        temp_synth.apply_params(&self.params);
+                        if let Err(e) = temp_synth.save_preset_with_category(
+                            &self.new_preset_name,
+                            &self.preset_category,
+                        ) {
+                            log::error!("Error saving preset: {}", e);
+                        } else {
+                            log::info!(
+                                "Preset '{}' [{}] saved!",
+                                self.new_preset_name,
+                                self.preset_category
+                            );
+                            self.current_preset_name = self.new_preset_name.clone();
+                            self.new_preset_name.clear();
+                        }
+                    }
+                });
+
+                ui.separator();
+
+                // A/B comparison.
+                ui.label(egui::RichText::new("A/B comparison").size(10.0).strong());
+                ui.horizontal(|ui| {
+                    if ui.button("-> A").on_hover_text("Store current patch to slot A").clicked() {
+                        self.params_a = Some(self.params);
+                    }
+                    if ui
+                        .add_enabled(self.params_a.is_some(), egui::Button::new("A"))
+                        .on_hover_text("Load slot A")
+                        .clicked()
+                    {
+                        self.params = self.params_a.unwrap();
+                    }
+                    ui.separator();
+                    if ui.button("-> B").on_hover_text("Store current patch to slot B").clicked() {
+                        self.params_b = Some(self.params);
+                    }
+                    if ui
+                        .add_enabled(self.params_b.is_some(), egui::Button::new("B"))
+                        .on_hover_text("Load slot B")
+                        .clicked()
+                    {
+                        self.params = self.params_b.unwrap();
+                    }
+                });
+
+                ui.separator();
+
+                // Utility actions.
+                if ui.button("Random patch").clicked() {
+                    self.params = Self::random_params();
+                    self.current_preset_name.clear();
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("save default").clicked() {
+                        let mut temp_synth = Synthesizer::new();
+                        temp_synth.apply_params(&self.params);
+                        if let Err(e) = temp_synth.save_preset("default") {
+                            log::error!("Error saving default: {}", e);
+                        } else {
+                            log::info!("Default preset saved!");
+                            self.current_preset_name = "default".to_string();
+                        }
+                    }
+                    if ui.button("load default").clicked() {
+                        let mut temp_synth = Synthesizer::new();
+                        if let Err(e) = temp_synth.load_preset("default") {
+                            log::error!("Error loading default: {}", e);
+                        } else {
+                            log::info!("Default preset loaded!");
+                            self.params = temp_synth.to_synth_params();
+                            self.current_preset_name = "default".to_string();
+                        }
+                    }
+                });
+                if ui
+                    .button("create classic presets")
+                    .on_hover_text("Force-regenerate the 32 built-in presets, overwriting existing files")
+                    .clicked()
+                {
+                    let mut temp_synth = Synthesizer::new();
+                    if let Err(e) = temp_synth.force_create_all_classic_presets() {
+                        log::error!("Error creating classic presets: {}", e);
+                    } else {
+                        log::info!("All classic presets created successfully!");
+                    }
+                }
+            });
     }
 
     /// Mini ADSR curve — 22px alto, actualiza en tiempo real con los sliders.
@@ -755,27 +935,27 @@ impl SynthApp {
 
     /// Poly Mod section — 3 rutas de modulación clásicas del Prophet-5.
     fn draw_poly_mod_panel(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
         ui.label(
             egui::RichText::new("Filter Env ->")
                 .size(10.0)
                 .color(egui::Color32::GRAY),
         );
-        ui.horizontal(|ui| {
-            ui.label("freq A:");
+        labeled(ui, "freq A:", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.poly_mod_filter_env_to_osc_a_freq, -1.0..=1.0)
                     .step_by(0.01),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("pw A:");
+            )
+        })
+        .on_hover_text("FILTER ENV modulates osc A pitch (negative = inverted envelope)");
+        labeled(ui, "pw A:", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.poly_mod_filter_env_to_osc_a_pw, -1.0..=1.0)
                     .step_by(0.01),
-            );
-        });
+            )
+        })
+        .on_hover_text("FILTER ENV modulates osc A pulse width (PWM via envelope)");
 
         ui.separator();
 
@@ -784,30 +964,30 @@ impl SynthApp {
                 .size(10.0)
                 .color(egui::Color32::GRAY),
         );
-        ui.horizontal(|ui| {
-            ui.label("freq A:");
+        labeled(ui, "freq A:", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.poly_mod_osc_b_to_osc_a_freq, -1.0..=1.0)
                     .step_by(0.01),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("pw A:");
+            )
+        })
+        .on_hover_text("Cross-modulation: osc B modulates osc A pitch (audio-rate FM, classic Prophet sound)");
+        labeled(ui, "pw A:", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.poly_mod_osc_b_to_osc_a_pw, -1.0..=1.0)
                     .step_by(0.01),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("cutoff:");
+            )
+        })
+        .on_hover_text("Osc B modulates osc A pulse width at audio rate");
+        labeled(ui, "cutoff:", |ui| {
             ui.add(
                 egui::Slider::new(
                     &mut self.params.poly_mod_osc_b_to_filter_cutoff,
                     -1.0..=1.0,
                 )
                 .step_by(0.01),
-            );
-        });
+            )
+        })
+        .on_hover_text("Osc B modulates filter cutoff at audio rate (creates harmonics / metallic timbres)");
     }
 
     fn draw_keyboard_legend(&mut self, ui: &mut egui::Ui) {
@@ -1024,6 +1204,24 @@ impl eframe::App for SynthApp {
                     .strong(),
             );
 
+            // Current preset name — clickable to open the preset manager.
+            let (preset_text, preset_color) = if self.current_preset_name.is_empty() {
+                ("no preset".to_string(), egui::Color32::from_gray(140))
+            } else {
+                (self.current_preset_name.clone(), egui::Color32::from_rgb(100, 220, 100))
+            };
+            if ui
+                .add(egui::Label::new(
+                    egui::RichText::new(format!("> {}", preset_text))
+                        .size(13.0)
+                        .color(preset_color),
+                ).sense(egui::Sense::click()))
+                .on_hover_text("Click to open the preset manager")
+                .clicked()
+            {
+                self.show_presets_window = !self.show_presets_window;
+            }
+
             // VU meter bar
             let peak = self.peak_level;
             let clipping = peak > 0.8;
@@ -1057,21 +1255,35 @@ impl eframe::App for SynthApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if self._midi_handler.is_some() {
-                    if ui.small_button("MIDI").clicked() {
+                    if ui
+                        .small_button("MIDI")
+                        .on_hover_text("Toggle MIDI message monitor window")
+                        .clicked()
+                    {
                         self.show_midi_monitor = !self.show_midi_monitor;
                     }
                 } else {
-                    let _ = ui.small_button("NO MIDI");
+                    let _ = ui
+                        .small_button("NO MIDI")
+                        .on_hover_text("No MIDI device detected at startup");
                 }
 
                 if self.learn_state.is_some() {
                     let btn_text = if self.show_midi_learn { "MIDI Learn *" } else { "MIDI Learn" };
-                    if ui.small_button(btn_text).clicked() {
+                    if ui
+                        .small_button(btn_text)
+                        .on_hover_text("Toggle MIDI Learn window — assign CCs to params")
+                        .clicked()
+                    {
                         self.show_midi_learn = !self.show_midi_learn;
                     }
                 }
 
-                if ui.small_button("Presets").clicked() {
+                if ui
+                    .small_button("Presets")
+                    .on_hover_text("Open the preset manager window")
+                    .clicked()
+                {
                     self.show_presets_window = !self.show_presets_window;
                 }
 
@@ -1089,18 +1301,23 @@ impl eframe::App for SynthApp {
 
         // Ventana de tamaño fijo — no se necesita ScrollArea
         {
-            // Cadena de señal Prophet-5: [OSC A+B] | [MIXER+FILTER+POLY MOD] | [ENVS+LFO] | [MASTER+ARP+EFFECTS]
-            // Anchos explícitos (no ui.columns que divide por igual) — layout fijo sin expansión
+            // Layout 5 cols × 220 px todas iguales.
+            // slider_width compacto (55 px vs default 100) para que el track
+            // del slider + valor numérico quepan en `WIDGET_WIDTH=105` sin que
+            // el valor se corte por la derecha.
+            ui.spacing_mut().slider_width = 55.0;
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
 
-                // ── COL 1: FUENTES DE SONIDO (175 px) ──────────────────
+                // ── COL 1: FUENTES (220 px) ─────────────────────────────
                 ui.vertical(|ui| {
-                    ui.set_min_width(175.0);
-                    ui.set_max_width(175.0);
+                    ui.set_min_width(220.0);
+                    ui.set_max_width(220.0);
                     section(ui, "OSCILLATOR A", |ui| self.draw_vintage_oscillator_panel(ui, 1));
                     ui.add_space(4.0);
                     section(ui, "OSCILLATOR B", |ui| self.draw_vintage_oscillator_panel(ui, 2));
+                    ui.add_space(4.0);
+                    section(ui, "ANALOG", |ui| self.draw_analog_panel(ui));
                 });
 
                 // ── COL 2: CADENA DE SEÑAL (220 px) ────────────────────
@@ -1122,67 +1339,63 @@ impl eframe::App for SynthApp {
                     section(ui, "POLY MOD", |ui| self.draw_poly_mod_panel(ui));
                 });
 
-                // ── COL 3: TIEMPO Y MODULACIÓN (360 px) ────────────────
+                // ── COL 3: ENV/LFO/VOICE (220 px) ───────────────────────
                 ui.vertical(|ui| {
-                    ui.set_min_width(360.0);
-                    ui.set_max_width(360.0);
-                    ui.group(|ui| {
-                        // Dos ADSR lado a lado con anchos explícitos
-                        ui.horizontal_top(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.vertical(|ui| {
-                                ui.set_min_width(165.0);
-                                ui.set_max_width(165.0);
-                                ui.label(egui::RichText::new("FILTER ENV").size(11.0).strong());
-                                draw_envelope_panel(ui, &mut self.params.filter_attack, &mut self.params.filter_decay, &mut self.params.filter_sustain, &mut self.params.filter_release);
-                                self.draw_adsr_curve(
-                                    ui,
-                                    self.params.filter_attack,
-                                    self.params.filter_decay,
-                                    self.params.filter_sustain,
-                                    self.params.filter_release,
-                                );
-                            });
-                            {
-                                // Separator vertical con altura fija — ui.separator() usa
-                                // available_height() y expande el grupo hasta el fondo
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(1.0, ADSR_PANEL_HEIGHT),
-                                    egui::Sense::empty(),
-                                );
-                                ui.painter().line_segment(
-                                    [rect.center_top(), rect.center_bottom()],
-                                    ui.style().visuals.widgets.noninteractive.bg_stroke,
-                                );
-                            }
-                            ui.vertical(|ui| {
-                                ui.set_min_width(165.0);
-                                ui.set_max_width(165.0);
-                                ui.label(egui::RichText::new("AMP ENV").size(11.0).strong());
-                                draw_envelope_panel(ui, &mut self.params.amp_attack, &mut self.params.amp_decay, &mut self.params.amp_sustain, &mut self.params.amp_release);
-                                self.draw_adsr_curve(
-                                    ui,
-                                    self.params.amp_attack,
-                                    self.params.amp_decay,
-                                    self.params.amp_sustain,
-                                    self.params.amp_release,
-                                );
-                            });
-                        });
+                    ui.set_min_width(220.0);
+                    ui.set_max_width(220.0);
+                    section(ui, "FILTER ENV", |ui| {
+                        draw_envelope_panel(
+                            ui,
+                            &mut self.params.filter_attack,
+                            &mut self.params.filter_decay,
+                            &mut self.params.filter_sustain,
+                            &mut self.params.filter_release,
+                        );
+                        self.draw_adsr_curve(
+                            ui,
+                            self.params.filter_attack,
+                            self.params.filter_decay,
+                            self.params.filter_sustain,
+                            self.params.filter_release,
+                        );
                     });
                     ui.add_space(4.0);
-                    section(ui, "LFO", |ui| self.draw_vintage_lfo_panel(ui));
+                    section(ui, "LFO", |ui| self.draw_lfo_panel(ui));
                     ui.add_space(4.0);
                     section(ui, "VOICE MODE", |ui| self.draw_voice_mode_panel(ui));
                 });
 
-                // ── COL 4: PERFORMANCE (190 px) ─────────────────────────
+                // ── COL 4: ENV/LFO MOD/ARP (220 px) ─────────────────────
                 ui.vertical(|ui| {
-                    ui.set_min_width(190.0);
-                    ui.set_max_width(190.0);
-                    section(ui, "MASTER", |ui| self.draw_master_panel(ui));
+                    ui.set_min_width(220.0);
+                    ui.set_max_width(220.0);
+                    section(ui, "AMP ENV", |ui| {
+                        draw_envelope_panel(
+                            ui,
+                            &mut self.params.amp_attack,
+                            &mut self.params.amp_decay,
+                            &mut self.params.amp_sustain,
+                            &mut self.params.amp_release,
+                        );
+                        self.draw_adsr_curve(
+                            ui,
+                            self.params.amp_attack,
+                            self.params.amp_decay,
+                            self.params.amp_sustain,
+                            self.params.amp_release,
+                        );
+                    });
+                    ui.add_space(4.0);
+                    section(ui, "LFO MOD", |ui| self.draw_lfo_mod_panel(ui));
                     ui.add_space(4.0);
                     section(ui, "ARP", |ui| self.draw_arpeggiator_panel(ui));
+                });
+
+                // ── COL 5: SALIDA (220 px) ──────────────────────────────
+                ui.vertical(|ui| {
+                    ui.set_min_width(220.0);
+                    ui.set_max_width(220.0);
+                    section(ui, "MASTER", |ui| self.draw_master_panel(ui));
                     ui.add_space(4.0);
                     section(ui, "EFFECTS", |ui| self.draw_effects_panel(ui));
                     ui.add_space(4.0);
@@ -1197,7 +1410,11 @@ impl eframe::App for SynthApp {
                             .size(10.0)
                             .color(egui::Color32::from_rgb(100, 220, 100)),
                         );
-                        if ui.small_button("manage...").clicked() {
+                        if ui
+                            .small_button("manage...")
+                            .on_hover_text("Open preset manager — save/load patches by category")
+                            .clicked()
+                        {
                             self.show_presets_window = !self.show_presets_window;
                         }
                     });
@@ -1366,17 +1583,17 @@ impl SynthApp {
                     ui.horizontal(|ui| {
                         ui.set_min_width(200.0);
                         ui.label(*param_label);
-                        if ui.small_button("Learn").clicked() {
-                            if let Ok(mut state) = learn_arc.try_lock() {
-                                state.pending_param = Some(param_key.to_string());
-                            }
+                        if ui.small_button("Learn").clicked()
+                            && let Ok(mut state) = learn_arc.try_lock()
+                        {
+                            state.pending_param = Some(param_key.to_string());
                         }
                         if let Some(cc) = bound_cc {
                             ui.colored_label(egui::Color32::GREEN, format!("CC {}", cc));
-                            if ui.small_button("x").clicked() {
-                                if let Ok(mut state) = learn_arc.try_lock() {
-                                    state.custom_map.retain(|_, v| v.as_str() != *param_key);
-                                }
+                            if ui.small_button("x").clicked()
+                                && let Ok(mut state) = learn_arc.try_lock()
+                            {
+                                state.custom_map.retain(|_, v| v.as_str() != *param_key);
                             }
                         } else {
                             ui.colored_label(egui::Color32::GRAY, "-");

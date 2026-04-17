@@ -30,9 +30,9 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1060.0, 720.0])
-            .with_min_inner_size([1060.0, 720.0])
-            .with_max_inner_size([1060.0, 720.0])
+            .with_inner_size([1300.0, 720.0])
+            .with_min_inner_size([1300.0, 720.0])
+            .with_max_inner_size([1300.0, 720.0])
             .with_resizable(false)
             .with_title("Rust Synthesizer"),
         ..Default::default()

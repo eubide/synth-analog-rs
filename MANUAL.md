@@ -171,6 +171,14 @@ Ambos sliders van de 0.0 a 1.0 (profundidad de modulación).
 - **Feedback**: Densidad de ecos (0.0 a 0.95)
 - **Amount**: Mezcla del delay (0.0 a 1.0)
 
+### Chorus / Ensemble
+
+Dos LFO en cuadratura modulan un delay corto (centro ≈10 ms) — firma clásica Prophet + chorus.
+
+- **Mix**: Mezcla dry/wet (0.0 = bypass, 1.0 = full wet)
+- **Rate**: Velocidad de modulación (0.1 a 3 Hz); lento = lush, rápido = warbly
+- **Depth**: Profundidad de la modulación de delay (0.0 a 1.0)
+
 ---
 
 ## VU Meter
@@ -214,37 +222,53 @@ Los botones **A** y **B** están desactivados hasta que el slot tiene datos.
 
 ## Sistema de Presets
 
-### Presets Incluidos (Clásicos)
+### Presets Incluidos (32 Clásicos)
 
-#### Bass
+#### Bass (6)
 - **Moog Bass**: Bass profundo y cálido
-- **Acid Bass**: Bass acid house
-- **Sub Bass**: Bass sub-sónico
-- **Wobble Bass**: Bass con LFO en cutoff
+- **Acid Bass**: Bass acid house, alta resonancia y velocity accent
+- **Sub Bass**: Sub-sónico limpio
+- **Wobble Bass**: LFO Square sobre cutoff
+- **New Order Bass**: "Blue Monday" — pulse width estrecho, tight gate
+- **Lately Bass** (Stevie Wonder): filter envelope marcado, cuerpo profundo
 
-#### Lead
-- **Supersaw Lead**: Lead potente multi-oscilador
-- **Pluck Lead**: Lead percusivo
-- **Screaming Lead**: Lead agresivo, resonancia alta
-- **Vintage Lead**: Lead clásico de los 80s
+#### Lead (8)
+- **Supersaw Lead**: Lead potente multi-oscilador con chorus
+- **Pluck Lead**: Lead percusivo, KBD tracking alto
+- **Screaming Lead**: Agresivo, resonancia alta, vibrato sync
+- **Vintage Lead**: Clásico 80s con Poly Mod suave
+- **Cars Lead** (Gary Numan): osc sync + chorus
+- **Vintage Sync Lead**: sync + filter envelope + Poly Mod
+- **Thriller Sync Lead**: sync pitch sweep (filter env → osc A freq)
+- **Init Saw Lead**: Prophet fat saw + chorus stock
 
-#### Pad
-- **Warm Pad**: Pad cálido y envolvente
-- **String Ensemble**: Emulación de cuerdas
-- **Choir Pad**: Pad tipo coro
-- **Glass Pad**: Pad cristalino
+#### Pad (4)
+- **Warm Pad**: Cálido, chorus alto y reverb
+- **Choir Pad**: Tipo coro, attacks muy lentos
+- **Glass Pad**: Cristalino con Osc2 detune de 24 semitonos
+- **Prophet Soft Pad**: Dos saws detuneados + chorus 0.75
 
-#### Brass
-- **Brass Stab**: Stab de metales
-- **Trumpet Lead**: Lead tipo trompeta
-- **Sax Lead**: Lead tipo saxofón
-- **Flute**: Sonido de flauta
+#### Strings (2)
+- **String Ensemble**: Chorus ensemble denso — firma clásica
+- **Vintage Strings**: Prophet saw-strings con chorus 0.7
 
-#### FX
+#### Brass (6)
+- **Brass Stab**: Stab con Poly Mod (filter env → osc A)
+- **Trumpet Lead**: Lead tipo trompeta, vibrato sync
+- **Flute**: Flauta con ruido sutil
+- **Sax Lead**: Sax con mixer de noise
+- **Jump Brass** (Van Halen "Jump"): Stab con Poly Mod clásico
+- **Runaway Brass** (Bon Jovi): Poly Mod doble (osc B + filter env → osc A)
+
+#### FX (5)
 - **Arp Sequence**: Secuencia de arpegio
-- **Sweep FX**: Barrido de filtro
-- **Noise Sweep**: Barrido con ruido
-- **Zap Sound**: Efecto zap electrónico
+- **Sweep FX**: Barrido con sync + Poly Mod extremo
+- **Noise Sweep**: Barrido con ruido y S&H LFO
+- **Zap Sound**: Efecto zap con LFO Square
+- **Poly Mod Bell**: FM metálica (osc B → osc A freq 0.55)
+
+#### Sequence (1)
+- **Berlin School**: Tangerine Dream-style sequence, delay dotted-eighth
 
 ### Gestión de Presets
 
@@ -253,7 +277,7 @@ Los botones **A** y **B** están desactivados hasta que el slot tiene datos.
 3. **Guardar**: Escribe un nombre, elige categoría, y haz clic en "Save"
 4. **Random Patch**: Genera un parche aleatorio con parámetros controlados
 5. **Preset por defecto**: Usa "save default" / "load default"
-6. **Crear clásicos**: Usa "create classic presets"
+6. **Crear clásicos**: El botón "create classic presets" regenera los 32 presets incluidos **sobrescribiendo** los archivos existentes (útil tras personalizaciones accidentales). En arranques normales, los presets se crean solo si faltan, respetando tus ediciones.
 
 ---
 

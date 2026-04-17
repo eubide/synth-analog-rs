@@ -177,6 +177,17 @@ pub struct SynthParameters {
 
     // LFO delay/fade-in: LFO sube gradualmente desde 0 durante este tiempo (segundos)
     pub lfo_delay: f32, // 0.0 = instantáneo, >0 = fade-in
+
+    // Chorus / Ensemble
+    pub chorus_mix: f32,   // 0.0 = off
+    pub chorus_rate: f32,  // Hz (0.1..=3.0 musical range)
+    pub chorus_depth: f32, // 0.0..=1.0
+
+    // Analog character — global imperfection knobs
+    pub analog_component_tolerance: f32, // 0.0..=1.0 scale of per-voice deviation
+    pub analog_filter_drift: f32,        // 0.0..=1.0 scale of slow thermal drift
+    pub analog_vca_bleed: f32,           // 0.0..=0.01 leakage through closed VCA
+    pub analog_noise_floor: f32,         // 0.0..=0.01 background hiss level
 }
 
 impl Default for SynthParameters {
@@ -291,6 +302,17 @@ impl Default for SynthParameters {
 
             // LFO delay — sin delay por defecto
             lfo_delay: 0.0,
+
+            // Chorus — off por defecto; los presets clásicos se centraban en el sonido seco
+            chorus_mix: 0.0,
+            chorus_rate: 0.6,
+            chorus_depth: 0.5,
+
+            // Analog character — valores sutiles pero on por defecto para dar vida
+            analog_component_tolerance: 0.3,
+            analog_filter_drift: 0.3,
+            analog_vca_bleed: 0.002,
+            analog_noise_floor: 0.0008,
         }
     }
 }

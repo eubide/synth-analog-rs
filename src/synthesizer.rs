@@ -16,6 +16,24 @@ const MASTER_DC_COEFF: f32 = 0.9999;
 // Linear approximation 2^(c/1200) ≈ 1 + c·ln2/1200 — error <0.001 % for |c| < 10 cents.
 const DRIFT_FREQ_FACTOR: f32 = 2.5 * 0.000578;
 
+// Analog character windows — picked once per voice, scaled by the user-facing knobs.
+const TOLERANCE_CUTOFF_RANGE: f32 = 0.04; // ±2 % cutoff per voice
+const TOLERANCE_RES_RANGE: f32 = 0.06;    // ±3 % resonance per voice
+const FILTER_DRIFT_RANGE: f32 = 0.06;     // ±3 % cutoff walk target
+const FILTER_DRIFT_ALPHA: f32 = 2.0;      // IIR α → τ ≈ 0.5 s
+const FILTER_DRIFT_MIN_PERIOD: f32 = 1.0; // seconds between re-picks
+const FILTER_DRIFT_MAX_PERIOD: f32 = 3.0;
+
+// Chorus geometry — 10 ms centre ± (5 ms × depth) keeps the modulated delay inside
+// the ensemble range (5–25 ms) at full depth, avoiding slap-back territory.
+const CHORUS_CENTRE_MS: f32 = 10.0;
+const CHORUS_MOD_MS: f32 = 5.0;
+const CHORUS_VOICE2_RATE_RATIO: f32 = 1.13; // second LFO slightly detuned
+
+// Denormal floor — floats below this magnitude are flushed to 0 to avoid the
+// ~100× slowdown of subnormal arithmetic in feedback paths.
+const DENORMAL_FLOOR: f32 = 1.0e-20;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WaveType {
     Sine,
@@ -94,6 +112,29 @@ pub struct EffectsParams {
     pub delay_time: f32,
     pub delay_feedback: f32,
     pub delay_amount: f32,
+    // Chorus / Ensemble — classic Prophet-5 studio shimmer.
+    // Two LFOs in quadrature modulate a short delay line (center ≈10 ms).
+    pub chorus_mix: f32,   // 0.0 = dry, 1.0 = wet
+    pub chorus_rate: f32,  // Hz (0.1..=3.0)
+    pub chorus_depth: f32, // 0.0..=1.0 (maps to ±0..5 ms around the 10 ms centre)
+}
+
+/// Analog character parameters — subtle circuit imperfections that bring the
+/// instrument to life: component tolerances per voice, VCA bleed-through,
+/// filter temperature drift, and a faint circuit noise floor.
+///
+/// These are global to the instrument (not preset-saved), because they model
+/// the physical properties of the hardware, not the patch.
+#[derive(Debug, Clone)]
+pub struct AnalogCharacter {
+    /// Scale of per-voice filter cutoff/resonance tolerance [0..1] — 1.0 = full ±2 %/±3 %.
+    pub component_tolerance: f32,
+    /// Scale of slow per-voice filter-temperature drift [0..1] — 1.0 = ±3 % drift.
+    pub filter_drift_amount: f32,
+    /// Leakage of oscillator signal around a closed VCA [0..0.01] — ≈ -54 dB at 0.002.
+    pub vca_bleed: f32,
+    /// Constant background hiss added to the master bus [0..0.01].
+    pub noise_floor: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +184,12 @@ pub struct Preset {
     pub modulation_matrix: ModulationMatrix,
     pub effects: EffectsParams,
     pub master_volume: f32,
+    // Poly Mod — iconic Prophet-5 cross-modulation (filter envelope / osc B into osc A / filter).
+    pub poly_mod_filter_env_to_osc_a_freq: f32,
+    pub poly_mod_filter_env_to_osc_a_pw: f32,
+    pub poly_mod_osc_b_to_osc_a_freq: f32,
+    pub poly_mod_osc_b_to_osc_a_pw: f32,
+    pub poly_mod_osc_b_to_filter_cutoff: f32,
 }
 
 pub struct Voice {
@@ -173,6 +220,16 @@ pub struct Voice {
     pub osc2_last_out: f32,
     // LFO delay: tiempo transcurrido desde el note-on (para fade-in del LFO)
     pub lfo_delay_elapsed: f32,
+    // Per-voice component tolerance — constant deviations picked at birth that model
+    // the analog reality of non-identical resistors/capacitors between voice boards.
+    // Centered at 1.0; scaled at use-time by the global component_tolerance setting.
+    pub tolerance_cutoff_mul: f32, // ±2 % variation (0.98..=1.02)
+    pub tolerance_res_mul: f32,    // ±3 % variation (0.97..=1.03)
+    // Filter temperature drift — a slow random walk on the cutoff that wanders a
+    // few percent over seconds, simulating thermal changes in the filter caps.
+    pub filter_drift_value: f32,  // current smoothed multiplier (~1.0)
+    pub filter_drift_target: f32, // target we're interpolating toward
+    pub filter_drift_timer: f32,  // seconds until a new target is picked
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -265,6 +322,19 @@ pub struct Synthesizer {
     pub filter_cutoff_smooth: f32,
     pub filter_resonance_smooth: f32,
     pub master_volume_smooth: f32,
+    // Analog character: global knobs for subtle circuit imperfections.
+    pub analog: AnalogCharacter,
+    // Chorus delay line — sized for 25 ms max delay (≈ centre 10 ms ± 5 ms modulation).
+    pub chorus_buffer: Vec<f32>,
+    pub chorus_index: usize,
+    // Two LFO phases in quadrature give a thicker, Juno-style ensemble sound.
+    pub chorus_lfo_phase1: f32,
+    pub chorus_lfo_phase2: f32,
+    // Master-bus pink noise generator for the constant analog hiss floor.
+    pub master_noise_prng: u32,
+    pub master_noise_b0: f32,
+    pub master_noise_b1: f32,
+    pub master_noise_b2: f32,
 }
 
 impl Default for OscillatorParams {
@@ -337,6 +407,21 @@ impl Default for EffectsParams {
             delay_time: 0.25,
             delay_feedback: 0.3,
             delay_amount: 0.0,
+            chorus_mix: 0.0,
+            chorus_rate: 0.6,
+            chorus_depth: 0.5,
+        }
+    }
+}
+
+impl Default for AnalogCharacter {
+    fn default() -> Self {
+        Self {
+            // Subtle defaults — audible on careful listening but never distracting.
+            component_tolerance: 0.3,
+            filter_drift_amount: 0.3,
+            vca_bleed: 0.002,       // ≈ -54 dB leakage through a closed VCA
+            noise_floor: 0.0008,    // ≈ -62 dB background hiss
         }
     }
 }
@@ -398,6 +483,13 @@ impl Voice {
             noise_b2: 0.0,
             osc2_last_out: 0.0,
             lfo_delay_elapsed: 0.0,
+            tolerance_cutoff_mul: 1.0 + (rand::random::<f32>() - 0.5) * TOLERANCE_CUTOFF_RANGE,
+            tolerance_res_mul: 1.0 + (rand::random::<f32>() - 0.5) * TOLERANCE_RES_RANGE,
+            filter_drift_value: 1.0,
+            filter_drift_target: 1.0 + (rand::random::<f32>() - 0.5) * FILTER_DRIFT_RANGE,
+            // Stagger initial timers so voices re-pick targets at different times.
+            filter_drift_timer: FILTER_DRIFT_MIN_PERIOD
+                + rand::random::<f32>() * (FILTER_DRIFT_MAX_PERIOD - FILTER_DRIFT_MIN_PERIOD),
         }
     }
 
@@ -503,6 +595,19 @@ impl Synthesizer {
             filter_cutoff_smooth: 5000.0,
             filter_resonance_smooth: 1.0,
             master_volume_smooth: 0.7,
+            analog: AnalogCharacter::default(),
+            // Power-of-two size lets apply_chorus replace `% len` with a bitmask.
+            chorus_buffer: vec![
+                0.0;
+                ((sample_rate * 0.025) as usize).max(1024).next_power_of_two()
+            ],
+            chorus_index: 0,
+            chorus_lfo_phase1: 0.0,
+            chorus_lfo_phase2: 0.25, // start 90° out so the two voices don't phase-lock
+            master_noise_prng: rand::random::<u32>() | 1,
+            master_noise_b0: 0.0,
+            master_noise_b1: 0.0,
+            master_noise_b2: 0.0,
         }
     }
 
@@ -887,6 +992,9 @@ impl Synthesizer {
         let expression = self.expression;
         let mod_wheel = self.mod_wheel;
         let lfo_delay = self.lfo_delay;
+        let component_tolerance = self.analog.component_tolerance;
+        let filter_drift_amount = self.analog.filter_drift_amount;
+        let vca_bleed = self.analog.vca_bleed;
 
         // Precompute values that are constant for the entire block.
         // Avoids transcendental calls (powf, exp) inside the per-sample voice loop.
@@ -1115,11 +1223,30 @@ impl Synthesizer {
                     + osc_b_cutoff_mod
                     + filter_cutoff * filter_envelope_amount * filter_envelope_value)
                     * kbd_multiplier;
-                let final_cutoff = modulated_cutoff.clamp(20.0, 20000.0);
+
+                // Filter temperature drift: walk toward a target that's re-picked
+                // every 1–3 s; τ ≈ 0.5 s so individual transitions are inaudible
+                // but thermal sway shows up over minutes.
+                voice.filter_drift_timer -= dt;
+                if voice.filter_drift_timer <= 0.0 {
+                    voice.filter_drift_target =
+                        1.0 + (rand::random::<f32>() - 0.5) * FILTER_DRIFT_RANGE;
+                    voice.filter_drift_timer = FILTER_DRIFT_MIN_PERIOD
+                        + rand::random::<f32>() * (FILTER_DRIFT_MAX_PERIOD - FILTER_DRIFT_MIN_PERIOD);
+                }
+                voice.filter_drift_value +=
+                    (voice.filter_drift_target - voice.filter_drift_value) * FILTER_DRIFT_ALPHA * dt;
+
+                let cutoff_tol = 1.0 + (voice.tolerance_cutoff_mul - 1.0) * component_tolerance;
+                let cutoff_drift = 1.0 + (voice.filter_drift_value - 1.0) * filter_drift_amount;
+                let final_cutoff = (modulated_cutoff * cutoff_tol * cutoff_drift)
+                    .clamp(20.0, 20000.0);
 
                 let lfo_resonance_mod = lfo_value_voice * modulation_matrix.lfo_to_resonance * 2.0;
-                // Safe resonance limiting to prevent runaway feedback
-                let final_resonance = (filter_resonance + lfo_resonance_mod).clamp(0.0, 3.95); // Slightly below 4.0 for safety
+                let res_tol = 1.0 + (voice.tolerance_res_mul - 1.0) * component_tolerance;
+                // Clamp just below 4.0 to prevent runaway feedback at self-oscillation.
+                let final_resonance =
+                    ((filter_resonance + lfo_resonance_mod) * res_tol).clamp(0.0, 3.95);
 
                 // Apply ladder filter (24dB/octave vintage analog style)
                 mixed = Self::apply_ladder_filter_static(
@@ -1148,7 +1275,10 @@ impl Synthesizer {
                 let velocity_amplitude_mod =
                     0.5 + (voice.velocity * modulation_matrix.velocity_to_amplitude * 0.5);
 
-                mixed *= envelope_value * lfo_amplitude_mod * velocity_amplitude_mod * aftertouch_amplitude_mod;
+                // A real analog VCA never fully shuts — a constant offset lets a
+                // sliver of oscillator signal escape, giving notes an "alive" taper.
+                let amp_gain = envelope_value + vca_bleed;
+                mixed *= amp_gain * lfo_amplitude_mod * velocity_amplitude_mod * aftertouch_amplitude_mod;
 
                 *sample += mixed;
             }
@@ -1160,9 +1290,19 @@ impl Synthesizer {
             // Apply master volume with gentle compression; expression pedal scales on top
             *sample *= master_volume * expression;
 
-            // Apply effects processing
+            // Apply effects processing. Chorus sits before delay/reverb so the
+            // delay taps and reverb tail inherit the ensemble thickness.
+            *sample = self.apply_chorus(*sample);
             *sample = self.apply_delay(*sample);
             *sample = self.apply_reverb(*sample);
+
+            // Analog circuit hiss — the faint background the player never notices
+            // until it's missing. Added after the effects so the noise feels like
+            // it's coming from the amplifier, not the delay line.
+            let noise_floor = self.analog.noise_floor;
+            if noise_floor > 0.0 {
+                *sample += self.master_noise_sample() * noise_floor;
+            }
 
             // Continuous saturation. The previous threshold clipper jumped
             // by ~0.18 at |x|=0.7 and buzzed on every loud peak.
@@ -1569,6 +1709,81 @@ impl Synthesizer {
         sample + (delayed_sample * self.effects.delay_amount)
     }
 
+    /// Mono chorus/ensemble inspired by Juno-6 and Prophet-10: two delay taps
+    /// modulated by quadrature LFOs around a 10 ms centre. Short enough to stay
+    /// out of slap-back delay territory, long enough to create stereo-like width
+    /// from pitch drift between taps.
+    fn apply_chorus(&mut self, sample: f32) -> f32 {
+        let len = self.chorus_buffer.len();
+        // chorus_buffer is constructed as a power of two (see Synthesizer::new),
+        // so wrap arithmetic collapses to a bitmask. Keep this invariant.
+        let mask = len - 1;
+        let mix = self.effects.chorus_mix;
+        if mix <= 0.0 {
+            // Keep feeding the ring even when bypassed — turning chorus back on
+            // should not produce a stale transient from silent history.
+            self.chorus_buffer[self.chorus_index] = sample;
+            self.chorus_index = (self.chorus_index + 1) & mask;
+            return sample;
+        }
+
+        let rate = self.effects.chorus_rate.clamp(0.05, 5.0);
+        let depth = self.effects.chorus_depth.clamp(0.0, 1.0);
+
+        // Triangle is cheaper than sine and audibly identical at these depths.
+        let phase_inc = rate / self.sample_rate;
+        self.chorus_lfo_phase1 = (self.chorus_lfo_phase1 + phase_inc).fract();
+        self.chorus_lfo_phase2 =
+            (self.chorus_lfo_phase2 + phase_inc * CHORUS_VOICE2_RATE_RATIO).fract();
+        let tri = |p: f32| if p < 0.5 { 4.0 * p - 1.0 } else { 3.0 - 4.0 * p };
+        let lfo1 = tri(self.chorus_lfo_phase1);
+        let lfo2 = tri(self.chorus_lfo_phase2);
+
+        let mod_ms = CHORUS_MOD_MS * depth;
+        let delay_samples_1 =
+            ((CHORUS_CENTRE_MS + mod_ms * lfo1) * 0.001 * self.sample_rate).max(2.0);
+        let delay_samples_2 =
+            ((CHORUS_CENTRE_MS + mod_ms * lfo2) * 0.001 * self.sample_rate).max(2.0);
+
+        // Fractional-delay read with linear interpolation — the LFO motion changes
+        // the read position every sample so interpolation is required to avoid zipper.
+        let read_tap = |buf: &[f32], idx: usize, delay: f32| -> f32 {
+            let d_int = delay as usize;
+            let d_frac = delay - d_int as f32;
+            let base = (idx + buf.len() - d_int) & mask;
+            let prev = base.wrapping_sub(1) & mask;
+            buf[base] * (1.0 - d_frac) + buf[prev] * d_frac
+        };
+        let tap1 = read_tap(&self.chorus_buffer, self.chorus_index, delay_samples_1);
+        let tap2 = read_tap(&self.chorus_buffer, self.chorus_index, delay_samples_2);
+        let mut wet = (tap1 + tap2) * 0.5;
+        if wet.abs() < DENORMAL_FLOOR {
+            wet = 0.0;
+        }
+
+        self.chorus_buffer[self.chorus_index] = sample;
+        self.chorus_index = (self.chorus_index + 1) & mask;
+
+        // Slight dry bias so chords don't thin out above mix ≈ 0.7.
+        let dry_gain = 1.0 - mix * 0.5;
+        sample * dry_gain + wet * mix
+    }
+
+    /// Faint constant hiss from the analog output stage — Paul Kellett pink noise
+    /// at circuit-floor level. Shared across voices, written to the master bus once
+    /// per sample (cheap: three MAC + one xorshift).
+    #[inline]
+    fn master_noise_sample(&mut self) -> f32 {
+        self.master_noise_prng ^= self.master_noise_prng << 13;
+        self.master_noise_prng ^= self.master_noise_prng >> 17;
+        self.master_noise_prng ^= self.master_noise_prng << 5;
+        let white = (self.master_noise_prng as i32) as f32 * (1.0 / 2_147_483_648.0);
+        self.master_noise_b0 = 0.99886 * self.master_noise_b0 + white * 0.0555179;
+        self.master_noise_b1 = 0.99332 * self.master_noise_b1 + white * 0.0750759;
+        self.master_noise_b2 = 0.96900 * self.master_noise_b2 + white * 0.153_852;
+        self.master_noise_b0 + self.master_noise_b1 + self.master_noise_b2 + white * 0.0556418
+    }
+
     fn apply_reverb(&mut self, sample: f32) -> f32 {
         if self.effects.reverb_amount <= 0.0 {
             return sample;
@@ -1628,21 +1843,7 @@ impl Synthesizer {
         // Ensure presets directory exists
         self.ensure_presets_dir()?;
 
-        let preset = Preset {
-            name: name.to_string(),
-            category: "Other".to_string(),
-            osc1: self.osc1.clone(),
-            osc2: self.osc2.clone(),
-            osc2_sync: self.osc2_sync,
-            mixer: self.mixer.clone(),
-            filter: self.filter.clone(),
-            filter_envelope: self.filter_envelope.clone(),
-            amp_envelope: self.amp_envelope.clone(),
-            lfo: self.lfo.clone(),
-            modulation_matrix: self.modulation_matrix.clone(),
-            effects: self.effects.clone(),
-            master_volume: self.master_volume,
-        };
+        let preset = self.snapshot_preset(name, "Other");
 
         let preset_json = self.preset_to_json(&preset)?;
         let filename = format!("presets/{}.json", name.replace(" ", "_"));
@@ -1653,21 +1854,7 @@ impl Synthesizer {
 
     pub fn save_preset_with_category(&self, name: &str, category: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.ensure_presets_dir()?;
-        let preset = Preset {
-            name: name.to_string(),
-            category: category.to_string(),
-            osc1: self.osc1.clone(),
-            osc2: self.osc2.clone(),
-            osc2_sync: self.osc2_sync,
-            mixer: self.mixer.clone(),
-            filter: self.filter.clone(),
-            filter_envelope: self.filter_envelope.clone(),
-            amp_envelope: self.amp_envelope.clone(),
-            lfo: self.lfo.clone(),
-            modulation_matrix: self.modulation_matrix.clone(),
-            effects: self.effects.clone(),
-            master_volume: self.master_volume,
-        };
+        let preset = self.snapshot_preset(name, category);
         let preset_json = self.preset_to_json(&preset)?;
         let filename = format!("presets/{}.json", name.replace(" ", "_"));
         std::fs::write(&filename, preset_json)?;
@@ -1687,6 +1874,11 @@ impl Synthesizer {
         self.modulation_matrix = preset.modulation_matrix;
         self.effects = preset.effects;
         self.master_volume = preset.master_volume;
+        self.poly_mod_filter_env_to_osc_a_freq = preset.poly_mod_filter_env_to_osc_a_freq;
+        self.poly_mod_filter_env_to_osc_a_pw = preset.poly_mod_filter_env_to_osc_a_pw;
+        self.poly_mod_osc_b_to_osc_a_freq = preset.poly_mod_osc_b_to_osc_a_freq;
+        self.poly_mod_osc_b_to_osc_a_pw = preset.poly_mod_osc_b_to_osc_a_pw;
+        self.poly_mod_osc_b_to_filter_cutoff = preset.poly_mod_osc_b_to_filter_cutoff;
     }
 
     pub fn load_preset(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1729,28 +1921,31 @@ impl Synthesizer {
         let mut presets = Vec::new();
         if let Ok(entries) = std::fs::read_dir("presets") {
             for entry in entries.flatten() {
-                if let Some(filename) = entry.file_name().to_str() {
-                    if filename.ends_with(".json") {
-                        let name = filename.trim_end_matches(".json").replace("_", " ");
-                        let category = std::fs::read_to_string(entry.path())
-                            .ok()
-                            .and_then(|content| {
-                                let lines: Vec<&str> = content.lines().collect();
-                                if lines.len() > 44 {
-                                    Some(lines[44].trim_matches('"').to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or_else(|| "Other".to_string());
-                        presets.push((name, category));
-                    }
+                if let Some(filename) = entry.file_name().to_str()
+                    && filename.ends_with(".json")
+                {
+                    let name = filename.trim_end_matches(".json").replace("_", " ");
+                    let category = std::fs::read_to_string(entry.path())
+                        .ok()
+                        .and_then(|content| {
+                            content
+                                .lines()
+                                .nth(Self::CATEGORY_LINE_INDEX)
+                                .map(|s| s.trim_matches('"').to_string())
+                        })
+                        .unwrap_or_else(|| "Other".to_string());
+                    presets.push((name, category));
                 }
             }
         }
         presets.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
         presets
     }
+
+    /// Line index of the `category` field in the preset JSON line format.
+    /// Line 44 predates the format extension and is pinned for backward compat;
+    /// extended fields begin at index 45.
+    const CATEGORY_LINE_INDEX: usize = 44;
 
     fn preset_to_json(&self, preset: &Preset) -> Result<String, Box<dyn std::error::Error>> {
         // Simple line-based format for easy parsing
@@ -1800,6 +1995,17 @@ impl Synthesizer {
             preset.effects.delay_amount.to_string(),
             preset.master_volume.to_string(),
             format!("\"{}\"", preset.category),
+            // --- Extended fields (backward-compatible; older presets omit these) ---
+            format!("\"{}\"", Self::lfo_waveform_to_string(preset.lfo.waveform)),
+            preset.lfo.sync.to_string(),
+            preset.effects.chorus_mix.to_string(),
+            preset.effects.chorus_rate.to_string(),
+            preset.effects.chorus_depth.to_string(),
+            preset.poly_mod_filter_env_to_osc_a_freq.to_string(),
+            preset.poly_mod_filter_env_to_osc_a_pw.to_string(),
+            preset.poly_mod_osc_b_to_osc_a_freq.to_string(),
+            preset.poly_mod_osc_b_to_osc_a_pw.to_string(),
+            preset.poly_mod_osc_b_to_filter_cutoff.to_string(),
         ];
         Ok(lines.join("\n"))
     }
@@ -1879,11 +2085,30 @@ impl Synthesizer {
         // Master
         let master_vol: f32 = lines[43].parse()?;
 
-        let category = if lines.len() > 44 {
-            lines[44].trim_matches('"').to_string()
-        } else {
-            "Other".to_string()
+        let category = lines
+            .get(Self::CATEGORY_LINE_INDEX)
+            .map(|s| s.trim_matches('"').to_string())
+            .unwrap_or_else(|| "Other".to_string());
+
+        // Extended fields — absent in legacy presets (45 lines). Each has a
+        // safe default so older files load unchanged.
+        let parse_f32 = |n: usize, default: f32| -> f32 {
+            lines.get(n).and_then(|s| s.parse().ok()).unwrap_or(default)
         };
+        let lfo_waveform = lines
+            .get(45)
+            .map(|s| Self::string_to_lfo_waveform(s.trim_matches('"')))
+            .unwrap_or(LfoWaveform::Triangle);
+        let lfo_sync = lines.get(46).and_then(|s| s.parse().ok()).unwrap_or(false);
+        let chorus_defaults = EffectsParams::default();
+        let chorus_mix = parse_f32(47, chorus_defaults.chorus_mix);
+        let chorus_rate = parse_f32(48, chorus_defaults.chorus_rate);
+        let chorus_depth = parse_f32(49, chorus_defaults.chorus_depth);
+        let pm_fe_freq = parse_f32(50, 0.0);
+        let pm_fe_pw = parse_f32(51, 0.0);
+        let pm_ob_freq = parse_f32(52, 0.0);
+        let pm_ob_pw = parse_f32(53, 0.0);
+        let pm_ob_cutoff = parse_f32(54, 0.0);
 
         Ok(Preset {
             name,
@@ -1927,8 +2152,8 @@ impl Synthesizer {
             lfo: LfoParams {
                 frequency: lfo_freq,
                 amplitude: lfo_amp,
-                waveform: LfoWaveform::Triangle, // Default for older presets
-                sync: false,                     // Default for older presets
+                waveform: lfo_waveform,
+                sync: lfo_sync,
                 target_osc1_pitch: lfo_osc1,
                 target_osc2_pitch: lfo_osc2,
                 target_filter: lfo_filter,
@@ -1949,8 +2174,16 @@ impl Synthesizer {
                 delay_time: fx_del_time,
                 delay_feedback: fx_del_fb,
                 delay_amount: fx_del_amt,
+                chorus_mix,
+                chorus_rate,
+                chorus_depth,
             },
             master_volume: master_vol,
+            poly_mod_filter_env_to_osc_a_freq: pm_fe_freq,
+            poly_mod_filter_env_to_osc_a_pw: pm_fe_pw,
+            poly_mod_osc_b_to_osc_a_freq: pm_ob_freq,
+            poly_mod_osc_b_to_osc_a_pw: pm_ob_pw,
+            poly_mod_osc_b_to_filter_cutoff: pm_ob_cutoff,
         })
     }
 
@@ -1973,6 +2206,52 @@ impl Synthesizer {
         }
     }
 
+    fn lfo_waveform_to_string(waveform: LfoWaveform) -> &'static str {
+        match waveform {
+            LfoWaveform::Triangle => "Triangle",
+            LfoWaveform::Square => "Square",
+            LfoWaveform::Sawtooth => "Sawtooth",
+            LfoWaveform::ReverseSawtooth => "ReverseSawtooth",
+            LfoWaveform::SampleAndHold => "SampleAndHold",
+        }
+    }
+
+    fn string_to_lfo_waveform(s: &str) -> LfoWaveform {
+        // Unknown waveforms fall back to Triangle so broken or future-extended
+        // presets load without crashing.
+        match s {
+            "Triangle" => LfoWaveform::Triangle,
+            "Square" => LfoWaveform::Square,
+            "Sawtooth" => LfoWaveform::Sawtooth,
+            "ReverseSawtooth" => LfoWaveform::ReverseSawtooth,
+            "SampleAndHold" => LfoWaveform::SampleAndHold,
+            _ => LfoWaveform::Triangle,
+        }
+    }
+
+    fn snapshot_preset(&self, name: &str, category: &str) -> Preset {
+        Preset {
+            name: name.to_string(),
+            category: category.to_string(),
+            osc1: self.osc1.clone(),
+            osc2: self.osc2.clone(),
+            osc2_sync: self.osc2_sync,
+            mixer: self.mixer.clone(),
+            filter: self.filter.clone(),
+            filter_envelope: self.filter_envelope.clone(),
+            amp_envelope: self.amp_envelope.clone(),
+            lfo: self.lfo.clone(),
+            modulation_matrix: self.modulation_matrix.clone(),
+            effects: self.effects.clone(),
+            master_volume: self.master_volume,
+            poly_mod_filter_env_to_osc_a_freq: self.poly_mod_filter_env_to_osc_a_freq,
+            poly_mod_filter_env_to_osc_a_pw: self.poly_mod_filter_env_to_osc_a_pw,
+            poly_mod_osc_b_to_osc_a_freq: self.poly_mod_osc_b_to_osc_a_freq,
+            poly_mod_osc_b_to_osc_a_pw: self.poly_mod_osc_b_to_osc_a_pw,
+            poly_mod_osc_b_to_filter_cutoff: self.poly_mod_osc_b_to_filter_cutoff,
+        }
+    }
+
     fn ensure_presets_dir(&self) -> Result<(), Box<dyn std::error::Error>> {
         if !Path::new("presets").exists() {
             fs::create_dir("presets")?;
@@ -1981,7 +2260,43 @@ impl Synthesizer {
         Ok(())
     }
 
+    /// Reset every patch-level parameter to its default. Called at the start of
+    /// each built-in preset builder so poly-mod / KBD tracking / velocity routes
+    /// from a previous preset don't bleed into the next one.
+    fn reset_patch_to_defaults(&mut self) {
+        self.osc1 = OscillatorParams::default();
+        self.osc2 = OscillatorParams::default();
+        self.osc2_sync = false;
+        self.mixer = MixerParams::default();
+        self.filter = FilterParams::default();
+        self.filter_envelope = EnvelopeParams::default();
+        self.amp_envelope = EnvelopeParams::default();
+        self.lfo = LfoParams::default();
+        self.modulation_matrix = ModulationMatrix::default();
+        self.effects = EffectsParams::default();
+        self.arpeggiator = ArpeggiatorParams::default();
+        self.master_volume = 0.5;
+        self.poly_mod_filter_env_to_osc_a_freq = 0.0;
+        self.poly_mod_filter_env_to_osc_a_pw = 0.0;
+        self.poly_mod_osc_b_to_osc_a_freq = 0.0;
+        self.poly_mod_osc_b_to_osc_a_pw = 0.0;
+        self.poly_mod_osc_b_to_filter_cutoff = 0.0;
+    }
+
+    /// Write the 32 built-in presets to disk only if they don't already exist.
+    /// Callers on the startup path (main.rs) rely on this to preserve user
+    /// edits to built-in preset files across launches. Use
+    /// `force_create_all_classic_presets` to overwrite unconditionally.
     pub fn create_all_classic_presets(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Sentinel: if the first bundled preset is present, assume the set has
+        // been written before and leave the user's `presets/` directory alone.
+        if Path::new("presets/Moog_Bass.json").exists() {
+            return Ok(());
+        }
+        self.force_create_all_classic_presets()
+    }
+
+    pub fn force_create_all_classic_presets(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Creating classic synthesizer presets...");
 
         // Bass Sounds
@@ -2022,25 +2337,21 @@ impl Synthesizer {
         self.create_berlin_school()?;
         self.create_prophet_strings()?;
 
+        // Iconic Prophet-5 additions
+        self.create_lately_bass()?;
+        self.create_runaway_brass()?;
+        self.create_thriller_sync_lead()?;
+        self.create_poly_mod_bell()?;
+        self.create_init_saw_lead()?;
+        self.create_soft_pad()?;
+
         println!("All classic presets created successfully!");
         Ok(())
     }
 
     // Bass Sounds
     fn create_moog_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Square;
@@ -2051,6 +2362,7 @@ impl Synthesizer {
         self.filter.cutoff = 800.0;
         self.filter.resonance = 2.5;
         self.filter.envelope_amount = 0.4;
+        self.filter.keyboard_tracking = 0.15;
         self.filter_envelope.attack = 0.01;
         self.filter_envelope.decay = 0.3;
         self.filter_envelope.sustain = 0.3;
@@ -2059,29 +2371,20 @@ impl Synthesizer {
         self.amp_envelope.decay = 0.1;
         self.amp_envelope.sustain = 0.8;
         self.amp_envelope.release = 0.3;
-        self.save_preset("Moog Bass")
+        self.modulation_matrix.velocity_to_cutoff = 0.35;
+        self.modulation_matrix.velocity_to_amplitude = 0.2;
+        self.save_preset_with_category("Moog Bass", "Bass")
     }
 
     fn create_acid_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
         self.filter.cutoff = 400.0;
         self.filter.resonance = 3.8;
         self.filter.envelope_amount = 0.8;
+        self.filter.keyboard_tracking = 0.2;
         self.filter_envelope.attack = 0.001;
         self.filter_envelope.decay = 0.15;
         self.filter_envelope.sustain = 0.1;
@@ -2094,56 +2397,37 @@ impl Synthesizer {
         self.lfo.amplitude = 0.3;
         self.lfo.target_filter = true;
         self.modulation_matrix.lfo_to_cutoff = 0.6;
-        self.save_preset("Acid Bass")
+        self.modulation_matrix.velocity_to_cutoff = 0.45;
+        self.modulation_matrix.velocity_to_amplitude = 0.25;
+        self.save_preset_with_category("Acid Bass", "Bass")
     }
 
     fn create_sub_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Square;
         self.osc1.amplitude = 1.0;
         self.osc1.detune = -24.0;
         self.mixer.osc1_level = 1.0;
         self.filter.cutoff = 150.0;
         self.filter.resonance = 0.5;
+        self.filter.keyboard_tracking = 0.0;
         self.amp_envelope.attack = 0.01;
         self.amp_envelope.decay = 0.3;
         self.amp_envelope.sustain = 1.0;
         self.amp_envelope.release = 0.5;
-        self.save_preset("Sub Bass")
+        self.modulation_matrix.velocity_to_amplitude = 0.3;
+        self.save_preset_with_category("Sub Bass", "Bass")
     }
 
     fn create_wobble_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
         self.filter.cutoff = 600.0;
         self.filter.resonance = 3.0;
         self.filter.envelope_amount = 0.5;
+        self.filter.keyboard_tracking = 0.1;
         self.filter_envelope.attack = 0.01;
         self.filter_envelope.decay = 0.1;
         self.filter_envelope.sustain = 0.8;
@@ -2154,26 +2438,16 @@ impl Synthesizer {
         self.amp_envelope.release = 0.2;
         self.lfo.frequency = 8.0;
         self.lfo.amplitude = 1.0;
+        self.lfo.waveform = LfoWaveform::Square;
         self.lfo.target_filter = true;
         self.modulation_matrix.lfo_to_cutoff = 0.9;
-        self.save_preset("Wobble Bass")
+        self.modulation_matrix.velocity_to_cutoff = 0.3;
+        self.save_preset_with_category("Wobble Bass", "Bass")
     }
 
     // Lead Sounds
     fn create_supersaw_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
@@ -2184,6 +2458,7 @@ impl Synthesizer {
         self.filter.cutoff = 8000.0;
         self.filter.resonance = 1.2;
         self.filter.envelope_amount = 0.3;
+        self.filter.keyboard_tracking = 0.7;
         self.filter_envelope.attack = 0.1;
         self.filter_envelope.decay = 0.3;
         self.filter_envelope.sustain = 0.7;
@@ -2194,29 +2469,23 @@ impl Synthesizer {
         self.amp_envelope.release = 0.8;
         self.effects.reverb_amount = 0.3;
         self.effects.delay_amount = 0.2;
-        self.save_preset("Supersaw Lead")
+        self.effects.chorus_mix = 0.25;
+        self.effects.chorus_rate = 0.8;
+        self.effects.chorus_depth = 0.6;
+        self.modulation_matrix.velocity_to_cutoff = 0.4;
+        self.modulation_matrix.velocity_to_amplitude = 0.3;
+        self.save_preset_with_category("Supersaw Lead", "Lead")
     }
 
     fn create_pluck_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Triangle;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
         self.filter.cutoff = 4000.0;
         self.filter.resonance = 1.5;
         self.filter.envelope_amount = 0.6;
+        self.filter.keyboard_tracking = 0.8;
         self.filter_envelope.attack = 0.001;
         self.filter_envelope.decay = 0.5;
         self.filter_envelope.sustain = 0.2;
@@ -2225,29 +2494,21 @@ impl Synthesizer {
         self.amp_envelope.decay = 0.6;
         self.amp_envelope.sustain = 0.1;
         self.amp_envelope.release = 0.3;
-        self.save_preset("Pluck Lead")
+        self.modulation_matrix.velocity_to_cutoff = 0.5;
+        self.modulation_matrix.velocity_to_amplitude = 0.35;
+        self.effects.chorus_mix = 0.2;
+        self.save_preset_with_category("Pluck Lead", "Lead")
     }
 
     fn create_screaming_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
         self.filter.cutoff = 12000.0;
         self.filter.resonance = 3.5;
         self.filter.envelope_amount = 0.4;
+        self.filter.keyboard_tracking = 0.9;
         self.filter_envelope.attack = 0.2;
         self.filter_envelope.decay = 0.4;
         self.filter_envelope.sustain = 0.8;
@@ -2258,25 +2519,17 @@ impl Synthesizer {
         self.amp_envelope.release = 1.2;
         self.lfo.frequency = 5.0;
         self.lfo.amplitude = 0.3;
+        self.lfo.sync = true;
         self.lfo.target_osc1_pitch = true;
         self.modulation_matrix.lfo_to_osc1_pitch = 0.4;
-        self.save_preset("Screaming Lead")
+        self.modulation_matrix.velocity_to_cutoff = 0.45;
+        self.modulation_matrix.velocity_to_amplitude = 0.3;
+        self.effects.chorus_mix = 0.3;
+        self.save_preset_with_category("Screaming Lead", "Lead")
     }
 
     fn create_vintage_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Square;
@@ -2287,6 +2540,7 @@ impl Synthesizer {
         self.filter.cutoff = 6000.0;
         self.filter.resonance = 2.0;
         self.filter.envelope_amount = 0.5;
+        self.filter.keyboard_tracking = 0.65;
         self.filter_envelope.attack = 0.3;
         self.filter_envelope.decay = 0.6;
         self.filter_envelope.sustain = 0.6;
@@ -2297,24 +2551,18 @@ impl Synthesizer {
         self.amp_envelope.release = 1.5;
         self.effects.delay_amount = 0.25;
         self.effects.delay_time = 0.3;
-        self.save_preset("Vintage Lead")
+        self.effects.chorus_mix = 0.35;
+        self.effects.chorus_rate = 0.5;
+        self.effects.chorus_depth = 0.55;
+        self.modulation_matrix.velocity_to_cutoff = 0.4;
+        self.modulation_matrix.velocity_to_amplitude = 0.25;
+        self.poly_mod_osc_b_to_osc_a_freq = 0.08;
+        self.save_preset_with_category("Vintage Lead", "Lead")
     }
 
     // Pads & Strings
     fn create_warm_pad(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Triangle;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sine;
@@ -2325,6 +2573,7 @@ impl Synthesizer {
         self.filter.cutoff = 3000.0;
         self.filter.resonance = 0.8;
         self.filter.envelope_amount = 0.2;
+        self.filter.keyboard_tracking = 0.5;
         self.filter_envelope.attack = 1.5;
         self.filter_envelope.decay = 1.0;
         self.filter_envelope.sustain = 0.8;
@@ -2335,23 +2584,15 @@ impl Synthesizer {
         self.amp_envelope.release = 2.5;
         self.effects.reverb_amount = 0.6;
         self.effects.reverb_size = 0.8;
-        self.save_preset("Warm Pad")
+        self.effects.chorus_mix = 0.6;
+        self.effects.chorus_rate = 0.35;
+        self.effects.chorus_depth = 0.7;
+        self.modulation_matrix.velocity_to_amplitude = 0.15;
+        self.save_preset_with_category("Warm Pad", "Pad")
     }
 
     fn create_string_ensemble(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
@@ -2362,6 +2603,7 @@ impl Synthesizer {
         self.filter.cutoff = 5000.0;
         self.filter.resonance = 1.0;
         self.filter.envelope_amount = 0.3;
+        self.filter.keyboard_tracking = 0.55;
         self.filter_envelope.attack = 1.2;
         self.filter_envelope.decay = 0.8;
         self.filter_envelope.sustain = 0.7;
@@ -2374,24 +2616,16 @@ impl Synthesizer {
         self.lfo.amplitude = 0.2;
         self.lfo.target_amplitude = true;
         self.modulation_matrix.lfo_to_amplitude = 0.15;
+        self.modulation_matrix.velocity_to_amplitude = 0.15;
         self.effects.reverb_amount = 0.5;
-        self.save_preset("String Ensemble")
+        self.effects.chorus_mix = 0.75;
+        self.effects.chorus_rate = 0.5;
+        self.effects.chorus_depth = 0.8;
+        self.save_preset_with_category("String Ensemble", "Strings")
     }
 
     fn create_choir_pad(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sine;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Triangle;
@@ -2402,6 +2636,7 @@ impl Synthesizer {
         self.filter.cutoff = 4000.0;
         self.filter.resonance = 0.6;
         self.filter.envelope_amount = 0.25;
+        self.filter.keyboard_tracking = 0.45;
         self.filter_envelope.attack = 2.0;
         self.filter_envelope.decay = 1.2;
         self.filter_envelope.sustain = 0.8;
@@ -2414,25 +2649,17 @@ impl Synthesizer {
         self.lfo.amplitude = 0.1;
         self.lfo.target_filter = true;
         self.modulation_matrix.lfo_to_cutoff = 0.1;
+        self.modulation_matrix.velocity_to_amplitude = 0.2;
         self.effects.reverb_amount = 0.8;
         self.effects.reverb_size = 0.9;
-        self.save_preset("Choir Pad")
+        self.effects.chorus_mix = 0.5;
+        self.effects.chorus_rate = 0.25;
+        self.effects.chorus_depth = 0.6;
+        self.save_preset_with_category("Choir Pad", "Pad")
     }
 
     fn create_glass_pad(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sine;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sine;
@@ -2443,6 +2670,7 @@ impl Synthesizer {
         self.filter.cutoff = 8000.0;
         self.filter.resonance = 1.8;
         self.filter.envelope_amount = 0.4;
+        self.filter.keyboard_tracking = 0.6;
         self.filter_envelope.attack = 1.8;
         self.filter_envelope.decay = 1.5;
         self.filter_envelope.sustain = 0.6;
@@ -2455,27 +2683,19 @@ impl Synthesizer {
         self.lfo.amplitude = 0.3;
         self.lfo.target_osc2_pitch = true;
         self.modulation_matrix.lfo_to_osc1_pitch = 0.2;
+        self.modulation_matrix.velocity_to_amplitude = 0.2;
         self.effects.reverb_amount = 0.9;
         self.effects.reverb_size = 1.0;
         self.effects.delay_amount = 0.3;
-        self.save_preset("Glass Pad")
+        self.effects.chorus_mix = 0.4;
+        self.effects.chorus_rate = 0.3;
+        self.effects.chorus_depth = 0.65;
+        self.save_preset_with_category("Glass Pad", "Pad")
     }
 
     // Brass & Wind
     fn create_brass_stab(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Square;
@@ -2486,6 +2706,7 @@ impl Synthesizer {
         self.filter.cutoff = 3000.0;
         self.filter.resonance = 2.2;
         self.filter.envelope_amount = 0.7;
+        self.filter.keyboard_tracking = 0.4;
         self.filter_envelope.attack = 0.05;
         self.filter_envelope.decay = 0.2;
         self.filter_envelope.sustain = 0.4;
@@ -2494,29 +2715,21 @@ impl Synthesizer {
         self.amp_envelope.decay = 0.1;
         self.amp_envelope.sustain = 0.8;
         self.amp_envelope.release = 0.2;
-        self.save_preset("Brass Stab")
+        self.modulation_matrix.velocity_to_cutoff = 0.6;
+        self.modulation_matrix.velocity_to_amplitude = 0.3;
+        self.poly_mod_filter_env_to_osc_a_freq = 0.12;
+        self.save_preset_with_category("Brass Stab", "Brass")
     }
 
     fn create_trumpet_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
         self.filter.cutoff = 4500.0;
         self.filter.resonance = 1.8;
         self.filter.envelope_amount = 0.5;
+        self.filter.keyboard_tracking = 0.5;
         self.filter_envelope.attack = 0.1;
         self.filter_envelope.decay = 0.4;
         self.filter_envelope.sustain = 0.7;
@@ -2527,25 +2740,17 @@ impl Synthesizer {
         self.amp_envelope.release = 0.8;
         self.lfo.frequency = 4.5;
         self.lfo.amplitude = 0.2;
+        self.lfo.sync = true;
         self.lfo.target_osc1_pitch = true;
         self.modulation_matrix.lfo_to_osc1_pitch = 0.15;
-        self.save_preset("Trumpet Lead")
+        self.modulation_matrix.velocity_to_cutoff = 0.55;
+        self.modulation_matrix.velocity_to_amplitude = 0.25;
+        self.poly_mod_filter_env_to_osc_a_freq = 0.08;
+        self.save_preset_with_category("Trumpet Lead", "Brass")
     }
 
     fn create_flute(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sine;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Triangle;
@@ -2557,6 +2762,7 @@ impl Synthesizer {
         self.filter.cutoff = 6000.0;
         self.filter.resonance = 0.8;
         self.filter.envelope_amount = 0.3;
+        self.filter.keyboard_tracking = 0.5;
         self.filter_envelope.attack = 0.15;
         self.filter_envelope.decay = 0.6;
         self.filter_envelope.sustain = 0.6;
@@ -2567,26 +2773,16 @@ impl Synthesizer {
         self.amp_envelope.release = 1.2;
         self.lfo.frequency = 0.8;
         self.lfo.amplitude = 0.1;
+        self.lfo.sync = true;
         self.lfo.target_amplitude = true;
         self.modulation_matrix.lfo_to_amplitude = 0.08;
+        self.modulation_matrix.velocity_to_amplitude = 0.25;
         self.effects.reverb_amount = 0.4;
-        self.save_preset("Flute")
+        self.save_preset_with_category("Flute", "Brass")
     }
 
     fn create_sax_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Triangle;
@@ -2598,6 +2794,7 @@ impl Synthesizer {
         self.filter.cutoff = 3500.0;
         self.filter.resonance = 2.5;
         self.filter.envelope_amount = 0.6;
+        self.filter.keyboard_tracking = 0.45;
         self.filter_envelope.attack = 0.12;
         self.filter_envelope.decay = 0.5;
         self.filter_envelope.sustain = 0.6;
@@ -2608,33 +2805,26 @@ impl Synthesizer {
         self.amp_envelope.release = 1.0;
         self.lfo.frequency = 3.0;
         self.lfo.amplitude = 0.25;
+        self.lfo.sync = true;
         self.lfo.target_osc1_pitch = true;
         self.modulation_matrix.lfo_to_osc1_pitch = 0.2;
+        self.modulation_matrix.velocity_to_cutoff = 0.5;
+        self.modulation_matrix.velocity_to_amplitude = 0.3;
         self.effects.reverb_amount = 0.3;
-        self.save_preset("Sax Lead")
+        self.poly_mod_filter_env_to_osc_a_freq = 0.06;
+        self.save_preset_with_category("Sax Lead", "Brass")
     }
 
     // Effects & Special
     fn create_arp_sequence(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Square;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
         self.filter.cutoff = 2500.0;
         self.filter.resonance = 1.5;
         self.filter.envelope_amount = 0.5;
+        self.filter.keyboard_tracking = 0.3;
         self.filter_envelope.attack = 0.001;
         self.filter_envelope.decay = 0.2;
         self.filter_envelope.sustain = 0.3;
@@ -2648,31 +2838,26 @@ impl Synthesizer {
         self.arpeggiator.pattern = ArpPattern::Up;
         self.arpeggiator.octaves = 2;
         self.arpeggiator.gate_length = 0.7;
+        self.modulation_matrix.velocity_to_cutoff = 0.35;
         self.effects.delay_amount = 0.3;
         self.effects.delay_time = 0.25;
-        self.save_preset("Arp Sequence")
+        self.save_preset_with_category("Arp Sequence", "FX")
     }
 
     fn create_sweep_fx(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 0.9;
+        self.osc2.detune = 7.0;
+        self.osc2_sync = true;
         self.mixer.osc1_level = 1.0;
+        self.mixer.osc2_level = 0.6;
         self.filter.cutoff = 200.0;
         self.filter.resonance = 3.5;
         self.filter.envelope_amount = 1.0;
+        self.filter.keyboard_tracking = 0.3;
         self.filter_envelope.attack = 3.0;
         self.filter_envelope.decay = 2.0;
         self.filter_envelope.sustain = 0.5;
@@ -2681,25 +2866,16 @@ impl Synthesizer {
         self.amp_envelope.decay = 1.0;
         self.amp_envelope.sustain = 0.8;
         self.amp_envelope.release = 3.0;
+        // Extreme Poly Mod: osc B drives osc A pitch over a wide range.
+        self.poly_mod_osc_b_to_osc_a_freq = 0.5;
+        self.poly_mod_osc_b_to_filter_cutoff = 0.4;
         self.effects.reverb_amount = 0.7;
         self.effects.delay_amount = 0.4;
-        self.save_preset("Sweep FX")
+        self.save_preset_with_category("Sweep FX", "FX")
     }
 
     fn create_noise_sweep(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.mixer.noise_level = 1.0;
         self.filter.cutoff = 100.0;
         self.filter.resonance = 2.0;
@@ -2712,24 +2888,17 @@ impl Synthesizer {
         self.amp_envelope.decay = 2.0;
         self.amp_envelope.sustain = 0.5;
         self.amp_envelope.release = 2.5;
+        self.lfo.frequency = 2.5;
+        self.lfo.amplitude = 0.6;
+        self.lfo.waveform = LfoWaveform::SampleAndHold;
+        self.lfo.target_filter = true;
+        self.modulation_matrix.lfo_to_cutoff = 0.4;
         self.effects.reverb_amount = 0.8;
-        self.save_preset("Noise Sweep")
+        self.save_preset_with_category("Noise Sweep", "FX")
     }
 
     fn create_zap_sound(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Square;
         self.osc1.amplitude = 1.0;
         self.mixer.osc1_level = 1.0;
@@ -2747,114 +2916,89 @@ impl Synthesizer {
         self.amp_envelope.release = 0.1;
         self.lfo.frequency = 15.0;
         self.lfo.amplitude = 1.0;
+        self.lfo.waveform = LfoWaveform::Square;
         self.lfo.target_osc1_pitch = true;
         self.modulation_matrix.lfo_to_osc1_pitch = 0.8;
+        // Poly Mod pushes the pitch-bent zap further.
+        self.poly_mod_osc_b_to_osc_a_freq = 0.3;
         self.effects.delay_amount = 0.4;
-        self.save_preset("Zap Sound")
+        self.save_preset_with_category("Zap Sound", "FX")
     }
 
     // Vintage Analog Presets
     fn create_jump_brass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
-        // Van Halen "Jump" brass stab - authentic vintage analog sound
+        self.reset_patch_to_defaults();
+        // Van Halen "Jump": the Prophet brass stab defined the '80s.
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Square;
         self.osc2.amplitude = 0.8;
-        self.osc2.detune = 7.0; // Classic vintage detune
+        self.osc2.detune = 7.0;
         self.mixer.osc1_level = 0.9;
         self.mixer.osc2_level = 0.7;
         self.filter.cutoff = 2800.0;
-        self.filter.resonance = 3.2; // High resonance for characteristic bite
-        self.filter.envelope_amount = 0.8; // Strong filter modulation
-        self.filter_envelope.attack = 0.01; // Sharp attack
-        self.filter_envelope.decay = 0.15; // Short decay
-        self.filter_envelope.sustain = 0.2; // Low sustain
-        self.filter_envelope.release = 0.1; // Quick release
-        self.amp_envelope.attack = 0.005; // Very sharp attack
+        self.filter.resonance = 3.2;
+        self.filter.envelope_amount = 0.8;
+        self.filter.keyboard_tracking = 0.45;
+        self.filter_envelope.attack = 0.01;
+        self.filter_envelope.decay = 0.15;
+        self.filter_envelope.sustain = 0.2;
+        self.filter_envelope.release = 0.1;
+        self.amp_envelope.attack = 0.005;
         self.amp_envelope.decay = 0.12;
         self.amp_envelope.sustain = 0.3;
         self.amp_envelope.release = 0.15;
-        self.modulation_matrix.velocity_to_cutoff = 0.6; // Velocity sensitive filter
-        self.save_preset("Jump Brass")
+        self.modulation_matrix.velocity_to_cutoff = 0.65;
+        self.modulation_matrix.velocity_to_amplitude = 0.3;
+        // Textbook Prophet brass Poly Mod: filter envelope adds FM bite to osc A.
+        self.poly_mod_filter_env_to_osc_a_freq = 0.15;
+        self.save_preset_with_category("Jump Brass", "Brass")
     }
 
     fn create_cars_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
-        // Gary Numan "Cars" sync lead - classic vintage analog sync
+        self.reset_patch_to_defaults();
+        // Gary Numan "Cars": Prophet + osc sync, defining new-wave sound.
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.9;
-        self.osc2.detune = 12.0; // Octave up for sync effect
-        self.osc2_sync = true; // Oscillator sync enabled
+        self.osc2.detune = 12.0;
+        self.osc2_sync = true;
         self.mixer.osc1_level = 0.8;
         self.mixer.osc2_level = 0.6;
-        self.filter.cutoff = 6500.0; // Bright filter
-        self.filter.resonance = 1.8; // Medium resonance
+        self.filter.cutoff = 6500.0;
+        self.filter.resonance = 1.8;
         self.filter.envelope_amount = 0.4;
-        self.filter_envelope.attack = 0.08; // Medium attack
+        self.filter.keyboard_tracking = 0.65;
+        self.filter_envelope.attack = 0.08;
         self.filter_envelope.decay = 0.6;
-        self.filter_envelope.sustain = 0.8; // Sustain-heavy envelope
+        self.filter_envelope.sustain = 0.8;
         self.filter_envelope.release = 1.2;
         self.amp_envelope.attack = 0.05;
         self.amp_envelope.decay = 0.3;
         self.amp_envelope.sustain = 0.9;
         self.amp_envelope.release = 1.0;
-        // Characteristic sync harmonics come from oscillator sync
-        self.save_preset("Cars Lead")
+        self.modulation_matrix.velocity_to_cutoff = 0.4;
+        self.modulation_matrix.velocity_to_amplitude = 0.2;
+        self.effects.chorus_mix = 0.3;
+        self.save_preset_with_category("Cars Lead", "Lead")
     }
 
     fn create_prophet_sync_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
-        // Classic vintage sync lead with LFO sweep
+        self.reset_patch_to_defaults();
+        // Prophet sync lead: sync + filter envelope sweep, hallmark of Prophet-5 programming.
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.8;
-        self.osc2.detune = 24.0; // Two octaves up
-        self.osc2_sync = true; // Both oscillators with sync
+        self.osc2.detune = 24.0;
+        self.osc2_sync = true;
         self.mixer.osc1_level = 0.7;
         self.mixer.osc2_level = 0.7;
         self.filter.cutoff = 4000.0;
         self.filter.resonance = 2.8;
         self.filter.envelope_amount = 0.5;
+        self.filter.keyboard_tracking = 0.7;
         self.filter_envelope.attack = 0.3;
         self.filter_envelope.decay = 0.8;
         self.filter_envelope.sustain = 0.7;
@@ -2863,135 +3007,304 @@ impl Synthesizer {
         self.amp_envelope.decay = 0.4;
         self.amp_envelope.sustain = 0.9;
         self.amp_envelope.release = 1.8;
-        // Filter sweep with LFO - classic vintage technique
-        self.lfo.frequency = 0.4; // Slow LFO
+        self.lfo.frequency = 0.4;
         self.lfo.amplitude = 0.6;
+        self.lfo.sync = true;
         self.lfo.target_filter = true;
         self.modulation_matrix.lfo_to_cutoff = 0.7;
-        self.save_preset("Vintage Sync Lead")
+        self.modulation_matrix.velocity_to_cutoff = 0.4;
+        // Iconic Prophet trick: filter envelope modulates osc A for the sync-sweep motion.
+        self.poly_mod_filter_env_to_osc_a_freq = 0.18;
+        self.effects.chorus_mix = 0.25;
+        self.save_preset_with_category("Vintage Sync Lead", "Lead")
     }
 
     fn create_new_order_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
-        // "Blue Monday" style bass - vintage analog classic
+        self.reset_patch_to_defaults();
+        // "Blue Monday" bass: tight punch, narrow pulse.
         self.osc1.wave_type = WaveType::Square;
         self.osc1.amplitude = 1.0;
-        self.osc1.pulse_width = 0.3; // Narrow pulse for characteristic sound
+        self.osc1.pulse_width = 0.3;
         self.mixer.osc1_level = 1.0;
-        self.filter.cutoff = 450.0; // Low filter cutoff
+        self.filter.cutoff = 450.0;
         self.filter.resonance = 2.2;
         self.filter.envelope_amount = 0.6;
-        self.filter_envelope.attack = 0.005; // Very quick attack
+        self.filter.keyboard_tracking = 0.2;
+        self.filter_envelope.attack = 0.005;
         self.filter_envelope.decay = 0.08;
         self.filter_envelope.sustain = 0.2;
-        self.filter_envelope.release = 0.06; // Quick release
-        self.amp_envelope.attack = 0.001; // Punchy attack
+        self.filter_envelope.release = 0.06;
+        self.amp_envelope.attack = 0.001;
         self.amp_envelope.decay = 0.05;
         self.amp_envelope.sustain = 0.8;
-        self.amp_envelope.release = 0.1; // Quick release for punchiness
-        self.modulation_matrix.velocity_to_cutoff = 0.4;
-        self.save_preset("New Order Bass")
+        self.amp_envelope.release = 0.1;
+        self.modulation_matrix.velocity_to_cutoff = 0.45;
+        self.modulation_matrix.velocity_to_amplitude = 0.2;
+        self.save_preset_with_category("New Order Bass", "Bass")
     }
 
     fn create_berlin_school(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
-        // Tangerine Dream style sequence - vintage analog Berlin School
+        self.reset_patch_to_defaults();
+        // Tangerine Dream style sequence: slow evolving filter, tight gate.
         self.osc1.wave_type = WaveType::Triangle;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.6;
-        self.osc2.detune = -5.0; // Slight detune
+        self.osc2.detune = -5.0;
         self.mixer.osc1_level = 0.8;
         self.mixer.osc2_level = 0.5;
-        self.filter.cutoff = 2200.0; // Moderate filter
+        self.filter.cutoff = 2200.0;
         self.filter.resonance = 1.5;
         self.filter.envelope_amount = 0.4;
+        self.filter.keyboard_tracking = 0.4;
         self.filter_envelope.attack = 0.08;
         self.filter_envelope.decay = 0.4;
         self.filter_envelope.sustain = 0.6;
         self.filter_envelope.release = 0.3;
-        self.amp_envelope.attack = 0.05; // Sequence-friendly envelope
+        self.amp_envelope.attack = 0.05;
         self.amp_envelope.decay = 0.2;
         self.amp_envelope.sustain = 0.7;
         self.amp_envelope.release = 0.4;
-        // Slow LFO modulation - typical of Berlin School
-        self.lfo.frequency = 0.25; // Very slow
+        self.lfo.frequency = 0.25;
         self.lfo.amplitude = 0.4;
         self.lfo.target_filter = true;
         self.modulation_matrix.lfo_to_cutoff = 0.3;
-        self.effects.delay_amount = 0.2; // Subtle delay
-        self.effects.delay_time = 0.375; // Dotted eighth note
-        self.save_preset("Berlin School")
+        self.modulation_matrix.velocity_to_amplitude = 0.2;
+        self.effects.delay_amount = 0.2;
+        self.effects.delay_time = 0.375;
+        self.effects.chorus_mix = 0.3;
+        self.save_preset_with_category("Berlin School", "Sequence")
     }
 
     fn create_prophet_strings(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Reset to defaults without infinite recursion
-        self.osc1 = OscillatorParams::default();
-        self.osc2 = OscillatorParams::default();
-        self.osc2_sync = false;
-        self.mixer = MixerParams::default();
-        self.filter = FilterParams::default();
-        self.filter_envelope = EnvelopeParams::default();
-        self.amp_envelope = EnvelopeParams::default();
-        self.lfo = LfoParams::default();
-        self.modulation_matrix = ModulationMatrix::default();
-        self.effects = EffectsParams::default();
-        self.arpeggiator = ArpeggiatorParams::default();
-        self.master_volume = 0.5;
-        // Lush vintage analog string ensemble
+        self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.8;
-        self.osc2.detune = 2.5; // Very slight detune for richness
+        self.osc2.detune = 2.5;
         self.mixer.osc1_level = 0.8;
         self.mixer.osc2_level = 0.7;
-        self.filter.cutoff = 4500.0; // Warm filter setting
+        self.filter.cutoff = 4500.0;
         self.filter.resonance = 1.2;
         self.filter.envelope_amount = 0.3;
-        self.filter_envelope.attack = 1.8; // Slow attack for strings
+        self.filter.keyboard_tracking = 0.55;
+        self.filter_envelope.attack = 1.8;
         self.filter_envelope.decay = 1.2;
         self.filter_envelope.sustain = 0.8;
         self.filter_envelope.release = 2.5;
-        self.amp_envelope.attack = 2.0; // Very slow attack
+        self.amp_envelope.attack = 2.0;
         self.amp_envelope.decay = 0.8;
-        self.amp_envelope.sustain = 0.95; // High sustain
-        self.amp_envelope.release = 3.0; // Long release
-        // Subtle chorus-like modulation
+        self.amp_envelope.sustain = 0.95;
+        self.amp_envelope.release = 3.0;
         self.lfo.frequency = 0.3;
         self.lfo.amplitude = 0.15;
         self.lfo.target_osc2_pitch = true;
         self.modulation_matrix.lfo_to_osc2_pitch = 0.1;
-        // Vintage analog string effects
-        self.effects.reverb_amount = 0.7; // Lush reverb
+        self.modulation_matrix.velocity_to_amplitude = 0.15;
+        self.effects.reverb_amount = 0.7;
         self.effects.reverb_size = 0.9;
-        self.effects.delay_amount = 0.15; // Subtle delay for depth
+        self.effects.delay_amount = 0.15;
         self.effects.delay_time = 0.4;
-        self.save_preset("Vintage Strings")
+        self.effects.chorus_mix = 0.7;
+        self.effects.chorus_rate = 0.45;
+        self.effects.chorus_depth = 0.75;
+        self.save_preset_with_category("Vintage Strings", "Strings")
+    }
+
+    // ─── Iconic Prophet-5 additions ────────────────────────────────────────
+
+    /// Stevie Wonder "Lately": deep Prophet bass with pronounced filter envelope.
+    fn create_lately_bass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.reset_patch_to_defaults();
+        self.osc1.wave_type = WaveType::Sawtooth;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 0.9;
+        self.osc2.detune = -12.0;
+        self.mixer.osc1_level = 0.85;
+        self.mixer.osc2_level = 0.75;
+        self.filter.cutoff = 550.0;
+        self.filter.resonance = 2.0;
+        self.filter.envelope_amount = 0.75;
+        self.filter.keyboard_tracking = 0.15;
+        self.filter_envelope.attack = 0.005;
+        self.filter_envelope.decay = 0.4;
+        self.filter_envelope.sustain = 0.25;
+        self.filter_envelope.release = 0.25;
+        self.amp_envelope.attack = 0.005;
+        self.amp_envelope.decay = 0.2;
+        self.amp_envelope.sustain = 0.85;
+        self.amp_envelope.release = 0.35;
+        self.modulation_matrix.velocity_to_cutoff = 0.4;
+        self.modulation_matrix.velocity_to_amplitude = 0.2;
+        self.save_preset_with_category("Lately Bass", "Bass")
+    }
+
+    /// Bon Jovi "Runaway": Prophet brass with gentle Poly Mod animation.
+    fn create_runaway_brass(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.reset_patch_to_defaults();
+        self.osc1.wave_type = WaveType::Sawtooth;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 0.7;
+        self.osc2.detune = -7.0;
+        self.mixer.osc1_level = 0.9;
+        self.mixer.osc2_level = 0.6;
+        self.filter.cutoff = 2600.0;
+        self.filter.resonance = 2.4;
+        self.filter.envelope_amount = 0.85;
+        self.filter.keyboard_tracking = 0.5;
+        self.filter_envelope.attack = 0.02;
+        self.filter_envelope.decay = 0.35;
+        self.filter_envelope.sustain = 0.35;
+        self.filter_envelope.release = 0.3;
+        self.amp_envelope.attack = 0.01;
+        self.amp_envelope.decay = 0.2;
+        self.amp_envelope.sustain = 0.75;
+        self.amp_envelope.release = 0.3;
+        self.modulation_matrix.velocity_to_cutoff = 0.6;
+        self.modulation_matrix.velocity_to_amplitude = 0.3;
+        // Classic Prophet brass Poly Mod recipe: gentle osc B into osc A freq
+        // plus filter envelope into osc A pitch for the tell-tale wobble.
+        self.poly_mod_osc_b_to_osc_a_freq = 0.1;
+        self.poly_mod_filter_env_to_osc_a_freq = 0.1;
+        self.effects.chorus_mix = 0.15;
+        self.save_preset_with_category("Runaway Brass", "Brass")
+    }
+
+    /// Thriller-era sync lead: osc sync + sweeping filter envelope.
+    fn create_thriller_sync_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.reset_patch_to_defaults();
+        self.osc1.wave_type = WaveType::Sawtooth;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 1.0;
+        self.osc2.detune = 19.0; // Octave + fifth for an aggressive sync pitch.
+        self.osc2_sync = true;
+        self.mixer.osc1_level = 0.6;
+        self.mixer.osc2_level = 0.8;
+        self.filter.cutoff = 3200.0;
+        self.filter.resonance = 2.6;
+        self.filter.envelope_amount = 0.7;
+        self.filter.keyboard_tracking = 0.75;
+        self.filter_envelope.attack = 0.05;
+        self.filter_envelope.decay = 0.9;
+        self.filter_envelope.sustain = 0.55;
+        self.filter_envelope.release = 1.1;
+        self.amp_envelope.attack = 0.02;
+        self.amp_envelope.decay = 0.3;
+        self.amp_envelope.sustain = 0.85;
+        self.amp_envelope.release = 0.8;
+        self.lfo.frequency = 5.5;
+        self.lfo.amplitude = 0.2;
+        self.lfo.sync = true;
+        self.lfo.target_osc1_pitch = true;
+        self.modulation_matrix.lfo_to_osc1_pitch = 0.12;
+        self.modulation_matrix.velocity_to_cutoff = 0.55;
+        self.modulation_matrix.velocity_to_amplitude = 0.3;
+        // Filter envelope modulates osc A freq: sync pitch sweep that defines the lead.
+        self.poly_mod_filter_env_to_osc_a_freq = 0.22;
+        self.effects.chorus_mix = 0.25;
+        self.save_preset_with_category("Thriller Sync Lead", "Lead")
+    }
+
+    /// Metallic FM bell using Poly Mod osc B → osc A frequency at high depth.
+    fn create_poly_mod_bell(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.reset_patch_to_defaults();
+        self.osc1.wave_type = WaveType::Sine;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sine;
+        self.osc2.amplitude = 0.9;
+        self.osc2.detune = 14.0; // Inharmonic ratio → metallic timbre under FM.
+        self.mixer.osc1_level = 1.0;
+        self.mixer.osc2_level = 0.0; // Osc B is purely a modulator here.
+        self.filter.cutoff = 9000.0;
+        self.filter.resonance = 0.6;
+        self.filter.envelope_amount = 0.15;
+        self.filter.keyboard_tracking = 0.7;
+        self.filter_envelope.attack = 0.001;
+        self.filter_envelope.decay = 1.5;
+        self.filter_envelope.sustain = 0.0;
+        self.filter_envelope.release = 1.2;
+        self.amp_envelope.attack = 0.001;
+        self.amp_envelope.decay = 2.0;
+        self.amp_envelope.sustain = 0.0;
+        self.amp_envelope.release = 1.5;
+        self.modulation_matrix.velocity_to_cutoff = 0.3;
+        self.modulation_matrix.velocity_to_amplitude = 0.45; // Bells want dynamic strike response.
+        // The defining move: deep osc B → osc A FM, modulated by the filter envelope
+        // so the bright "strike" transient decays into a cleaner sine.
+        self.poly_mod_osc_b_to_osc_a_freq = 0.55;
+        self.poly_mod_filter_env_to_osc_a_freq = 0.3;
+        self.effects.reverb_amount = 0.7;
+        self.effects.reverb_size = 0.9;
+        self.save_preset_with_category("Poly Mod Bell", "FX")
+    }
+
+    /// "Init" Prophet-5: fat sawtooth with detune + chorus, the default starting point.
+    fn create_init_saw_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.reset_patch_to_defaults();
+        self.osc1.wave_type = WaveType::Sawtooth;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 1.0;
+        self.osc2.detune = 4.0;
+        self.mixer.osc1_level = 0.8;
+        self.mixer.osc2_level = 0.8;
+        self.filter.cutoff = 5500.0;
+        self.filter.resonance = 1.0;
+        self.filter.envelope_amount = 0.35;
+        self.filter.keyboard_tracking = 0.65;
+        self.filter_envelope.attack = 0.05;
+        self.filter_envelope.decay = 0.4;
+        self.filter_envelope.sustain = 0.7;
+        self.filter_envelope.release = 0.6;
+        self.amp_envelope.attack = 0.02;
+        self.amp_envelope.decay = 0.2;
+        self.amp_envelope.sustain = 0.9;
+        self.amp_envelope.release = 0.5;
+        self.modulation_matrix.velocity_to_cutoff = 0.35;
+        self.modulation_matrix.velocity_to_amplitude = 0.25;
+        self.effects.chorus_mix = 0.4;
+        self.effects.chorus_rate = 0.55;
+        self.effects.chorus_depth = 0.6;
+        self.save_preset_with_category("Init Saw Lead", "Lead")
+    }
+
+    /// Soft Prophet-5 pad: two gently detuned saws, heavy chorus and reverb.
+    fn create_soft_pad(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.reset_patch_to_defaults();
+        self.osc1.wave_type = WaveType::Sawtooth;
+        self.osc1.amplitude = 1.0;
+        self.osc2.wave_type = WaveType::Sawtooth;
+        self.osc2.amplitude = 0.9;
+        self.osc2.detune = 3.5;
+        self.mixer.osc1_level = 0.75;
+        self.mixer.osc2_level = 0.75;
+        self.filter.cutoff = 2600.0;
+        self.filter.resonance = 0.7;
+        self.filter.envelope_amount = 0.15;
+        self.filter.keyboard_tracking = 0.55;
+        self.filter_envelope.attack = 2.0;
+        self.filter_envelope.decay = 1.2;
+        self.filter_envelope.sustain = 0.75;
+        self.filter_envelope.release = 3.0;
+        self.amp_envelope.attack = 2.2;
+        self.amp_envelope.decay = 0.8;
+        self.amp_envelope.sustain = 0.9;
+        self.amp_envelope.release = 3.5;
+        self.lfo.frequency = 0.35;
+        self.lfo.amplitude = 0.15;
+        self.lfo.target_osc2_pitch = true;
+        self.modulation_matrix.lfo_to_osc2_pitch = 0.08;
+        self.modulation_matrix.velocity_to_amplitude = 0.15;
+        self.effects.reverb_amount = 0.7;
+        self.effects.reverb_size = 0.9;
+        self.effects.chorus_mix = 0.75;
+        self.effects.chorus_rate = 0.4;
+        self.effects.chorus_depth = 0.7;
+        self.save_preset_with_category("Prophet Soft Pad", "Pad")
     }
 
     /// Extract current parameters as a flat SynthParameters struct
@@ -3076,6 +3389,13 @@ impl Synthesizer {
             max_voices: self.max_polyphony as u8,
             arp_sync_to_midi: self.arp_sync_to_midi,
             lfo_delay: self.lfo_delay,
+            chorus_mix: self.effects.chorus_mix,
+            chorus_rate: self.effects.chorus_rate,
+            chorus_depth: self.effects.chorus_depth,
+            analog_component_tolerance: self.analog.component_tolerance,
+            analog_filter_drift: self.analog.filter_drift_amount,
+            analog_vca_bleed: self.analog.vca_bleed,
+            analog_noise_floor: self.analog.noise_floor,
         }
     }
 
@@ -3161,6 +3481,13 @@ impl Synthesizer {
         self.max_polyphony = params.max_voices as usize;
         self.arp_sync_to_midi = params.arp_sync_to_midi;
         self.lfo_delay = params.lfo_delay;
+        self.effects.chorus_mix = params.chorus_mix;
+        self.effects.chorus_rate = params.chorus_rate;
+        self.effects.chorus_depth = params.chorus_depth;
+        self.analog.component_tolerance = params.analog_component_tolerance;
+        self.analog.filter_drift_amount = params.analog_filter_drift;
+        self.analog.vca_bleed = params.analog_vca_bleed;
+        self.analog.noise_floor = params.analog_noise_floor;
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {
@@ -3382,5 +3709,1033 @@ mod tests {
             "New code should produce at least 50% of old code level, ratio={}",
             ratio
         );
+    }
+
+    // ─── P3 Analog Character ───────────────────────────────────────────────
+
+    #[test]
+    fn test_voice_tolerance_within_expected_window() {
+        // Sample 200 voices and verify the per-voice tolerance stays inside the
+        // documented ±2 % / ±3 % windows. Also verify there's actual variation
+        // (standard deviation > 0), otherwise the randomness is broken.
+        let mut cutoffs = Vec::with_capacity(200);
+        let mut resonances = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let v = Voice::new(60, 440.0, 1.0);
+            cutoffs.push(v.tolerance_cutoff_mul);
+            resonances.push(v.tolerance_res_mul);
+            assert!(
+                (0.98..=1.02).contains(&v.tolerance_cutoff_mul),
+                "cutoff tolerance out of ±2%: {}",
+                v.tolerance_cutoff_mul
+            );
+            assert!(
+                (0.97..=1.03).contains(&v.tolerance_res_mul),
+                "resonance tolerance out of ±3%: {}",
+                v.tolerance_res_mul
+            );
+        }
+        // At 200 samples drawn from a ±2 % window, stddev is ≈ 0.012.
+        // Anything ≪ 0.005 means the RNG is effectively constant — bug.
+        let mean_c: f32 = cutoffs.iter().sum::<f32>() / cutoffs.len() as f32;
+        let var_c: f32 = cutoffs.iter().map(|c| (c - mean_c).powi(2)).sum::<f32>()
+            / cutoffs.len() as f32;
+        assert!(var_c.sqrt() > 0.005, "cutoff tolerance stddev too small: {}", var_c.sqrt());
+    }
+
+    #[test]
+    fn test_voice_filter_drift_initial_state() {
+        for _ in 0..50 {
+            let v = Voice::new(60, 440.0, 1.0);
+            assert_eq!(v.filter_drift_value, 1.0);
+            assert!(
+                (0.97..=1.03).contains(&v.filter_drift_target),
+                "drift target out of ±3%: {}",
+                v.filter_drift_target
+            );
+            assert!(
+                (FILTER_DRIFT_MIN_PERIOD..=FILTER_DRIFT_MAX_PERIOD).contains(&v.filter_drift_timer),
+                "drift timer out of [{}, {}]: {}",
+                FILTER_DRIFT_MIN_PERIOD,
+                FILTER_DRIFT_MAX_PERIOD,
+                v.filter_drift_timer
+            );
+        }
+    }
+
+    #[test]
+    fn test_chorus_buffer_is_power_of_two() {
+        // Power-of-two is load-bearing: apply_chorus uses `& mask` wrap.
+        let synth = Synthesizer::new();
+        let len = synth.chorus_buffer.len();
+        assert!(
+            len.is_power_of_two(),
+            "chorus_buffer len must be power of two, got {}",
+            len
+        );
+        // 25 ms at 44.1 kHz is 1102.5 → next power of two is 2048.
+        assert!(len >= 1024, "chorus_buffer too small: {}", len);
+    }
+
+    #[test]
+    fn test_chorus_bypassed_is_transparent() {
+        // With mix = 0, the chorus must pass the dry signal through unchanged
+        // while still feeding its ring buffer (so a later enable doesn't click).
+        let mut synth = Synthesizer::new();
+        synth.effects.chorus_mix = 0.0;
+        let input_samples = [0.3_f32, -0.5, 0.1, 0.8, -0.2];
+        for &s in &input_samples {
+            let out = synth.apply_chorus(s);
+            assert_eq!(out, s, "chorus bypassed must not alter signal: in={} out={}", s, out);
+        }
+        // Ring buffer must still have advanced.
+        assert_eq!(synth.chorus_index, input_samples.len());
+    }
+
+    #[test]
+    fn test_chorus_active_modifies_signal() {
+        // With mix > 0 and a primed buffer, the wet tap must produce a different
+        // output than the dry input on a stationary non-zero signal.
+        let mut synth = Synthesizer::new();
+        synth.effects.chorus_mix = 0.8;
+        synth.effects.chorus_depth = 1.0;
+        // Prime the buffer with a ramp so the delayed taps read a value distinct
+        // from the current input.
+        for i in 0..2000 {
+            let s = ((i as f32) * 0.01).sin();
+            synth.apply_chorus(s);
+        }
+        let same_input = 0.5_f32;
+        let out = synth.apply_chorus(same_input);
+        assert!(
+            (out - same_input).abs() > 0.001,
+            "chorus with mix=0.8 should alter signal: in={} out={}",
+            same_input,
+            out
+        );
+    }
+
+    #[test]
+    fn test_noise_floor_zero_produces_silence_with_no_voices() {
+        // No active voices + noise_floor = 0 ⇒ absolute silence.
+        let mut synth = Synthesizer::new();
+        synth.analog.noise_floor = 0.0;
+        // Also disable VCA bleed (bleed*0 envelope doesn't emit because voice inactive).
+        let mut buffer = vec![0.0_f32; 512];
+        synth.process_block(&mut buffer);
+        let peak = buffer.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+        assert!(peak < 1e-6, "silence expected, got peak={}", peak);
+    }
+
+    #[test]
+    fn test_noise_floor_produces_audible_background() {
+        // No voices but noise_floor > 0 should put hiss on the master bus.
+        let mut synth = Synthesizer::new();
+        synth.analog.noise_floor = 0.005;
+        let mut buffer = vec![0.0_f32; 2048];
+        synth.process_block(&mut buffer);
+        let rms = (buffer.iter().map(|s| s * s).sum::<f32>() / buffer.len() as f32).sqrt();
+        assert!(rms > 1e-5, "noise floor should produce audible hiss, rms={}", rms);
+    }
+
+    #[test]
+    fn test_apply_preset_overwrites_chorus_from_preset() {
+        // Chorus is now part of the serialized preset format. apply_preset must
+        // replace the current chorus settings with those stored in the preset,
+        // instead of preserving the user's state as the legacy workaround did.
+        let mut synth = Synthesizer::new();
+        synth.effects.chorus_mix = 0.7;
+        synth.effects.chorus_rate = 1.5;
+        synth.effects.chorus_depth = 0.4;
+
+        let incoming_effects = EffectsParams {
+            chorus_mix: 0.15,
+            chorus_rate: 0.8,
+            chorus_depth: 0.9,
+            ..EffectsParams::default()
+        };
+
+        let preset = Preset {
+            name: "fake".into(),
+            category: "Other".into(),
+            osc1: OscillatorParams::default(),
+            osc2: OscillatorParams::default(),
+            osc2_sync: false,
+            mixer: MixerParams::default(),
+            filter: FilterParams::default(),
+            filter_envelope: EnvelopeParams::default(),
+            amp_envelope: EnvelopeParams::default(),
+            lfo: LfoParams::default(),
+            modulation_matrix: ModulationMatrix::default(),
+            effects: incoming_effects,
+            master_volume: 0.5,
+            poly_mod_filter_env_to_osc_a_freq: 0.0,
+            poly_mod_filter_env_to_osc_a_pw: 0.0,
+            poly_mod_osc_b_to_osc_a_freq: 0.0,
+            poly_mod_osc_b_to_osc_a_pw: 0.0,
+            poly_mod_osc_b_to_filter_cutoff: 0.0,
+        };
+        synth.apply_preset(preset);
+
+        assert_eq!(synth.effects.chorus_mix, 0.15);
+        assert_eq!(synth.effects.chorus_rate, 0.8);
+        assert_eq!(synth.effects.chorus_depth, 0.9);
+        assert_eq!(synth.effects.reverb_amount, 0.0);
+        assert_eq!(synth.master_volume, 0.5);
+    }
+
+    #[test]
+    fn test_apply_params_propagates_analog_character() {
+        let mut synth = Synthesizer::new();
+        let mut params = synth.to_synth_params();
+        params.chorus_mix = 0.42;
+        params.chorus_rate = 1.23;
+        params.chorus_depth = 0.77;
+        params.analog_component_tolerance = 0.6;
+        params.analog_filter_drift = 0.5;
+        params.analog_vca_bleed = 0.003;
+        params.analog_noise_floor = 0.001;
+        synth.apply_params(&params);
+        assert_eq!(synth.effects.chorus_mix, 0.42);
+        assert_eq!(synth.effects.chorus_rate, 1.23);
+        assert_eq!(synth.effects.chorus_depth, 0.77);
+        assert_eq!(synth.analog.component_tolerance, 0.6);
+        assert_eq!(synth.analog.filter_drift_amount, 0.5);
+        assert_eq!(synth.analog.vca_bleed, 0.003);
+        assert_eq!(synth.analog.noise_floor, 0.001);
+    }
+
+    #[test]
+    fn test_analog_character_defaults_are_subtle_not_zero() {
+        // Defaults must be non-zero (the synth should sound "alive" out of the
+        // box) but also subtle enough to never be the dominant sound.
+        let a = AnalogCharacter::default();
+        assert!(a.component_tolerance > 0.0 && a.component_tolerance < 0.5);
+        assert!(a.filter_drift_amount > 0.0 && a.filter_drift_amount < 0.5);
+        assert!(a.vca_bleed > 0.0 && a.vca_bleed < 0.01);
+        assert!(a.noise_floor > 0.0 && a.noise_floor < 0.01);
+    }
+
+    // ─── Voice lifecycle (pre-existing features, previously untested) ──────
+
+    #[test]
+    fn test_note_off_triggers_release_state() {
+        let mut synth = Synthesizer::new();
+        synth.note_on(60, 100);
+        assert!(synth.voices.iter().any(|v| v.note == 60 && v.is_active));
+        synth.note_off(60);
+        let v = synth.voices.iter().find(|v| v.note == 60).unwrap();
+        assert_eq!(v.envelope_state, EnvelopeState::Release);
+    }
+
+    #[test]
+    fn test_all_notes_off_silences_every_voice() {
+        let mut synth = Synthesizer::new();
+        for note in [60, 64, 67, 72] {
+            synth.note_on(note, 100);
+        }
+        assert!(synth.voices.iter().filter(|v| v.is_active).count() >= 4);
+        synth.all_notes_off();
+        assert!(synth.voices.iter().all(|v| !v.is_active));
+        assert!(synth.note_stack.is_empty());
+        assert!(synth.held_notes.is_empty());
+        assert!(!synth.sustain_held);
+    }
+
+    #[test]
+    fn test_sustain_pedal_keeps_note_active_after_release() {
+        let mut synth = Synthesizer::new();
+        synth.sustain_pedal(true);
+        synth.note_on(60, 100);
+        synth.note_off(60);
+        // With sustain held, the voice must still be active and not yet releasing.
+        let v = synth.voices.iter().find(|v| v.note == 60).unwrap();
+        assert!(v.is_active);
+        assert!(v.is_sustained);
+        // Releasing the pedal must drop the sustained voices into Release.
+        synth.sustain_pedal(false);
+        let v = synth.voices.iter().find(|v| v.note == 60).unwrap();
+        assert_eq!(v.envelope_state, EnvelopeState::Release);
+    }
+
+    // ─── LFO waveform generation ───────────────────────────────────────────
+
+    #[test]
+    fn test_lfo_triangle_range_and_endpoints() {
+        // At phase=0.0 triangle = -1, at phase=0.5 triangle = +1, at phase=1.0 wraps to -1
+        let at_zero = Synthesizer::generate_lfo_waveform(LfoWaveform::Triangle, 0.0, 0.0);
+        let at_half = Synthesizer::generate_lfo_waveform(LfoWaveform::Triangle, 0.5, 0.0);
+        assert!((at_zero - (-1.0)).abs() < 0.01, "triangle at 0 should be -1, got {}", at_zero);
+        assert!((at_half - 1.0).abs() < 0.01, "triangle at 0.5 should be +1, got {}", at_half);
+        // All values must be in [-1, 1]
+        for i in 0..100 {
+            let v = Synthesizer::generate_lfo_waveform(LfoWaveform::Triangle, i as f32 / 100.0, 0.0);
+            assert!((-1.0..=1.0).contains(&v), "triangle out of range at phase {}: {}", i, v);
+        }
+    }
+
+    #[test]
+    fn test_lfo_square_only_two_values() {
+        for i in 0..100 {
+            let phase = i as f32 / 100.0;
+            let v = Synthesizer::generate_lfo_waveform(LfoWaveform::Square, phase, 0.0);
+            assert!(v == -1.0 || v == 1.0, "square must be ±1, got {} at phase {}", v, phase);
+        }
+        // First half is -1, second half is +1
+        assert_eq!(Synthesizer::generate_lfo_waveform(LfoWaveform::Square, 0.0, 0.0), -1.0);
+        assert_eq!(Synthesizer::generate_lfo_waveform(LfoWaveform::Square, 0.75, 0.0), 1.0);
+    }
+
+    #[test]
+    fn test_lfo_sawtooth_range_and_direction() {
+        let at_zero = Synthesizer::generate_lfo_waveform(LfoWaveform::Sawtooth, 0.0, 0.0);
+        let at_one = Synthesizer::generate_lfo_waveform(LfoWaveform::Sawtooth, 0.9999, 0.0);
+        // Rises from -1 to +1
+        assert!((at_zero - (-1.0)).abs() < 0.01, "saw at 0 should be ~-1, got {}", at_zero);
+        assert!(at_one > 0.9, "saw near 1.0 should be close to +1, got {}", at_one);
+        // Monotonically increasing within one period
+        let mut prev = f32::MIN;
+        for i in 0..100 {
+            let v = Synthesizer::generate_lfo_waveform(LfoWaveform::Sawtooth, i as f32 / 100.0, 0.0);
+            assert!(v >= prev, "sawtooth should be monotone increasing");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn test_lfo_reverse_sawtooth_range_and_direction() {
+        let at_zero = Synthesizer::generate_lfo_waveform(LfoWaveform::ReverseSawtooth, 0.0, 0.0);
+        let at_one = Synthesizer::generate_lfo_waveform(LfoWaveform::ReverseSawtooth, 0.9999, 0.0);
+        assert!((at_zero - 1.0).abs() < 0.01, "rsaw at 0 should be +1, got {}", at_zero);
+        assert!(at_one < -0.9, "rsaw near 1.0 should be close to -1, got {}", at_one);
+    }
+
+    #[test]
+    fn test_lfo_sample_and_hold_returns_held_value() {
+        let held = 0.42_f32;
+        for i in 0..10 {
+            let v = Synthesizer::generate_lfo_waveform(LfoWaveform::SampleAndHold, i as f32 / 10.0, held);
+            assert_eq!(v, held, "S&H must return the held value unchanged");
+        }
+    }
+
+    // ─── Oscillator waveform range ─────────────────────────────────────────
+
+    #[test]
+    fn test_oscillator_triangle_output_range() {
+        let dt = 440.0 / 44100.0;
+        for i in 0..100 {
+            let phase = i as f32 / 100.0;
+            let out = Synthesizer::generate_oscillator_static(WaveType::Triangle, phase, dt, 0.5);
+            assert!(
+                (-1.1..=1.1).contains(&out),
+                "triangle oscillator out of range at phase {}: {}",
+                phase,
+                out
+            );
+        }
+    }
+
+    #[test]
+    fn test_oscillator_square_output_range() {
+        let dt = 440.0 / 44100.0;
+        for i in 0..100 {
+            let phase = i as f32 / 100.0;
+            let out = Synthesizer::generate_oscillator_static(WaveType::Square, phase, dt, 0.5);
+            assert!(
+                (-1.5..=1.5).contains(&out),
+                "square oscillator out of range at phase {}: {}",
+                phase,
+                out
+            );
+        }
+    }
+
+    // ─── Velocity curves ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_velocity_curve_linear() {
+        // Curve 0: linear — v / 127
+        let out = Synthesizer::apply_velocity_curve(127, 0);
+        assert!((out - 1.0).abs() < 0.01);
+        let out = Synthesizer::apply_velocity_curve(0, 0);
+        assert_eq!(out, 0.0);
+        let out = Synthesizer::apply_velocity_curve(64, 0);
+        assert!((out - 64.0 / 127.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_velocity_curve_soft() {
+        // Curve 1: sqrt — more sensitive at low velocities
+        let linear = Synthesizer::apply_velocity_curve(64, 0);
+        let soft = Synthesizer::apply_velocity_curve(64, 1);
+        assert!(soft > linear, "soft curve should boost low velocities: linear={} soft={}", linear, soft);
+        assert!((Synthesizer::apply_velocity_curve(127, 1) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_velocity_curve_hard() {
+        // Curve 2: squared — requires stronger playing
+        let linear = Synthesizer::apply_velocity_curve(64, 0);
+        let hard = Synthesizer::apply_velocity_curve(64, 2);
+        assert!(hard < linear, "hard curve should reduce mid velocities: linear={} hard={}", linear, hard);
+        assert!((Synthesizer::apply_velocity_curve(127, 2) - 1.0).abs() < 0.01);
+    }
+
+    // ─── Enum round-trip conversions ───────────────────────────────────────
+
+    #[test]
+    fn test_wave_type_roundtrip() {
+        for wt in [WaveType::Sine, WaveType::Square, WaveType::Triangle, WaveType::Sawtooth] {
+            let u = Synthesizer::wave_type_to_u8_pub(wt);
+            assert_eq!(Synthesizer::u8_to_wave_type_pub(u), wt);
+        }
+        // Out-of-range falls back to Sawtooth
+        assert_eq!(Synthesizer::u8_to_wave_type_pub(99), WaveType::Sawtooth);
+    }
+
+    #[test]
+    fn test_lfo_waveform_roundtrip() {
+        for wf in [
+            LfoWaveform::Triangle,
+            LfoWaveform::Square,
+            LfoWaveform::Sawtooth,
+            LfoWaveform::ReverseSawtooth,
+            LfoWaveform::SampleAndHold,
+        ] {
+            let u = Synthesizer::lfo_waveform_to_u8_pub(wf);
+            assert_eq!(Synthesizer::u8_to_lfo_waveform_pub(u), wf);
+        }
+        // Out-of-range falls back to Triangle
+        assert_eq!(Synthesizer::u8_to_lfo_waveform_pub(99), LfoWaveform::Triangle);
+    }
+
+    #[test]
+    fn test_arp_pattern_roundtrip() {
+        for p in [ArpPattern::Up, ArpPattern::Down, ArpPattern::UpDown, ArpPattern::Random] {
+            let u = Synthesizer::arp_pattern_to_u8_pub(p);
+            assert_eq!(Synthesizer::u8_to_arp_pattern_pub(u), p);
+        }
+        // Out-of-range falls back to Up
+        assert_eq!(Synthesizer::u8_to_arp_pattern_pub(99), ArpPattern::Up);
+    }
+
+    // ─── Voice modes ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_mono_mode_single_voice() {
+        let mut synth = Synthesizer::new();
+        synth.voice_mode = VoiceMode::Mono;
+        synth.note_on(60, 100);
+        synth.note_on(64, 100);
+        synth.note_on(67, 100);
+        // Mono must never exceed one active voice
+        let active = synth.voices.iter().filter(|v| v.is_active).count();
+        assert_eq!(active, 1, "mono mode should have exactly 1 active voice, got {}", active);
+    }
+
+    #[test]
+    fn test_mono_mode_note_off_returns_to_previous() {
+        let mut synth = Synthesizer::new();
+        synth.voice_mode = VoiceMode::Mono;
+        synth.note_on(60, 100);
+        synth.note_on(64, 100); // 64 is now playing
+        synth.note_off(64);     // should return to 60
+        let active: Vec<_> = synth.voices.iter().filter(|v| v.is_active).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].note, 60, "mono should return to note 60 after releasing 64");
+    }
+
+    #[test]
+    fn test_unison_mode_all_voices_same_note() {
+        let mut synth = Synthesizer::new();
+        synth.voice_mode = VoiceMode::Unison;
+        synth.note_on(60, 100);
+        let active: Vec<_> = synth.voices.iter().filter(|v| v.is_active).collect();
+        assert!(active.len() > 1, "unison should activate multiple voices");
+        // All voices must have the same MIDI note number
+        for v in &active {
+            assert_eq!(v.note, 60, "unison voice has wrong note: {}", v.note);
+        }
+    }
+
+    #[test]
+    fn test_unison_mode_voices_have_different_frequencies() {
+        let mut synth = Synthesizer::new();
+        synth.voice_mode = VoiceMode::Unison;
+        synth.unison_spread = 20.0; // 20 cents spread
+        synth.note_on(60, 100);
+        let freqs: Vec<f32> = synth.voices.iter().filter(|v| v.is_active).map(|v| v.frequency).collect();
+        assert!(freqs.len() >= 2);
+        // At least some voices must differ in frequency
+        let all_same = freqs.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01);
+        assert!(!all_same, "unison voices should have different detuned frequencies");
+    }
+
+    // ─── Note priority in Mono mode ────────────────────────────────────────
+
+    #[test]
+    fn test_mono_note_priority_low() {
+        let mut synth = Synthesizer::new();
+        synth.voice_mode = VoiceMode::Mono;
+        synth.note_priority = NotePriority::Low;
+        synth.note_on(72, 100); // high note
+        synth.note_on(60, 100); // low note — should take priority
+        let active: Vec<_> = synth.voices.iter().filter(|v| v.is_active).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].note, 60, "Low priority should play the lowest note");
+    }
+
+    #[test]
+    fn test_mono_note_priority_high() {
+        let mut synth = Synthesizer::new();
+        synth.voice_mode = VoiceMode::Mono;
+        synth.note_priority = NotePriority::High;
+        synth.note_on(60, 100); // low note
+        synth.note_on(72, 100); // high note — should take priority
+        let active: Vec<_> = synth.voices.iter().filter(|v| v.is_active).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].note, 72, "High priority should play the highest note");
+    }
+
+    // ─── Polyphony limit & voice stealing ─────────────────────────────────
+
+    #[test]
+    fn test_polyphony_limit_not_exceeded() {
+        let mut synth = Synthesizer::new();
+        // Play more notes than max_polyphony
+        for note in 36..=(36 + synth.max_polyphony as u8 + 2) {
+            synth.note_on(note, 100);
+        }
+        let active = synth.voices.iter().filter(|v| v.is_active).count();
+        assert!(
+            active <= synth.max_polyphony,
+            "active voices {} must not exceed max_polyphony {}",
+            active,
+            synth.max_polyphony
+        );
+    }
+
+    // ─── Voice::release state machine ─────────────────────────────────────
+
+    #[test]
+    fn test_voice_release_from_idle_stays_idle() {
+        let mut voice = Voice::new(60, 440.0, 1.0);
+        voice.envelope_state = EnvelopeState::Idle;
+        voice.filter_envelope_state = EnvelopeState::Idle;
+        voice.release();
+        assert_eq!(voice.envelope_state, EnvelopeState::Idle);
+        assert_eq!(voice.filter_envelope_state, EnvelopeState::Idle);
+    }
+
+    #[test]
+    fn test_voice_release_resets_envelope_time() {
+        let mut voice = Voice::new(60, 440.0, 1.0);
+        voice.envelope_state = EnvelopeState::Sustain;
+        voice.envelope_time = 1.5; // simulated time in sustain
+        voice.release();
+        assert_eq!(voice.envelope_state, EnvelopeState::Release);
+        assert_eq!(voice.envelope_time, 0.0, "release should reset envelope_time to 0");
+    }
+
+    #[test]
+    fn test_voice_release_or_sustain_with_pedal_held() {
+        let mut voice = Voice::new(60, 440.0, 1.0);
+        voice.envelope_state = EnvelopeState::Sustain;
+        voice.release_or_sustain(true); // pedal held
+        assert!(voice.is_sustained);
+        assert_eq!(voice.envelope_state, EnvelopeState::Sustain, "should not release when pedal held");
+    }
+
+    #[test]
+    fn test_voice_release_or_sustain_without_pedal_releases() {
+        let mut voice = Voice::new(60, 440.0, 1.0);
+        voice.envelope_state = EnvelopeState::Sustain;
+        voice.release_or_sustain(false);
+        assert_eq!(voice.envelope_state, EnvelopeState::Release);
+        assert!(!voice.is_sustained);
+    }
+
+    // ─── Pitch bend ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pitch_bend_affects_audio_output() {
+        // With pitch_bend = 0 and pitch_bend = 1 the audio must differ.
+        let mut synth_no_bend = Synthesizer::new();
+        synth_no_bend.note_on(60, 100);
+        synth_no_bend.pitch_bend = 0.0;
+        let mut buf_no_bend = vec![0.0f32; 256];
+        synth_no_bend.process_block(&mut buf_no_bend);
+
+        let mut synth_bent = Synthesizer::new();
+        synth_bent.note_on(60, 100);
+        synth_bent.pitch_bend = 1.0; // full bend up
+        let mut buf_bent = vec![0.0f32; 256];
+        synth_bent.process_block(&mut buf_bent);
+
+        let diff: f32 = buf_no_bend.iter().zip(&buf_bent).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 0.001, "pitch bend should alter audio output, diff={}", diff);
+    }
+
+    // ─── MIDI clock ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_midi_clock_tick_calculates_bpm() {
+        let mut synth = Synthesizer::new();
+        synth.arp_sync_to_midi = true;
+        synth.midi_clock_running = true;
+        // 120 BPM = 0.5 s per quarter note → dt per tick = 0.5 / 24 ≈ 0.020833 s
+        let dt = 0.5_f32 / 24.0;
+        for _ in 0..24 {
+            synth.midi_clock_tick(dt);
+        }
+        assert!(
+            (synth.midi_clock_bpm - 120.0).abs() < 1.0,
+            "MIDI clock should compute ~120 BPM, got {}",
+            synth.midi_clock_bpm
+        );
+    }
+
+    #[test]
+    fn test_midi_clock_tick_noop_when_disabled() {
+        let mut synth = Synthesizer::new();
+        synth.arp_sync_to_midi = false;
+        synth.midi_clock_running = false;
+        let initial_bpm = synth.midi_clock_bpm;
+        for _ in 0..24 {
+            synth.midi_clock_tick(0.02);
+        }
+        assert_eq!(synth.midi_clock_bpm, initial_bpm, "disabled clock should not update BPM");
+    }
+
+    // ─── Arpeggiator in Poly mode ──────────────────────────────────────────
+
+    #[test]
+    fn test_arp_mode_accumulates_held_notes() {
+        let mut synth = Synthesizer::new();
+        synth.arpeggiator.enabled = true;
+        synth.note_on(60, 100);
+        synth.note_on(64, 100);
+        synth.note_on(67, 100);
+        assert_eq!(synth.held_notes.len(), 3, "arpeggiator should collect 3 held notes");
+        assert!(synth.held_notes.contains(&60));
+        assert!(synth.held_notes.contains(&64));
+        assert!(synth.held_notes.contains(&67));
+    }
+
+    #[test]
+    fn test_arp_note_off_removes_from_held() {
+        let mut synth = Synthesizer::new();
+        synth.arpeggiator.enabled = true;
+        synth.note_on(60, 100);
+        synth.note_on(64, 100);
+        synth.note_off(60);
+        assert!(!synth.held_notes.contains(&60), "note_off should remove note from held_notes");
+        assert!(synth.held_notes.contains(&64));
+    }
+
+    // ─── Semitones to ratio ────────────────────────────────────────────────
+
+    #[test]
+    fn test_semitones_to_ratio_octave() {
+        // 12 semitones = 2× frequency
+        let ratio = Synthesizer::semitones_to_ratio(12.0);
+        assert!((ratio - 2.0).abs() < 0.001, "12 semitones should give ratio 2.0, got {}", ratio);
+    }
+
+    #[test]
+    fn test_semitones_to_ratio_zero() {
+        let ratio = Synthesizer::semitones_to_ratio(0.0);
+        assert!((ratio - 1.0).abs() < 0.001, "0 semitones should give ratio 1.0, got {}", ratio);
+    }
+
+    #[test]
+    fn test_semitones_to_ratio_negative() {
+        let ratio = Synthesizer::semitones_to_ratio(-12.0);
+        assert!((ratio - 0.5).abs() < 0.001, "-12 semitones should give ratio 0.5, got {}", ratio);
+    }
+
+    // ─── fast_tanh ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fast_tanh_zero() {
+        assert_eq!(Synthesizer::fast_tanh(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_fast_tanh_clamps_beyond_three() {
+        // The Padé approximant's domain is |x| ≤ 3; outside it hard-clamps to ±1.
+        assert_eq!(Synthesizer::fast_tanh(3.1), 1.0, "fast_tanh(3.1) must be 1.0");
+        assert_eq!(Synthesizer::fast_tanh(10.0), 1.0, "fast_tanh(10.0) must be 1.0");
+        assert_eq!(Synthesizer::fast_tanh(-3.1), -1.0, "fast_tanh(-3.1) must be -1.0");
+        assert_eq!(Synthesizer::fast_tanh(-10.0), -1.0, "fast_tanh(-10.0) must be -1.0");
+    }
+
+    #[test]
+    fn test_fast_tanh_is_odd_function() {
+        // tanh is an odd function: f(-x) = -f(x).
+        // Any deviation indicates a broken symmetry in the approximant.
+        for i in 1..=29 {
+            let x = i as f32 * 0.1; // 0.1 .. 2.9 — all within the Padé domain
+            let pos = Synthesizer::fast_tanh(x);
+            let neg = Synthesizer::fast_tanh(-x);
+            assert!(
+                (pos + neg).abs() < 1e-6,
+                "fast_tanh not symmetric at x={:.1}: f(x)={} f(-x)={}",
+                x, pos, neg
+            );
+        }
+    }
+
+    #[test]
+    fn test_fast_tanh_approximates_identity_near_zero() {
+        // For very small |x| the filter is in its linear region: tanh(x) ≈ x.
+        // The Padé must stay within 0.1 % of x itself here, otherwise the filter
+        // would color quiet signals with unwanted harmonic distortion.
+        for i in -5..=5 {
+            let x = i as f32 * 0.01; // -0.05 .. 0.05, step 0.01
+            let approx = Synthesizer::fast_tanh(x);
+            if x != 0.0 {
+                let relative_error = (approx - x).abs() / x.abs();
+                assert!(
+                    relative_error < 0.001,
+                    "fast_tanh deviates from identity at x={:.2}: approx={:.6} rel_err={:.4}",
+                    x, approx, relative_error
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_fast_tanh_is_monotone_increasing() {
+        // The saturation function must never decrease — a non-monotone tanh would introduce
+        // aliasing artifacts and invert the filter's feedback at some amplitudes.
+        let mut prev = f32::MIN;
+        for i in -30..=30 {
+            let x = i as f32 * 0.1;
+            let v = Synthesizer::fast_tanh(x);
+            assert!(v >= prev, "fast_tanh not monotone at x={:.1}: prev={} current={}", x, prev, v);
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn test_fast_tanh_bounded() {
+        // Output must always be in [-1, 1] — the filter relies on this to prevent feedback runaway.
+        for i in -100..=100 {
+            let x = i as f32 * 0.1;
+            let v = Synthesizer::fast_tanh(x);
+            assert!((-1.0..=1.0).contains(&v), "fast_tanh out of bounds at x={}: {}", x, v);
+        }
+    }
+
+    // ─── Moog ladder filter ────────────────────────────────────────────────
+
+    #[test]
+    fn test_ladder_filter_attenuates_above_cutoff() {
+        // Feed a 5 kHz sine into the filter with low (200 Hz) vs wide-open (18 kHz) cutoff.
+        // A 24 dB/octave filter should attenuate 5 kHz by more than 20 dB (factor 10) at 200 Hz.
+        let sample_rate = 44100.0;
+        let freq = 5000.0_f32;
+        let resonance = 0.1;
+        let n_samples = 4096;
+        let skip = 512; // let transient settle
+
+        let mut state_low = LadderFilterState { stage1: 0.0, stage2: 0.0, stage3: 0.0, stage4: 0.0 };
+        let mut state_high = LadderFilterState { stage1: 0.0, stage2: 0.0, stage3: 0.0, stage4: 0.0 };
+        let mut energy_low = 0.0_f32;
+        let mut energy_high = 0.0_f32;
+
+        for i in 0..n_samples {
+            let input = (2.0 * PI * freq * i as f32 / sample_rate).sin();
+            let out_low = Synthesizer::apply_ladder_filter_static(input, &mut state_low, 200.0, resonance, sample_rate);
+            let out_high = Synthesizer::apply_ladder_filter_static(input, &mut state_high, 18000.0, resonance, sample_rate);
+            if i >= skip {
+                energy_low += out_low * out_low;
+                energy_high += out_high * out_high;
+            }
+        }
+
+        let rms_low = (energy_low / (n_samples - skip) as f32).sqrt();
+        let rms_high = (energy_high / (n_samples - skip) as f32).sqrt();
+        assert!(
+            rms_low < rms_high * 0.1,
+            "200 Hz cutoff should attenuate 5 kHz by >20 dB vs 18 kHz: rms_low={:.4} rms_high={:.4}",
+            rms_low, rms_high
+        );
+    }
+
+    #[test]
+    fn test_ladder_filter_passes_signal_at_high_cutoff() {
+        // With cutoff wide open, a low-amplitude signal (well inside the tanh linear region)
+        // at 440 Hz must pass through mostly unattenuated.
+        // Using amplitude 0.05 keeps all 4 tanh stages in their linear region (tanh(x)≈x for |x|≪1).
+        let sample_rate = 44100.0;
+        let mut state = LadderFilterState { stage1: 0.0, stage2: 0.0, stage3: 0.0, stage4: 0.0 };
+        let n_samples = 2048;
+        let skip = 256;
+        let amplitude = 0.05_f32;
+        let mut energy_in = 0.0_f32;
+        let mut energy_out = 0.0_f32;
+
+        for i in 0..n_samples {
+            let input = amplitude * (2.0 * PI * 440.0 * i as f32 / sample_rate).sin();
+            let output = Synthesizer::apply_ladder_filter_static(input, &mut state, 18000.0, 0.0, sample_rate);
+            if i >= skip {
+                energy_in += input * input;
+                energy_out += output * output;
+            }
+        }
+        let ratio = (energy_out / energy_in).sqrt();
+        assert!(
+            ratio > 0.85,
+            "with cutoff=18 kHz and small amplitude, 440 Hz should pass through (ratio={:.3})",
+            ratio
+        );
+    }
+
+    // ─── Voice stealing ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_voice_steal_prefers_release_state() {
+        let mut synth = Synthesizer::new();
+        for note in 36_u8..44 {
+            synth.note_on(note, 100);
+        }
+        // Manually put voice 3 into Release — it should score highest (100 pts base).
+        synth.voices[3].envelope_state = EnvelopeState::Release;
+        synth.voices[3].envelope_value = 0.5;
+        // All other voices stay in Attack (score ≈ 50 pts max from amplitude).
+        for i in [0, 1, 2, 4, 5, 6, 7] {
+            synth.voices[i].envelope_state = EnvelopeState::Attack;
+            synth.voices[i].envelope_value = 0.9; // nearly full — low "quiet" score
+        }
+
+        let stolen = synth.find_voice_to_steal();
+        assert_eq!(stolen, 3, "voice stealing should pick the Release-state voice (index 3), got {}", stolen);
+    }
+
+    #[test]
+    fn test_voice_steal_among_same_state_picks_quietest() {
+        let mut synth = Synthesizer::new();
+        for note in 36_u8..44 {
+            synth.note_on(note, 100);
+        }
+        // All voices in Sustain but with different amplitudes.
+        for i in 0..8 {
+            synth.voices[i].envelope_state = EnvelopeState::Sustain;
+            synth.voices[i].envelope_value = 0.9;
+            synth.voices[i].envelope_time = 0.0;
+        }
+        // Voice 5 is the quietest (value close to 0) — should be stolen.
+        synth.voices[5].envelope_value = 0.05;
+
+        let stolen = synth.find_voice_to_steal();
+        assert_eq!(stolen, 5, "among Sustain voices, the quietest (index 5) should be stolen, got {}", stolen);
+    }
+
+    // ─── Legato envelope non-retrigger ─────────────────────────────────────
+
+    #[test]
+    fn test_legato_second_note_does_not_retrigger_envelope() {
+        let mut synth = Synthesizer::new();
+        synth.voice_mode = VoiceMode::Legato;
+        // Instant attack so we leave Attack quickly.
+        synth.amp_envelope.attack = 0.001;
+        synth.filter_envelope.attack = 0.001;
+
+        synth.note_on(60, 100);
+        // Process enough samples to leave Attack and enter Decay/Sustain.
+        // 1024 samples @ 44100 Hz ≈ 23 ms >> 1 ms attack.
+        let mut buf = vec![0.0f32; 1024];
+        synth.process_block(&mut buf);
+
+        let state_before = synth.voices.iter()
+            .find(|v| v.is_active)
+            .map(|v| v.envelope_state)
+            .expect("must have an active voice after note_on");
+        assert_ne!(state_before, EnvelopeState::Attack,
+            "After 23ms with 1ms attack, should have left Attack (got {:?})", state_before);
+
+        // Second note — legato should NOT reset the envelope.
+        synth.note_on(64, 100);
+
+        let state_after = synth.voices.iter()
+            .find(|v| v.is_active)
+            .map(|v| v.envelope_state)
+            .expect("must still have an active voice");
+        assert_ne!(state_after, EnvelopeState::Attack,
+            "Legato second note must not retrigger envelope to Attack (got {:?})", state_after);
+        // Note must have changed to the new pitch.
+        assert!(synth.voices.iter().any(|v| v.is_active && v.note == 64),
+            "Active voice should now be playing note 64");
+    }
+
+    // ─── Preset JSON round-trip ────────────────────────────────────────────
+
+    #[test]
+    fn test_preset_json_legacy_45_lines_loads_with_defaults() {
+        // Synthetic legacy preset: exactly 45 lines (up to and including category).
+        // Must load successfully and fall back to defaults for the new extended fields.
+        let legacy = r#""LegacyPatch"
+"Sawtooth"
+1.0
+0.0
+0.5
+"Square"
+0.5
+-7.0
+0.5
+false
+0.8
+0.4
+0.0
+2200
+1.8
+0.3
+0.0
+0.01
+0.2
+0.6
+0.3
+0.01
+0.1
+0.8
+0.3
+3.5
+0.25
+false
+false
+false
+false
+0.0
+0.0
+0.0
+0.0
+0.0
+0.0
+0.0
+0.2
+0.5
+0.35
+0.25
+0.15
+0.7
+"Bass""#;
+
+        let synth = Synthesizer::new();
+        let restored = synth.json_to_preset(legacy).expect("legacy 45-line preset must load");
+
+        assert_eq!(restored.name, "LegacyPatch");
+        assert_eq!(restored.category, "Bass");
+        assert_eq!(restored.lfo.waveform, LfoWaveform::Triangle, "legacy defaults to Triangle");
+        assert!(!restored.lfo.sync, "legacy sync defaults to false");
+        // Chorus defaults come from EffectsParams::default() — chorus_mix=0 keeps legacy
+        // presets dry, matching the original pre-chorus behaviour.
+        let chorus_defaults = EffectsParams::default();
+        assert!((restored.effects.chorus_mix - chorus_defaults.chorus_mix).abs() < 1e-6);
+        assert!((restored.effects.chorus_rate - chorus_defaults.chorus_rate).abs() < 1e-6);
+        assert!((restored.effects.chorus_depth - chorus_defaults.chorus_depth).abs() < 1e-6);
+        assert_eq!(restored.poly_mod_filter_env_to_osc_a_freq, 0.0);
+        assert_eq!(restored.poly_mod_filter_env_to_osc_a_pw, 0.0);
+        assert_eq!(restored.poly_mod_osc_b_to_osc_a_freq, 0.0);
+        assert_eq!(restored.poly_mod_osc_b_to_osc_a_pw, 0.0);
+        assert_eq!(restored.poly_mod_osc_b_to_filter_cutoff, 0.0);
+    }
+
+    #[test]
+    fn test_preset_json_invalid_format_returns_error() {
+        let synth = Synthesizer::new();
+        let result = synth.json_to_preset("not a valid preset");
+        assert!(result.is_err(), "malformed JSON should return an error");
+    }
+
+    #[test]
+    fn test_preset_full_flow_snapshot_json_apply() {
+        // End-to-end flow: configure synth with every extended field set to a
+        // distinctive value, snapshot → serialize → parse → apply_preset, and
+        // verify the synthesizer's state is identical to the starting point.
+        let mut synth = Synthesizer::new();
+        synth.osc1.wave_type = WaveType::Triangle;
+        synth.osc2.wave_type = WaveType::Square;
+        synth.filter.cutoff = 2345.0;
+        synth.filter.resonance = 1.7;
+        synth.filter.keyboard_tracking = 0.65;
+        synth.amp_envelope.attack = 0.3;
+        synth.amp_envelope.sustain = 0.6;
+        synth.master_volume = 0.42;
+        synth.lfo.waveform = LfoWaveform::Square;
+        synth.lfo.sync = true;
+        synth.effects.chorus_mix = 0.42;
+        synth.effects.chorus_rate = 0.9;
+        synth.effects.chorus_depth = 0.55;
+        synth.modulation_matrix.velocity_to_cutoff = 0.48;
+        synth.modulation_matrix.velocity_to_amplitude = 0.27;
+        synth.poly_mod_filter_env_to_osc_a_freq = 0.18;
+        synth.poly_mod_filter_env_to_osc_a_pw = -0.11;
+        synth.poly_mod_osc_b_to_osc_a_freq = 0.33;
+        synth.poly_mod_osc_b_to_osc_a_pw = 0.07;
+        synth.poly_mod_osc_b_to_filter_cutoff = -0.42;
+
+        let preset = synth.snapshot_preset("FullFlow", "Test");
+        let json = synth.preset_to_json(&preset).expect("serialize");
+        let parsed = synth.json_to_preset(&json).expect("parse");
+        assert_eq!(parsed.name, "FullFlow");
+        assert_eq!(parsed.category, "Test");
+
+        // Wipe the synth to defaults, then apply — this proves apply_preset
+        // restores every field, not just the subset the user happened to tweak.
+        synth.reset_patch_to_defaults();
+        synth.apply_preset(parsed);
+
+        assert_eq!(synth.osc1.wave_type, WaveType::Triangle);
+        assert_eq!(synth.osc2.wave_type, WaveType::Square);
+        assert!((synth.filter.cutoff - 2345.0).abs() < 1.0);
+        assert!((synth.filter.resonance - 1.7).abs() < 0.01);
+        assert!((synth.filter.keyboard_tracking - 0.65).abs() < 0.01);
+        assert!((synth.amp_envelope.attack - 0.3).abs() < 0.01);
+        assert!((synth.amp_envelope.sustain - 0.6).abs() < 0.01);
+        assert!((synth.master_volume - 0.42).abs() < 0.01);
+        assert_eq!(synth.lfo.waveform, LfoWaveform::Square);
+        assert!(synth.lfo.sync);
+        assert!((synth.effects.chorus_mix - 0.42).abs() < 0.01);
+        assert!((synth.effects.chorus_rate - 0.9).abs() < 0.01);
+        assert!((synth.effects.chorus_depth - 0.55).abs() < 0.01);
+        assert!((synth.modulation_matrix.velocity_to_cutoff - 0.48).abs() < 0.01);
+        assert!((synth.modulation_matrix.velocity_to_amplitude - 0.27).abs() < 0.01);
+        assert!((synth.poly_mod_filter_env_to_osc_a_freq - 0.18).abs() < 0.01);
+        assert!((synth.poly_mod_filter_env_to_osc_a_pw - (-0.11)).abs() < 0.01);
+        assert!((synth.poly_mod_osc_b_to_osc_a_freq - 0.33).abs() < 0.01);
+        assert!((synth.poly_mod_osc_b_to_osc_a_pw - 0.07).abs() < 0.01);
+        assert!((synth.poly_mod_osc_b_to_filter_cutoff - (-0.42)).abs() < 0.01);
+    }
+
+    #[test]
+    #[ignore = "Regenerate presets/*.json with the extended format. Run manually: \
+                cargo test regenerate_preset_files -- --ignored --nocapture"]
+    fn regenerate_preset_files() {
+        let mut synth = Synthesizer::new();
+        synth
+            .force_create_all_classic_presets()
+            .expect("classic presets must write successfully");
+    }
+
+    #[test]
+    fn test_reset_patch_to_defaults_clears_poly_mod() {
+        // Regression: without this reset, a previous preset's Poly Mod values
+        // would bleed into the next preset builder, producing unintended
+        // cross-modulation on patches that should be clean.
+        let mut synth = Synthesizer::new();
+        synth.poly_mod_filter_env_to_osc_a_freq = 0.5;
+        synth.poly_mod_osc_b_to_filter_cutoff = -0.3;
+        synth.filter.keyboard_tracking = 0.8;
+        synth.modulation_matrix.velocity_to_cutoff = 0.6;
+
+        synth.reset_patch_to_defaults();
+
+        assert_eq!(synth.poly_mod_filter_env_to_osc_a_freq, 0.0);
+        assert_eq!(synth.poly_mod_osc_b_to_filter_cutoff, 0.0);
+        assert_eq!(synth.filter.keyboard_tracking, 0.0);
+        assert_eq!(synth.modulation_matrix.velocity_to_cutoff, 0.0);
     }
 }

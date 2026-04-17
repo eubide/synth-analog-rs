@@ -83,10 +83,12 @@ The synthesizer follows a modular architecture with clear separation of concerns
 
 ### Prophet-5 Style Preset System
 
-- Presets are stored as JSON files in `presets/` directory
-- Built-in classic presets recreate iconic Prophet-5 sounds: bass, lead, pad, brass, and FX
+- Presets are stored as JSON files in `presets/` directory (55-line line-based format)
+- Built-in classic presets recreate iconic Prophet-5 sounds across 7 categories: Bass, Lead, Pad, Strings, Brass, FX, Sequence
 - Custom presets can be saved and loaded through the vintage-styled GUI
-- 20 classic presets include authentic Prophet-5 inspired sounds
+- 32 built-in presets include authentic Prophet-5 inspired sounds (Lately Bass, Jump Brass, Thriller Sync Lead, Poly Mod Bell, etc.)
+- Preset format persists all patch parameters including `lfo.waveform`, `lfo.sync`, chorus, and the 5 Poly Mod routes; legacy 45-line presets load with safe defaults
+- `create_all_classic_presets` on startup skips regeneration if built-in files already exist (preserves user edits); GUI "create classic presets" button uses `force_create_all_classic_presets`
 
 ### MIDI Implementation
 
