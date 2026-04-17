@@ -11,7 +11,7 @@ Software de síntesis analógica inspirado en los sintetizadores clásicos de lo
 - **Advanced LFO** with 5 waveforms (Triangle, Square, Sawtooth, Reverse Saw, Sample & Hold)
 - **8-Voice Polyphony** with Poly / Mono / Legato / Unison voice modes
 - **Poly Mod** — filter envelope and Osc B as modulation sources (FM, PWM, filter sweep)
-- **Effects Section** with Freeverb reverb and tape-style delay
+- **Effects Section** with Freeverb reverb, tape-style delay, and quadrature-LFO chorus/ensemble
 
 ### Expressive Controls
 - **Velocity Curves** — Linear, Soft (√), and Hard (²) response shapes
@@ -103,7 +103,7 @@ The synthesizer automatically detects and connects to the first available MIDI i
 
 #### Loading Presets
 1. Use the preset dropdown in the GUI
-2. Select from 20 built-in classic sounds across 5 categories: Bass, Lead, Pad, Brass, FX
+2. Select from 32 built-in classic sounds across 7 categories: Bass, Lead, Pad, Strings, Brass, FX, Sequence
 
 #### Saving Custom Presets
 1. Adjust all parameters to your liking
