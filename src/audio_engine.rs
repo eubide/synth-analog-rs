@@ -173,10 +173,10 @@ impl AudioEngine {
                         *sample = 0.0;
                     }
 
-                    let ref_tone = lock_free_synth.get_params().reference_tone;
-                    if ref_tone {
+                    let cur_params = lock_free_synth.get_params();
+                    if cur_params.reference_tone {
                         let phase_inc = 440.0 / sample_rate as f32;
-                        let vol = lock_free_synth.get_params().master_volume;
+                        let vol = cur_params.master_volume;
                         for sample in mono_buffer.iter_mut().take(frames) {
                             *sample = (ref_tone_phase * 2.0 * std::f32::consts::PI).sin() * vol;
                             ref_tone_phase = (ref_tone_phase + phase_inc) % 1.0;
