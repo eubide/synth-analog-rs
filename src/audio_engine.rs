@@ -85,8 +85,9 @@ impl AudioEngine {
         // Pre-allocated stereo buffers
         let mut left_buffer = vec![0.0f32; 1024];
         let mut right_buffer = vec![0.0f32; 1024];
-        let mut over_left: Vec<f32> = Vec::with_capacity(4096);
-        let mut over_right: Vec<f32> = Vec::with_capacity(4096);
+        // 8192 = 2048 frames × 4× oversampling — covers the largest common CPAL buffer size.
+        let mut over_left: Vec<f32> = Vec::with_capacity(8192);
+        let mut over_right: Vec<f32> = Vec::with_capacity(8192);
 
         // MIDI clock timing: tracks time between ticks using Instant (acceptable overhead at 24ppq)
         let mut last_clock_instant = std::time::Instant::now();
