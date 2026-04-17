@@ -88,6 +88,9 @@ impl AudioEngine {
         // MIDI clock timing: tracks time between ticks using Instant (acceptable overhead at 24ppq)
         let mut last_clock_instant = std::time::Instant::now();
 
+        // A-440 reference tone phase accumulator (lives in audio thread only)
+        let mut ref_tone_phase = 0.0f32;
+
         let err_fn = |err| log::error!("Audio stream error: {}", err);
 
         let stream = device
@@ -170,7 +173,17 @@ impl AudioEngine {
                         *sample = 0.0;
                     }
 
-                    synthesizer.process_block(&mut mono_buffer[..frames]);
+                    let ref_tone = lock_free_synth.get_params().reference_tone;
+                    if ref_tone {
+                        let phase_inc = 440.0 / sample_rate as f32;
+                        let vol = lock_free_synth.get_params().master_volume;
+                        for sample in mono_buffer.iter_mut().take(frames) {
+                            *sample = (ref_tone_phase * 2.0 * std::f32::consts::PI).sin() * vol;
+                            ref_tone_phase = (ref_tone_phase + phase_inc) % 1.0;
+                        }
+                    } else {
+                        synthesizer.process_block(&mut mono_buffer[..frames]);
+                    }
 
                     // 4. Apply limiting
                     for sample in mono_buffer.iter_mut().take(frames) {

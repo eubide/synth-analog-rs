@@ -3396,6 +3396,8 @@ impl Synthesizer {
             analog_filter_drift: self.analog.filter_drift_amount,
             analog_vca_bleed: self.analog.vca_bleed,
             analog_noise_floor: self.analog.noise_floor,
+            // reference_tone is GUI-only state, not part of the synthesizer engine
+            reference_tone: false,
         }
     }
 

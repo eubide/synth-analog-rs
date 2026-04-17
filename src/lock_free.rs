@@ -188,6 +188,9 @@ pub struct SynthParameters {
     pub analog_filter_drift: f32,        // 0.0..=1.0 scale of slow thermal drift
     pub analog_vca_bleed: f32,           // 0.0..=0.01 leakage through closed VCA
     pub analog_noise_floor: f32,         // 0.0..=0.01 background hiss level
+
+    // A-440 Hz calibration tone: bypasses all synthesis, outputs a pure sine at 440 Hz
+    pub reference_tone: bool,
 }
 
 impl Default for SynthParameters {
@@ -313,6 +316,9 @@ impl Default for SynthParameters {
             analog_filter_drift: 0.3,
             analog_vca_bleed: 0.002,
             analog_noise_floor: 0.0008,
+
+            // A-440 reference tone — off by default
+            reference_tone: false,
         }
     }
 }

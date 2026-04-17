@@ -474,6 +474,21 @@ impl SynthApp {
             )
         })
         .on_hover_text("Channel pressure modulates loudness (press harder = louder)");
+
+        ui.add_space(4.0);
+        let btn_text = if self.params.reference_tone { "A-440 [ON]" } else { "A-440" };
+        let btn = egui::Button::new(btn_text);
+        let btn = if self.params.reference_tone {
+            btn.fill(egui::Color32::from_rgb(180, 80, 30))
+        } else {
+            btn
+        };
+        if ui.add(btn)
+            .on_hover_text("Emite La4 puro a 440 Hz para afinar — bypasea toda la sintesis")
+            .clicked()
+        {
+            self.params.reference_tone = !self.params.reference_tone;
+        }
     }
 
     fn draw_effects_panel(&mut self, ui: &mut egui::Ui) {
