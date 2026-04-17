@@ -1,4 +1,5 @@
 use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue};
+use crate::optimization::OPTIMIZATION_TABLES;
 use crate::synthesizer::Synthesizer;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, Stream, StreamConfig};
@@ -179,12 +180,13 @@ impl AudioEngine {
                         right_buffer[i] = 0.0;
                     }
 
-                    let cur_params = lock_free_synth.get_params();
-                    if cur_params.reference_tone {
+                    if params.reference_tone {
                         let phase_inc = 440.0 / sample_rate as f32;
-                        let vol = cur_params.master_volume;
+                        let vol = params.master_volume;
                         for i in 0..frames {
-                            let s = (ref_tone_phase * 2.0 * std::f32::consts::PI).sin() * vol;
+                            let s = OPTIMIZATION_TABLES
+                                .fast_sin(ref_tone_phase * 2.0 * std::f32::consts::PI)
+                                * vol;
                             left_buffer[i] = s;
                             right_buffer[i] = s;
                             ref_tone_phase = (ref_tone_phase + phase_inc) % 1.0;
@@ -214,19 +216,17 @@ impl AudioEngine {
                     lock_free_synth.peak_level.store(new_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
 
                     // 6. Convert stereo to multi-channel output
+                    // frames = data.len() / channels, so out_idx < data.len() is always true.
                     for frame_idx in 0..frames {
                         let l = left_buffer[frame_idx];
                         let r = right_buffer[frame_idx];
                         for ch in 0..channels {
-                            let out_idx = frame_idx * channels + ch;
-                            if out_idx < data.len() {
-                                let s = match ch {
-                                    0 => l,
-                                    1 => r,
-                                    _ => (l + r) * 0.5,
-                                };
-                                data[out_idx] = T::from_sample(s);
-                            }
+                            let s = match ch {
+                                0 => l,
+                                1 => r,
+                                _ => (l + r) * 0.5,
+                            };
+                            data[frame_idx * channels + ch] = T::from_sample(s);
                         }
                     }
                 },
