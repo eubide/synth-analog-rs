@@ -34,6 +34,57 @@ const CHORUS_VOICE2_RATE_RATIO: f32 = 1.13; // second LFO slightly detuned
 // ~100× slowdown of subnormal arithmetic in feedback paths.
 const DENORMAL_FLOOR: f32 = 1.0e-20;
 
+// Tuning ratios relative to C within an octave (index 0=C, 1=C#, ..., 11=B).
+// All modes are anchored so that MIDI 69 (A4) = 440 Hz exactly.
+
+// 5-limit Just Intonation
+const TUNING_JI: [f64; 12] = [
+    1.0,          // C  — 1/1
+    25.0/24.0,    // C# — 25/24
+    9.0/8.0,      // D  — 9/8
+    6.0/5.0,      // Eb — 6/5
+    5.0/4.0,      // E  — 5/4
+    4.0/3.0,      // F  — 4/3
+    45.0/32.0,    // F# — 45/32
+    3.0/2.0,      // G  — 3/2
+    8.0/5.0,      // Ab — 8/5
+    5.0/3.0,      // A  — 5/3
+    9.0/5.0,      // Bb — 9/5
+    15.0/8.0,     // B  — 15/8
+];
+
+// Pythagorean tuning (stacked pure fifths from C)
+const TUNING_PYTHAGOREAN: [f64; 12] = [
+    1.0,
+    2187.0/2048.0,
+    9.0/8.0,
+    32.0/27.0,
+    81.0/64.0,
+    4.0/3.0,
+    729.0/512.0,
+    3.0/2.0,
+    128.0/81.0,
+    27.0/16.0,
+    16.0/9.0,
+    243.0/128.0,
+];
+
+// Werckmeister III (1691) — historical well-temperament
+const TUNING_WERCKMEISTER3: [f64; 12] = [
+    1.0,          // C
+    256.0/243.0,  // C# — 256/243
+    64.0/54.0,    // D  — 64/54 (≈ 9/8 adjusted)
+    32.0/27.0,    // Eb — 32/27
+    81.0/64.0,    // E  — 81/64
+    4.0/3.0,      // F  — 4/3
+    1024.0/729.0, // F# — 1024/729
+    3.0/2.0,      // G  — 3/2
+    128.0/81.0,   // Ab — 128/81
+    27.0/16.0,    // A  — 27/16 (NOT 5/3 — Werckmeister A is a Pythagorean sixth)
+    16.0/9.0,     // Bb — 16/9
+    243.0/128.0,  // B  — 243/128
+];
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WaveType {
     Sine,
@@ -341,6 +392,8 @@ pub struct Synthesizer {
     pub master_noise_b2: f32,
     // Stereo spread: 0.0 = mono, 1.0 = full alternating L/R spread across voices.
     pub stereo_spread: f32,
+    // Tuning mode: 0=Equal Temperament, 1=Just Intonation, 2=Pythagorean, 3=Werckmeister III
+    pub tuning_mode: u8,
 }
 
 impl Default for OscillatorParams {
@@ -618,6 +671,7 @@ impl Synthesizer {
             master_noise_b1: 0.0,
             master_noise_b2: 0.0,
             stereo_spread: 0.0,
+            tuning_mode: 0,
         }
     }
 
@@ -652,7 +706,7 @@ impl Synthesizer {
     }
 
     fn trigger_note(&mut self, note: u8, velocity: u8) {
-        let frequency = Self::note_to_frequency(note);
+        let frequency = Self::note_to_frequency_tuned(note, self.tuning_mode);
         let velocity_normalized = Self::apply_velocity_curve(velocity, self.velocity_curve);
 
         // Reset LFO phase if keyboard sync is enabled
@@ -767,7 +821,7 @@ impl Synthesizer {
     /// Dispara o actualiza una única voz monofónica.
     /// Si `legato` es true, no retriggeriza los envelopes.
     fn trigger_mono(&mut self, note: u8, velocity: u8, legato: bool) {
-        let frequency = Self::note_to_frequency(note);
+        let frequency = Self::note_to_frequency_tuned(note, self.tuning_mode);
         let vel = Self::apply_velocity_curve(velocity, self.velocity_curve);
 
         if self.lfo.sync && !legato {
@@ -803,7 +857,7 @@ impl Synthesizer {
 
     /// Dispara todas las voces en modo unison con detune spread.
     fn trigger_unison(&mut self, note: u8, velocity: u8) {
-        let frequency = Self::note_to_frequency(note);
+        let frequency = Self::note_to_frequency_tuned(note, self.tuning_mode);
         let vel = Self::apply_velocity_curve(velocity, self.velocity_curve);
         let n_voices = self.max_polyphony.max(1);
         let spread = self.unison_spread;
@@ -917,6 +971,41 @@ impl Synthesizer {
 
     pub fn note_to_frequency(note: u8) -> f32 {
         OPTIMIZATION_TABLES.get_midi_frequency(note)
+    }
+
+    /// Return the frequency for a MIDI note in the requested tuning system.
+    /// mode: 0=Equal Temperament, 1=Just Intonation (5-limit),
+    ///       2=Pythagorean, 3=Werckmeister III.
+    /// All modes are anchored so that MIDI 69 (A4) = 440 Hz exactly.
+    pub fn note_to_frequency_tuned(note: u8, mode: u8) -> f32 {
+        if mode == 0 {
+            return Self::note_to_frequency(note);
+        }
+        let table: &[f64; 12] = match mode {
+            1 => &TUNING_JI,
+            2 => &TUNING_PYTHAGOREAN,
+            3 => &TUNING_WERCKMEISTER3,
+            _ => return Self::note_to_frequency(note),
+        };
+        // All tables express scale degree ratios relative to C (index 0=C, 9=A).
+        // Strategy: express each note as (octave_from_c4, pitch_class_from_c),
+        // then anchor the whole thing so that pitch_class 9 (A) in octave 5 (C4..B4
+        // is octave 4, so A4 is in octave 4 above C0) equals 440 Hz.
+        //
+        // MIDI 60 = C4. So octave_from_c4 = (note - 60) / 12 (integer div, euclid).
+        // pitch_class = note % 12.
+        // freq = C4_freq * 2^octave_from_c4 * table[pitch_class]
+        //
+        // We want A4 = 440 Hz. A4 = MIDI 69 => pitch_class 9, octave_from_c4 = 0
+        //   (since 69-60=9, 9 div_euclid 12 = 0, 9 rem_euclid 12 = 9).
+        // So freq_a4 = C4_freq * table[9] => C4_freq = 440 / table[9].
+        let semitones_from_c4 = note as i32 - 60;
+        let octave_from_c4 = semitones_from_c4.div_euclid(12);
+        let pitch_class = semitones_from_c4.rem_euclid(12) as usize;
+        // C4 is anchored via A4=440: C4_freq = 440 / table[9]
+        let c4_freq = 440.0f64 / table[9];
+        let freq = c4_freq * (2.0f64).powi(octave_from_c4) * table[pitch_class];
+        freq as f32
     }
 
     /// Set equal-power panning for a voice. pan ∈ [-1.0, 1.0], -1=full left, +1=full right.
@@ -3444,6 +3533,7 @@ impl Synthesizer {
             stereo_spread: self.stereo_spread,
             // reference_tone is GUI-only state, not part of the synthesizer engine
             reference_tone: false,
+            tuning_mode: self.tuning_mode,
         }
     }
 
@@ -3537,6 +3627,7 @@ impl Synthesizer {
         self.analog.vca_bleed = params.analog_vca_bleed;
         self.analog.noise_floor = params.analog_noise_floor;
         self.stereo_spread = params.stereo_spread;
+        self.tuning_mode = params.tuning_mode;
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {
@@ -3654,6 +3745,45 @@ mod tests {
         assert!((freq - 440.0).abs() < 0.01);
         let freq = Synthesizer::note_to_frequency(60);
         assert!((freq - 261.63).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_tuning_et_a4_is_440() {
+        let f = Synthesizer::note_to_frequency_tuned(69, 0);
+        assert!((f - 440.0).abs() < 0.01, "ET A4={}", f);
+    }
+
+    #[test]
+    fn test_tuning_ji_a4_is_440() {
+        let f = Synthesizer::note_to_frequency_tuned(69, 1);
+        assert!((f - 440.0).abs() < 0.01, "JI A4={}", f);
+    }
+
+    #[test]
+    fn test_tuning_pythagorean_a4_is_440() {
+        let f = Synthesizer::note_to_frequency_tuned(69, 2);
+        assert!((f - 440.0).abs() < 0.01, "Pythagorean A4={}", f);
+    }
+
+    #[test]
+    fn test_tuning_werckmeister_a4_is_440() {
+        let f = Synthesizer::note_to_frequency_tuned(69, 3);
+        assert!((f - 440.0).abs() < 0.01, "Werckmeister A4={}", f);
+    }
+
+    #[test]
+    fn test_tuning_octave_invariant() {
+        // A4 (69) and A3 (57) should be 2:1 ratio in all tuning modes
+        for mode in 0..4 {
+            let a4 = Synthesizer::note_to_frequency_tuned(69, mode);
+            let a3 = Synthesizer::note_to_frequency_tuned(57, mode);
+            assert!(
+                (a4 / a3 - 2.0).abs() < 0.001,
+                "mode {}: A4/A3 should be 2.0, got {}",
+                mode,
+                a4 / a3
+            );
+        }
     }
 
     #[test]

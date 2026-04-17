@@ -476,6 +476,18 @@ impl SynthApp {
         .on_hover_text("Channel pressure modulates loudness (press harder = louder)");
 
         ui.add_space(2.0);
+        labeled(ui, "tuning:", |ui| {
+            let modes = ["Equal Temp.", "Just Inton.", "Pythagorean", "Werckmeister"];
+            egui::ComboBox::from_id_salt("tuning_mode")
+                .selected_text(modes[self.params.tuning_mode as usize])
+                .show_ui(ui, |ui| {
+                    for (i, name) in modes.iter().enumerate() {
+                        ui.selectable_value(&mut self.params.tuning_mode, i as u8, *name);
+                    }
+                })
+                .response
+        })
+        .on_hover_text("Alternate tuning system — all anchored to A4 = 440 Hz");
         labeled(ui, "spread (st):", |ui| {
             ui.add(
                 egui::Slider::new(&mut self.params.stereo_spread, 0.0..=1.0)

@@ -194,6 +194,10 @@ pub struct SynthParameters {
 
     // A-440 Hz calibration tone: bypasses all synthesis, outputs a pure sine at 440 Hz
     pub reference_tone: bool,
+
+    // Tuning mode: 0=Equal Temperament, 1=Just Intonation (5-limit),
+    //              2=Pythagorean, 3=Werckmeister III
+    pub tuning_mode: u8,
 }
 
 impl Default for SynthParameters {
@@ -325,6 +329,9 @@ impl Default for SynthParameters {
 
             // A-440 reference tone — off by default
             reference_tone: false,
+
+            // Tuning mode — Equal Temperament by default
+            tuning_mode: 0,
         }
     }
 }
