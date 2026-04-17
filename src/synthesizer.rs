@@ -1327,7 +1327,7 @@ impl Synthesizer {
             right_acc *= voice_norm;
 
             // M/S decode: compute mono mid and stereo side signals.
-            let stereo_s = right_acc - left_acc;
+            let stereo_s = (right_acc - left_acc) * std::f32::consts::FRAC_1_SQRT_2;
             let mut mono_m = (left_acc + right_acc) * std::f32::consts::FRAC_1_SQRT_2;
 
             // Apply master volume with gentle compression; expression pedal scales on top
