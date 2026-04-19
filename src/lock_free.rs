@@ -146,8 +146,8 @@ pub struct SynthParameters {
     pub glide_time: f32, // 0.0 = off, >0 = segundos de deslizamiento
 
     // Pitch bend
-    pub pitch_bend: f32,       // -1.0..=1.0 (centro = 0.0)
-    pub pitch_bend_range: u8,  // semitones, typically 2 or 12
+    pub pitch_bend: f32,      // -1.0..=1.0 (centro = 0.0)
+    pub pitch_bend_range: u8, // semitones, typically 2 or 12
 
     // Aftertouch (channel pressure)
     pub aftertouch: f32,              // 0.0..=1.0
@@ -360,9 +360,16 @@ impl LockFreeSynth {
 /// instead so the audio callback stays allocation- and I/O-free.
 #[derive(Debug, Clone)]
 pub enum MidiEvent {
-    NoteOn { note: u8, velocity: u8 },
-    NoteOff { note: u8 },
-    SustainPedal { pressed: bool },
+    NoteOn {
+        note: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        note: u8,
+    },
+    SustainPedal {
+        pressed: bool,
+    },
     /// MIDI clock tick (0xF8) — 24 pulses per quarter note
     MidiClock,
     /// MIDI clock start (0xFA)

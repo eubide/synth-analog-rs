@@ -181,10 +181,16 @@ impl AudioEngine {
                     let block_peak = (0..frames).fold(0.0f32, |a, i| {
                         a.max(left_buffer[i].abs()).max(right_buffer[i].abs())
                     });
-                    let stored = f32::from_bits(lock_free_synth.peak_level.load(std::sync::atomic::Ordering::Relaxed));
+                    let stored = f32::from_bits(
+                        lock_free_synth
+                            .peak_level
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    );
                     let decayed = (stored - 0.003).max(0.0);
                     let new_peak = block_peak.max(decayed);
-                    lock_free_synth.peak_level.store(new_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                    lock_free_synth
+                        .peak_level
+                        .store(new_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
 
                     // 6. Convert stereo to multi-channel output
                     // frames = data.len() / channels, so out_idx < data.len() is always true.

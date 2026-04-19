@@ -32,7 +32,8 @@ impl MidiHandler {
         ui_events: Arc<UiEventQueue>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let message_history = Arc::new(Mutex::new(VecDeque::new()));
-        let learn_state: Arc<Mutex<MidiLearnState>> = Arc::new(Mutex::new(MidiLearnState::default()));
+        let learn_state: Arc<Mutex<MidiLearnState>> =
+            Arc::new(Mutex::new(MidiLearnState::default()));
         let learn_state_clone = learn_state.clone();
         let mut midi_in = MidiInput::new("Rust Synthesizer MIDI Input")?;
         midi_in.ignore(Ignore::None);
@@ -99,10 +100,22 @@ impl MidiHandler {
         // Mensajes de sistema en tiempo real (1 byte) — alta prioridad, no entran en history
         if !message.is_empty() {
             match message[0] {
-                0xF8 => { midi_events.push(MidiEvent::MidiClock); return; }
-                0xFA => { midi_events.push(MidiEvent::MidiClockStart); return; }
-                0xFB => { midi_events.push(MidiEvent::MidiClockContinue); return; }
-                0xFC => { midi_events.push(MidiEvent::MidiClockStop); return; }
+                0xF8 => {
+                    midi_events.push(MidiEvent::MidiClock);
+                    return;
+                }
+                0xFA => {
+                    midi_events.push(MidiEvent::MidiClockStart);
+                    return;
+                }
+                0xFB => {
+                    midi_events.push(MidiEvent::MidiClockContinue);
+                    return;
+                }
+                0xFC => {
+                    midi_events.push(MidiEvent::MidiClockStop);
+                    return;
+                }
                 _ => {}
             }
         }
@@ -182,7 +195,13 @@ impl MidiHandler {
                     )
                 }
                 0xB0 => {
-                    Self::handle_cc_message(lock_free_synth, midi_events, data1, data2, learn_state);
+                    Self::handle_cc_message(
+                        lock_free_synth,
+                        midi_events,
+                        data1,
+                        data2,
+                        learn_state,
+                    );
                     (
                         "CC".to_string(),
                         format!("CC: {} Val: {} Ch: {}", data1, data2, channel),
