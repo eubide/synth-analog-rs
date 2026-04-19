@@ -1,4 +1,5 @@
 mod keyboard;
+mod preset_browser;
 
 use crate::audio_engine::AudioEngine;
 use crate::lock_free::{
@@ -8,6 +9,7 @@ use crate::midi_handler::{CC_BINDINGS, MidiHandler};
 use crate::synthesizer::{ArpPattern, LfoWaveform, Synthesizer, WaveType};
 use eframe::egui;
 use keyboard::KeyboardController;
+use preset_browser::PresetBrowser;
 use std::sync::{Arc, Mutex};
 
 pub struct SynthApp {
@@ -17,19 +19,12 @@ pub struct SynthApp {
     _audio_engine: AudioEngine,
     _midi_handler: Option<MidiHandler>,
     keyboard: KeyboardController,
+    presets: PresetBrowser,
     show_midi_monitor: bool,
     show_midi_learn: bool,
     show_presets_window: bool,
     learn_state: Option<Arc<Mutex<crate::midi_handler::MidiLearnState>>>,
-    current_preset_name: String,
-    new_preset_name: String,
-    preset_category: String,
-    preset_category_filter: String,
-    preset_search: String,
-    show_preset_editor: bool,
     params: SynthParameters,
-    params_a: Option<SynthParameters>,
-    params_b: Option<SynthParameters>,
     peak_level: f32,
 }
 
@@ -174,19 +169,12 @@ impl SynthApp {
             _audio_engine: audio_engine,
             _midi_handler: midi_handler,
             keyboard: KeyboardController::new(),
+            presets: PresetBrowser::new(),
             show_midi_monitor: false,
             show_midi_learn: false,
             show_presets_window: false,
             learn_state,
-            current_preset_name: String::new(),
-            new_preset_name: String::new(),
-            preset_category: "Other".to_string(),
-            preset_category_filter: "All".to_string(),
-            preset_search: String::new(),
-            show_preset_editor: false,
             params,
-            params_a: None,
-            params_b: None,
             peak_level: 0.0,
         }
     }
@@ -206,7 +194,7 @@ impl SynthApp {
                     match temp.load_preset(name) {
                         Ok(_) => {
                             self.params = temp.to_synth_params();
-                            self.current_preset_name = name.clone();
+                            self.presets.set_current(name.clone());
                             log::info!("Program Change {}: loaded '{}'", program, name);
                         }
                         Err(e) => log::warn!(
@@ -754,258 +742,6 @@ impl SynthApp {
         self.params.max_voices = max_v as u8;
     }
 
-    /// All category names used by built-in and user presets. Order defines
-    /// how groups are rendered in the browser and listed in the save combo.
-    const PRESET_CATEGORIES: &'static [&'static str] = &[
-        "Bass", "Lead", "Pad", "Strings", "Brass", "FX", "Sequence", "Other",
-    ];
-
-    fn draw_preset_panel(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
-
-        // Header: current preset status — always visible at the top.
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("current:").size(11.0).strong());
-            if self.current_preset_name.is_empty() {
-                ui.colored_label(egui::Color32::GRAY, "(no preset loaded)");
-            } else {
-                ui.colored_label(
-                    egui::Color32::from_rgb(100, 220, 100),
-                    &self.current_preset_name,
-                );
-            }
-        });
-        ui.separator();
-
-        // ── Primary action: browse & select ───────────────────────────────
-        ui.horizontal(|ui| {
-            ui.label("search:");
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut self.preset_search)
-                    .hint_text("type to filter...")
-                    .desired_width(140.0),
-            );
-            if resp.changed() {
-                // Kept for future: debounce / live preview hooks.
-            }
-            if ui.small_button("x").on_hover_text("Clear search").clicked() {
-                self.preset_search.clear();
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("category:");
-            egui::ComboBox::from_id_salt("preset_cat_filter")
-                .selected_text(&self.preset_category_filter)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.preset_category_filter, "All".to_string(), "All");
-                    for cat in Self::PRESET_CATEGORIES {
-                        ui.selectable_value(
-                            &mut self.preset_category_filter,
-                            cat.to_string(),
-                            *cat,
-                        );
-                    }
-                });
-        });
-
-        ui.separator();
-
-        // Group presets by category after applying search + category filters.
-        let all_presets = Synthesizer::list_presets_with_categories();
-        let search_lower = self.preset_search.to_lowercase();
-        let filtered: Vec<(String, String)> = all_presets
-            .into_iter()
-            .filter(|(name, cat)| {
-                let cat_ok =
-                    self.preset_category_filter == "All" || cat == &self.preset_category_filter;
-                let name_ok =
-                    search_lower.is_empty() || name.to_lowercase().contains(&search_lower);
-                cat_ok && name_ok
-            })
-            .collect();
-
-        if filtered.is_empty() {
-            ui.label(
-                egui::RichText::new("no presets match")
-                    .color(egui::Color32::GRAY)
-                    .italics(),
-            );
-        } else {
-            egui::ScrollArea::vertical()
-                .max_height(260.0)
-                .show(ui, |ui| {
-                    let mut last_category: Option<&str> = None;
-                    for (preset, category) in &filtered {
-                        // Category header (only when category changes).
-                        if last_category != Some(category.as_str()) {
-                            if last_category.is_some() {
-                                ui.add_space(4.0);
-                            }
-                            ui.label(
-                                egui::RichText::new(category.to_uppercase())
-                                    .size(10.0)
-                                    .color(egui::Color32::from_rgb(180, 180, 80))
-                                    .strong(),
-                            );
-                            last_category = Some(category.as_str());
-                        }
-
-                        let is_current = preset == &self.current_preset_name;
-                        let button =
-                            egui::Button::new(preset).wrap_mode(egui::TextWrapMode::Truncate);
-                        let button = if is_current {
-                            button.fill(egui::Color32::from_rgb(100, 150, 100))
-                        } else {
-                            button
-                        };
-                        if ui.add_sized([ui.available_width(), 18.0], button).clicked() {
-                            let mut temp_synth = Synthesizer::new();
-                            if let Err(e) = temp_synth.load_preset(preset) {
-                                log::error!("Error loading preset {}: {}", preset, e);
-                            } else {
-                                self.params = temp_synth.to_synth_params();
-                                self.current_preset_name = preset.clone();
-                            }
-                        }
-                    }
-                });
-        }
-
-        ui.separator();
-
-        // ── Secondary: create / edit (collapsed by default) ───────────────
-        egui::CollapsingHeader::new("Create / Edit")
-            .id_salt("preset_editor_section")
-            .default_open(self.show_preset_editor)
-            .show(ui, |ui| {
-                // Save current patch as a new preset.
-                ui.horizontal(|ui| {
-                    ui.label("category:");
-                    egui::ComboBox::from_id_salt("preset_cat_save")
-                        .selected_text(&self.preset_category)
-                        .show_ui(ui, |ui| {
-                            for cat in Self::PRESET_CATEGORIES {
-                                ui.selectable_value(
-                                    &mut self.preset_category,
-                                    cat.to_string(),
-                                    *cat,
-                                );
-                            }
-                        });
-                });
-                ui.horizontal(|ui| {
-                    ui.label("name:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_preset_name)
-                            .hint_text("preset name...")
-                            .desired_width(130.0),
-                    );
-                    let save_enabled = !self.new_preset_name.is_empty();
-                    if ui
-                        .add_enabled(save_enabled, egui::Button::new("Save"))
-                        .clicked()
-                    {
-                        let mut temp_synth = Synthesizer::new();
-                        temp_synth.apply_params(&self.params);
-                        if let Err(e) = temp_synth
-                            .save_preset_with_category(&self.new_preset_name, &self.preset_category)
-                        {
-                            log::error!("Error saving preset: {}", e);
-                        } else {
-                            log::info!(
-                                "Preset '{}' [{}] saved!",
-                                self.new_preset_name,
-                                self.preset_category
-                            );
-                            self.current_preset_name = self.new_preset_name.clone();
-                            self.new_preset_name.clear();
-                        }
-                    }
-                });
-
-                ui.separator();
-
-                // A/B comparison.
-                ui.label(egui::RichText::new("A/B comparison").size(10.0).strong());
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("-> A")
-                        .on_hover_text("Store current patch to slot A")
-                        .clicked()
-                    {
-                        self.params_a = Some(self.params);
-                    }
-                    if ui
-                        .add_enabled(self.params_a.is_some(), egui::Button::new("A"))
-                        .on_hover_text("Load slot A")
-                        .clicked()
-                    {
-                        self.params = self.params_a.unwrap();
-                    }
-                    ui.separator();
-                    if ui
-                        .button("-> B")
-                        .on_hover_text("Store current patch to slot B")
-                        .clicked()
-                    {
-                        self.params_b = Some(self.params);
-                    }
-                    if ui
-                        .add_enabled(self.params_b.is_some(), egui::Button::new("B"))
-                        .on_hover_text("Load slot B")
-                        .clicked()
-                    {
-                        self.params = self.params_b.unwrap();
-                    }
-                });
-
-                ui.separator();
-
-                // Utility actions.
-                if ui.button("Random patch").clicked() {
-                    self.params = Self::random_params();
-                    self.current_preset_name.clear();
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("save default").clicked() {
-                        let mut temp_synth = Synthesizer::new();
-                        temp_synth.apply_params(&self.params);
-                        if let Err(e) = temp_synth.save_preset("default") {
-                            log::error!("Error saving default: {}", e);
-                        } else {
-                            log::info!("Default preset saved!");
-                            self.current_preset_name = "default".to_string();
-                        }
-                    }
-                    if ui.button("load default").clicked() {
-                        let mut temp_synth = Synthesizer::new();
-                        if let Err(e) = temp_synth.load_preset("default") {
-                            log::error!("Error loading default: {}", e);
-                        } else {
-                            log::info!("Default preset loaded!");
-                            self.params = temp_synth.to_synth_params();
-                            self.current_preset_name = "default".to_string();
-                        }
-                    }
-                });
-                if ui
-                    .button("create classic presets")
-                    .on_hover_text(
-                        "Force-regenerate the 32 built-in presets, overwriting existing files",
-                    )
-                    .clicked()
-                {
-                    let mut temp_synth = Synthesizer::new();
-                    if let Err(e) = temp_synth.force_create_all_classic_presets() {
-                        log::error!("Error creating classic presets: {}", e);
-                    } else {
-                        log::info!("All classic presets created successfully!");
-                    }
-                }
-            });
-    }
-
     /// Mini ADSR curve — 22px alto, actualiza en tiempo real con los sliders.
     fn draw_adsr_curve(
         &self,
@@ -1176,44 +912,6 @@ impl SynthApp {
         });
     }
 
-    fn random_params() -> SynthParameters {
-        // rand 0.10 removed thread_rng/gen_range; use rand::random::<f32>() directly.
-        // Scale a [0,1) value into [lo, hi].
-        let r = |lo: f32, hi: f32| lo + rand::random::<f32>() * (hi - lo);
-        let ri = |n: u8| (rand::random::<f32>() * (n as f32 + 1.0)) as u8;
-        SynthParameters {
-            osc1_waveform: ri(3),
-            osc2_waveform: ri(3),
-            osc1_detune: r(-12.0, 12.0),
-            osc2_detune: r(-12.0, 12.0),
-            osc1_pulse_width: r(0.1, 0.9),
-            osc2_pulse_width: r(0.1, 0.9),
-            mixer_osc1_level: r(0.5, 1.0),
-            mixer_osc2_level: r(0.0, 0.8),
-            noise_level: r(0.0, 0.1),
-            filter_cutoff: {
-                let log_min = 200.0_f32.ln();
-                let log_max = 12000.0_f32.ln();
-                (log_min + rand::random::<f32>() * (log_max - log_min)).exp()
-            },
-            filter_resonance: r(0.0, 3.0),
-            filter_envelope_amount: r(0.0, 0.8),
-            filter_keyboard_tracking: r(0.0, 1.0),
-            amp_attack: r(0.001, 0.5),
-            amp_decay: r(0.05, 1.0),
-            amp_sustain: r(0.3, 1.0),
-            amp_release: r(0.05, 1.5),
-            filter_attack: r(0.001, 0.5),
-            filter_decay: r(0.05, 1.0),
-            filter_sustain: r(0.3, 1.0),
-            filter_release: r(0.05, 1.5),
-            lfo_rate: r(0.1, 8.0),
-            lfo_amount: r(0.0, 0.5),
-            lfo_waveform: ri(4),
-            master_volume: 0.7,
-            ..SynthParameters::default()
-        }
-    }
 }
 
 impl eframe::App for SynthApp {
@@ -1242,11 +940,12 @@ impl eframe::App for SynthApp {
                 );
 
                 // Current preset name — clickable to open the preset manager.
-                let (preset_text, preset_color) = if self.current_preset_name.is_empty() {
+                let current_name = self.presets.current_name();
+                let (preset_text, preset_color) = if current_name.is_empty() {
                     ("no preset".to_string(), egui::Color32::from_gray(140))
                 } else {
                     (
-                        self.current_preset_name.clone(),
+                        current_name.to_string(),
                         egui::Color32::from_rgb(100, 220, 100),
                     )
                 };
@@ -1457,14 +1156,11 @@ impl eframe::App for SynthApp {
                         ui.add_space(4.0);
                         ui.group(|ui| {
                             ui.label(egui::RichText::new("PRESET").size(11.0).strong());
+                            let current = self.presets.current_name();
                             ui.label(
-                                egui::RichText::new(if self.current_preset_name.is_empty() {
-                                    "default"
-                                } else {
-                                    &self.current_preset_name
-                                })
-                                .size(10.0)
-                                .color(egui::Color32::from_rgb(100, 220, 100)),
+                                egui::RichText::new(if current.is_empty() { "default" } else { current })
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(100, 220, 100)),
                             );
                             if ui
                                 .small_button("manage...")
@@ -1513,7 +1209,7 @@ impl eframe::App for SynthApp {
                 .default_size([350.0, 400.0])
                 .open(&mut show_presets_window)
                 .show(ui.ctx(), |ui| {
-                    self.draw_preset_panel(ui);
+                    self.presets.draw(ui, &mut self.params);
                 });
             self.show_presets_window = show_presets_window;
         }
