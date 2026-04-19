@@ -1,10 +1,13 @@
+mod keyboard;
+
 use crate::audio_engine::AudioEngine;
 use crate::lock_free::{
-    LockFreeSynth, MidiEvent, MidiEventQueue, SynthParameters, UiEvent, UiEventQueue,
+    LockFreeSynth, MidiEventQueue, SynthParameters, UiEvent, UiEventQueue,
 };
 use crate::midi_handler::{CC_BINDINGS, MidiHandler};
 use crate::synthesizer::{ArpPattern, LfoWaveform, Synthesizer, WaveType};
 use eframe::egui;
+use keyboard::KeyboardController;
 use std::sync::{Arc, Mutex};
 
 pub struct SynthApp {
@@ -13,12 +16,7 @@ pub struct SynthApp {
     ui_events: Arc<UiEventQueue>,
     _audio_engine: AudioEngine,
     _midi_handler: Option<MidiHandler>,
-    /// Para cada tecla QWERTY pulsada, guarda (nota MIDI enviada, timestamp).
-    /// Almacenar la nota real previene stuck notes cuando la octava cambia
-    /// entre el press y el release (sin esto, el NoteOff se calcularía con
-    /// la octava actual y no liberaría la voz original).
-    last_key_times: std::collections::HashMap<egui::Key, (u8, std::time::Instant)>,
-    current_octave: i32,
+    keyboard: KeyboardController,
     show_midi_monitor: bool,
     show_midi_learn: bool,
     show_presets_window: bool,
@@ -175,8 +173,7 @@ impl SynthApp {
             ui_events,
             _audio_engine: audio_engine,
             _midi_handler: midi_handler,
-            last_key_times: std::collections::HashMap::new(),
-            current_octave: 3, // C3 octave by default
+            keyboard: KeyboardController::new(),
             show_midi_monitor: false,
             show_midi_learn: false,
             show_presets_window: false,
@@ -1121,7 +1118,7 @@ impl SynthApp {
             ui.vertical(|ui| {
                 ui.set_min_width(72.0);
                 ui.label(
-                    egui::RichText::new(format!("Oct: {}", self.current_octave))
+                    egui::RichText::new(format!("Oct: {}", self.keyboard.current_octave()))
                         .size(12.0)
                         .strong()
                         .color(legend_color),
@@ -1141,7 +1138,7 @@ impl SynthApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "  S   D     G   H   J      oct {}",
-                        self.current_octave
+                        self.keyboard.current_octave()
                     ))
                     .size(10.0)
                     .monospace()
@@ -1163,7 +1160,7 @@ impl SynthApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "  2   3     5   6   7        oct {}",
-                        self.current_octave + 1
+                        self.keyboard.current_octave() + 1
                     ))
                     .size(10.0)
                     .monospace()
@@ -1231,99 +1228,7 @@ impl eframe::App for SynthApp {
 
         self.drain_ui_events();
 
-        // PANIC on focus loss: si la ventana pierde el foco mientras hay teclas
-        // pulsadas, los key_released nunca llegan y las voces quedan enganchadas.
-        // Disparamos AllNotesOff defensivamente para limpiar el estado.
-        let focused = ctx.input(|i| i.focused);
-        if !focused && !self.last_key_times.is_empty() {
-            self.midi_events.push(MidiEvent::AllNotesOff);
-            self.last_key_times.clear();
-        }
-
-        // Handle keyboard input
-        ctx.input(|i| {
-            // Esc = PANIC universal
-            if i.key_pressed(egui::Key::Escape) {
-                self.midi_events.push(MidiEvent::AllNotesOff);
-                self.last_key_times.clear();
-            }
-
-            // Handle octave changes
-            if i.key_pressed(egui::Key::ArrowUp) {
-                self.current_octave = (self.current_octave + 1).clamp(0, 8);
-            }
-            if i.key_pressed(egui::Key::ArrowDown) {
-                self.current_octave = (self.current_octave - 1).clamp(0, 8);
-            }
-
-            // Lower octave: Z-M row (white keys) + S,D,G,H,J (black keys)
-            // Upper octave: Q-P row (white keys) + 2,3,5,6,7 (black keys)
-            let key_map = [
-                // Lower octave (Z row)
-                (egui::Key::Z, 0),  // C
-                (egui::Key::S, 1),  // C#
-                (egui::Key::X, 2),  // D
-                (egui::Key::D, 3),  // D#
-                (egui::Key::C, 4),  // E
-                (egui::Key::V, 5),  // F
-                (egui::Key::G, 6),  // F#
-                (egui::Key::B, 7),  // G
-                (egui::Key::H, 8),  // G#
-                (egui::Key::N, 9),  // A
-                (egui::Key::J, 10), // A#
-                (egui::Key::M, 11), // B
-                // Upper octave (Q row)
-                (egui::Key::Q, 12),    // C
-                (egui::Key::Num2, 13), // C#
-                (egui::Key::W, 14),    // D
-                (egui::Key::Num3, 15), // D#
-                (egui::Key::E, 16),    // E
-                (egui::Key::R, 17),    // F
-                (egui::Key::Num5, 18), // F#
-                (egui::Key::T, 19),    // G
-                (egui::Key::Num6, 20), // G#
-                (egui::Key::Y, 21),    // A
-                (egui::Key::Num7, 22), // A#
-                (egui::Key::U, 23),    // B
-                (egui::Key::I, 24),    // C (next)
-                (egui::Key::Num9, 25), // C# (next)
-                (egui::Key::O, 26),    // D (next)
-                (egui::Key::Num0, 27), // D# (next)
-                (egui::Key::P, 28),    // E (next)
-            ];
-
-            let now = std::time::Instant::now();
-
-            for (key, note_offset) in key_map {
-                if i.key_pressed(key) {
-                    let should_trigger = match self.last_key_times.get(&key) {
-                        // If more than 100ms since last press, it's intentional (not auto-repeat)
-                        Some((_, last_time)) => now.duration_since(*last_time).as_millis() > 100,
-                        // First time pressing this key
-                        None => true,
-                    };
-
-                    if should_trigger {
-                        let note = (self.current_octave * 12 + note_offset).clamp(0, 127) as u8;
-                        self.last_key_times.insert(key, (note, now));
-                        self.midi_events.push(MidiEvent::NoteOn {
-                            note,
-                            velocity: 100,
-                        });
-                    }
-                }
-
-                if i.key_released(key)
-                    && let Some((stored_note, _)) = self.last_key_times.remove(&key)
-                {
-                    // Usamos la nota grabada en el press, no la recalculamos:
-                    // si el usuario cambió de octava mientras mantenía la tecla,
-                    // recalcular enviaría NoteOff a una nota que nunca sonó.
-                    self.midi_events
-                        .push(MidiEvent::NoteOff { note: stored_note });
-                }
-            }
-        });
+        self.keyboard.process(ctx, &self.midi_events);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1438,8 +1343,7 @@ impl eframe::App for SynthApp {
                         .on_hover_text("Silence all stuck notes (Esc)")
                         .clicked()
                     {
-                        self.midi_events.push(MidiEvent::AllNotesOff);
-                        self.last_key_times.clear();
+                        self.keyboard.panic(&self.midi_events);
                     }
                 });
             });

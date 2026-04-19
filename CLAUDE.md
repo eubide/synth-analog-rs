@@ -52,10 +52,12 @@ cargo test -- --nocapture
 The synthesizer follows a modular architecture with clear separation of concerns:
 
 - **main.rs**: Application entry point, initializes audio engine, MIDI handler, and GUI
-- **synthesizer.rs**: Core synthesis engine with voice management, oscillators, filter, envelopes
+- **synthesizer.rs**: Core synthesis engine; contains `VoiceManager`, `Lfo`, `PolyMod`, `EffectsChain`, `ModulationBus`, and the root `Synthesizer` struct
 - **audio_engine.rs**: Real-time audio processing using CPAL (Cross-Platform Audio Library)
-- **midi_handler.rs**: MIDI input handling with CC mapping for all synth parameters
-- **gui.rs**: Immediate mode GUI using egui, styled as vintage analog synthesizer
+- **midi_handler.rs**: MIDI input handling; CC map defined as `CC_BINDINGS` constant table
+- **lock_free.rs**: Lock-free `TripleBuffer<SynthParameters>`, `LockFreeSynth`, `MidiEventQueue`, and `UiEventQueue` for thread-safe parameter exchange
+- **optimization.rs**: Pre-computed lookup tables (sine, MIDI frequencies) for performance
+- **gui/mod.rs**: Immediate mode GUI using egui, styled as vintage analog synthesizer
 
 ### Key Dependencies
 
@@ -67,7 +69,8 @@ The synthesizer follows a modular architecture with clear separation of concerns
 ### Audio Architecture
 
 - **Sample Rate**: Fixed at 44.1kHz
-- **Threading**: Lock-free audio processing with Arc<Mutex> for parameter updates
+- **Threading**: Lock-free `TripleBuffer<SynthParameters>` for GUI→audio parameter flow; `UiEventQueue` routes filesystem-touching events (preset load, SysEx) off the audio thread
+- **Oversampling**: Configurable 1x/2x/4x; 2x and 4x use a biquad Butterworth decimation filter
 - **Voice Management**: 8-voice polyphony with intelligent voice stealing
 - **Filter**: 24dB/octave Moog ladder filter based on Huovilainen model with self-oscillation
 
@@ -78,7 +81,10 @@ The synthesizer follows a modular architecture with clear separation of concerns
 - **Dual ADSR Envelopes**: Separate envelopes for amplitude and filter modulation (Prophet-5 style)
 - **Advanced LFO**: 5 waveforms including Sample & Hold, with keyboard sync capability
 - **Mixer Section**: Individual level controls for Osc A, Osc B, and noise generator
-- **Effects**: Reverb and delay processing
+- **Effects**: Reverb and delay processing with M/S (Mid/Side) stereo widening
+- **Stereo Spread**: Per-voice panning with equal-power law; spread assigned at note trigger
+- **Micro-tuning**: Selectable temperaments — Equal, Just Intonation, Pythagorean, Werckmeister III
+- **Reference Tone**: A-440 Hz sine generator for tuning (GUI-only state, not persisted in presets)
 - **Arpeggiator**: Multiple patterns inspired by classic sequencer synthesizers
 
 ### Prophet-5 Style Preset System
@@ -93,8 +99,8 @@ The synthesizer follows a modular architecture with clear separation of concerns
 ### MIDI Implementation
 
 - Auto-connects to first available MIDI input device
-- Full parameter control via MIDI CC messages (see `midi_handler.rs:129-199` for CC mappings)
-- Support for Note On/Off, Sustain Pedal (CC 64), and Modulation Wheel (CC 1)
+- Full parameter control via MIDI CC messages; mappings defined in `CC_BINDINGS` constant table (`midi_handler.rs:24`)
+- Support for Note On/Off, Program Change, SysEx patch dump/load, Sustain Pedal (CC 64), and Modulation Wheel (CC 1)
 
 ## Development Notes
 
@@ -109,10 +115,13 @@ The synthesizer follows a modular architecture with clear separation of concerns
 ```
 src/
 ├── main.rs           # Application entry point
-├── synthesizer.rs    # Core synthesis engine (large file with voice management)
+├── synthesizer.rs    # Core synthesis engine (VoiceManager, Lfo, PolyMod, EffectsChain, ModulationBus)
 ├── audio_engine.rs   # Real-time audio processing
-├── midi_handler.rs   # MIDI input and CC mapping
-└── gui.rs           # Vintage-styled GUI implementation
+├── midi_handler.rs   # MIDI input and CC_BINDINGS map
+├── lock_free.rs      # TripleBuffer, LockFreeSynth, MidiEventQueue, UiEventQueue
+├── optimization.rs   # Pre-computed lookup tables (sine, MIDI frequencies)
+└── gui/
+    └── mod.rs        # Vintage-styled GUI implementation
 ```
 
 ## Performance Considerations
