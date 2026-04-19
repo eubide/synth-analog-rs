@@ -1581,12 +1581,12 @@ impl Synthesizer {
             osc1_wave_type: self.osc1.wave_type,
             osc1_amplitude: self.osc1.amplitude,
             osc1_pulse_width_base: self.osc1.pulse_width,
-            osc1_detune_ratio: Self::semitones_to_ratio(self.osc1.detune / 100.0),
+            osc1_detune_ratio: Self::semitones_to_ratio(self.osc1.detune),
 
             osc2_wave_type: self.osc2.wave_type,
             osc2_amplitude: self.osc2.amplitude,
             osc2_pulse_width: self.osc2.pulse_width,
-            osc2_detune_ratio: Self::semitones_to_ratio(self.osc2.detune / 100.0),
+            osc2_detune_ratio: Self::semitones_to_ratio(self.osc2.detune),
             osc2_sync: self.osc2_sync,
 
             mixer_osc1_level: self.mixer.osc1_level,
@@ -2806,7 +2806,7 @@ impl Synthesizer {
         self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Square;
         self.osc1.amplitude = 1.0;
-        self.osc1.detune = -24.0;
+        self.osc1.detune = -12.0; // One octave down keeps the sub playable across the keyboard.
         self.mixer.osc1_level = 1.0;
         self.filter.cutoff = 150.0;
         self.filter.resonance = 0.5;
@@ -2852,7 +2852,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.8;
-        self.osc2.detune = 7.0;
+        self.osc2.detune = 0.1; // ~10 cents — fat detune without breaking unison.
         self.mixer.osc1_level = 0.7;
         self.mixer.osc2_level = 0.7;
         self.filter.cutoff = 8000.0;
@@ -2934,7 +2934,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Square;
         self.osc2.amplitude = 0.6;
-        self.osc2.detune = -5.0;
+        self.osc2.detune = -0.08; // Subtle ≈8-cent detune for warmth.
         self.mixer.osc1_level = 0.8;
         self.mixer.osc2_level = 0.5;
         self.filter.cutoff = 6000.0;
@@ -2956,7 +2956,6 @@ impl Synthesizer {
         self.effects.chorus_depth = 0.55;
         self.modulation_matrix.velocity_to_cutoff = 0.4;
         self.modulation_matrix.velocity_to_amplitude = 0.25;
-        self.poly_mod.osc_b_to_osc_a_freq = 0.08;
         self.save_preset_with_category("Vintage Lead", "Lead")
     }
 
@@ -2997,7 +2996,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.8;
-        self.osc2.detune = 3.0;
+        self.osc2.detune = 0.12; // ~12 cents — ensemble shimmer.
         self.mixer.osc1_level = 0.7;
         self.mixer.osc2_level = 0.6;
         self.filter.cutoff = 5000.0;
@@ -3030,7 +3029,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Triangle;
         self.osc2.amplitude = 0.6;
-        self.osc2.detune = 5.0;
+        self.osc2.detune = 0.15; // Gentle choir detune around unison.
         self.mixer.osc1_level = 0.8;
         self.mixer.osc2_level = 0.5;
         self.filter.cutoff = 4000.0;
@@ -3082,7 +3081,7 @@ impl Synthesizer {
         self.lfo.frequency = 0.15;
         self.lfo.amplitude = 0.3;
         self.lfo.target_osc2_pitch = true;
-        self.modulation_matrix.lfo_to_osc1_pitch = 0.2;
+        self.modulation_matrix.lfo_to_osc2_pitch = 0.2; // Route matches the target flag.
         self.modulation_matrix.velocity_to_amplitude = 0.2;
         self.effects.reverb_amount = 0.9;
         self.effects.reverb_size = 1.0;
@@ -3117,7 +3116,6 @@ impl Synthesizer {
         self.amp_envelope.release = 0.2;
         self.modulation_matrix.velocity_to_cutoff = 0.6;
         self.modulation_matrix.velocity_to_amplitude = 0.3;
-        self.poly_mod.filter_env_to_osc_a_freq = 0.12;
         self.save_preset_with_category("Brass Stab", "Brass")
     }
 
@@ -3145,7 +3143,6 @@ impl Synthesizer {
         self.modulation_matrix.lfo_to_osc1_pitch = 0.15;
         self.modulation_matrix.velocity_to_cutoff = 0.55;
         self.modulation_matrix.velocity_to_amplitude = 0.25;
-        self.poly_mod.filter_env_to_osc_a_freq = 0.08;
         self.save_preset_with_category("Trumpet Lead", "Brass")
     }
 
@@ -3187,7 +3184,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Triangle;
         self.osc2.amplitude = 0.6;
-        self.osc2.detune = -7.0;
+        self.osc2.detune = -0.1; // Small flat offset for breath-like body.
         self.mixer.osc1_level = 0.7;
         self.mixer.osc2_level = 0.5;
         self.mixer.noise_level = 0.08;
@@ -3211,7 +3208,6 @@ impl Synthesizer {
         self.modulation_matrix.velocity_to_cutoff = 0.5;
         self.modulation_matrix.velocity_to_amplitude = 0.3;
         self.effects.reverb_amount = 0.3;
-        self.poly_mod.filter_env_to_osc_a_freq = 0.06;
         self.save_preset_with_category("Sax Lead", "Brass")
     }
 
@@ -3333,7 +3329,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Square;
         self.osc2.amplitude = 0.8;
-        self.osc2.detune = 7.0;
+        self.osc2.detune = 0.12; // Slight detune gives the brass stab its chorus-y bite.
         self.mixer.osc1_level = 0.9;
         self.mixer.osc2_level = 0.7;
         self.filter.cutoff = 2800.0;
@@ -3341,17 +3337,19 @@ impl Synthesizer {
         self.filter.envelope_amount = 0.8;
         self.filter.keyboard_tracking = 0.45;
         self.filter_envelope.attack = 0.01;
-        self.filter_envelope.decay = 0.15;
-        self.filter_envelope.sustain = 0.2;
-        self.filter_envelope.release = 0.1;
-        self.amp_envelope.attack = 0.005;
-        self.amp_envelope.decay = 0.12;
-        self.amp_envelope.sustain = 0.3;
-        self.amp_envelope.release = 0.15;
+        self.filter_envelope.decay = 0.25;
+        self.filter_envelope.sustain = 0.35;
+        self.filter_envelope.release = 0.2;
+        // Sustained brass, not a stab: hold at 0.8 while the key is held.
+        self.amp_envelope.attack = 0.01;
+        self.amp_envelope.decay = 0.3;
+        self.amp_envelope.sustain = 0.8;
+        self.amp_envelope.release = 0.35;
         self.modulation_matrix.velocity_to_cutoff = 0.65;
         self.modulation_matrix.velocity_to_amplitude = 0.3;
-        // Textbook Prophet brass Poly Mod: filter envelope adds FM bite to osc A.
-        self.poly_mod.filter_env_to_osc_a_freq = 0.15;
+        // No Poly Mod → osc A freq: this is a sustained brass, not a sync lead.
+        // Even small amounts (0.08) produced an audible "doppler" pitch blip on attack
+        // because the filter envelope peaks quickly and decays slowly.
         self.save_preset_with_category("Jump Brass", "Brass")
     }
 
@@ -3399,14 +3397,16 @@ impl Synthesizer {
         self.filter.resonance = 2.8;
         self.filter.envelope_amount = 0.5;
         self.filter.keyboard_tracking = 0.7;
-        self.filter_envelope.attack = 0.3;
-        self.filter_envelope.decay = 0.8;
-        self.filter_envelope.sustain = 0.7;
-        self.filter_envelope.release = 1.5;
-        self.amp_envelope.attack = 0.2;
+        // Filter envelope decays fully so the sync sweep collapses cleanly;
+        // a non-zero sustain would leave a permanent pitch offset on osc A via Poly Mod.
+        self.filter_envelope.attack = 0.05;
+        self.filter_envelope.decay = 0.7;
+        self.filter_envelope.sustain = 0.0;
+        self.filter_envelope.release = 0.6;
+        self.amp_envelope.attack = 0.03;
         self.amp_envelope.decay = 0.4;
-        self.amp_envelope.sustain = 0.9;
-        self.amp_envelope.release = 1.8;
+        self.amp_envelope.sustain = 0.85;
+        self.amp_envelope.release = 0.6;
         self.lfo.frequency = 0.4;
         self.lfo.amplitude = 0.6;
         self.lfo.sync = true;
@@ -3414,7 +3414,7 @@ impl Synthesizer {
         self.modulation_matrix.lfo_to_cutoff = 0.7;
         self.modulation_matrix.velocity_to_cutoff = 0.4;
         // Iconic Prophet trick: filter envelope modulates osc A for the sync-sweep motion.
-        self.poly_mod.filter_env_to_osc_a_freq = 0.18;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.25;
         self.effects.chorus_mix = 0.25;
         self.save_preset_with_category("Vintage Sync Lead", "Lead")
     }
@@ -3450,7 +3450,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.6;
-        self.osc2.detune = -5.0;
+        self.osc2.detune = -0.1; // Slight flat offset — analog sequence warmth.
         self.mixer.osc1_level = 0.8;
         self.mixer.osc2_level = 0.5;
         self.filter.cutoff = 2200.0;
@@ -3482,7 +3482,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.8;
-        self.osc2.detune = 2.5;
+        self.osc2.detune = 0.08; // Classic string machine ~8-cent detune.
         self.mixer.osc1_level = 0.8;
         self.mixer.osc2_level = 0.7;
         self.filter.cutoff = 4500.0;
@@ -3548,7 +3548,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.7;
-        self.osc2.detune = -7.0;
+        self.osc2.detune = -0.1; // Subtle flat offset — Prophet brass thickness, not a fifth.
         self.mixer.osc1_level = 0.9;
         self.mixer.osc2_level = 0.6;
         self.filter.cutoff = 2600.0;
@@ -3565,22 +3565,27 @@ impl Synthesizer {
         self.amp_envelope.release = 0.3;
         self.modulation_matrix.velocity_to_cutoff = 0.6;
         self.modulation_matrix.velocity_to_amplitude = 0.3;
-        // Classic Prophet brass Poly Mod recipe: gentle osc B into osc A freq
-        // plus filter envelope into osc A pitch for the tell-tale wobble.
-        self.poly_mod.osc_b_to_osc_a_freq = 0.1;
-        self.poly_mod.filter_env_to_osc_a_freq = 0.1;
+        // No Poly Mod pitch routes: brass should sit on pitch, not sweep.
+        // Prior values (0.1 + 0.1) made every note start with a descending
+        // "doppler" tail, which is sync-lead territory, not brass.
         self.effects.chorus_mix = 0.15;
         self.save_preset_with_category("Runaway Brass", "Brass")
     }
 
     /// Thriller-era sync lead: osc sync + sweeping filter envelope.
+    ///
+    /// The defining Prophet-5 move is Poly Mod filter-env → freq A combined with
+    /// sync: the slave (osc B) stays at the slave pitch while osc A's sweep
+    /// snaps its harmonic pattern. The filter envelope must return to 0 during
+    /// sustain so the note settles back to concert pitch — a non-zero sustain
+    /// would leave the note detuned while held.
     fn create_thriller_sync_lead(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.reset_patch_to_defaults();
         self.osc1.wave_type = WaveType::Sawtooth;
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 1.0;
-        self.osc2.detune = 19.0; // Octave + fifth for an aggressive sync pitch.
+        self.osc2.detune = 19.0; // Octave + minor 7th — aggressive sync harmonic.
         self.osc2_sync = true;
         self.mixer.osc1_level = 0.6;
         self.mixer.osc2_level = 0.8;
@@ -3588,14 +3593,14 @@ impl Synthesizer {
         self.filter.resonance = 2.6;
         self.filter.envelope_amount = 0.7;
         self.filter.keyboard_tracking = 0.75;
-        self.filter_envelope.attack = 0.05;
-        self.filter_envelope.decay = 0.9;
-        self.filter_envelope.sustain = 0.55;
-        self.filter_envelope.release = 1.1;
+        self.filter_envelope.attack = 0.02;
+        self.filter_envelope.decay = 0.55;
+        self.filter_envelope.sustain = 0.0; // Must decay to 0: sustain holds no pitch offset.
+        self.filter_envelope.release = 0.35;
         self.amp_envelope.attack = 0.02;
         self.amp_envelope.decay = 0.3;
         self.amp_envelope.sustain = 0.85;
-        self.amp_envelope.release = 0.8;
+        self.amp_envelope.release = 0.5;
         self.lfo.frequency = 5.5;
         self.lfo.amplitude = 0.2;
         self.lfo.sync = true;
@@ -3604,7 +3609,7 @@ impl Synthesizer {
         self.modulation_matrix.velocity_to_cutoff = 0.55;
         self.modulation_matrix.velocity_to_amplitude = 0.3;
         // Filter envelope modulates osc A freq: sync pitch sweep that defines the lead.
-        self.poly_mod.filter_env_to_osc_a_freq = 0.22;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.25;
         self.effects.chorus_mix = 0.25;
         self.save_preset_with_category("Thriller Sync Lead", "Lead")
     }
@@ -3649,7 +3654,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 1.0;
-        self.osc2.detune = 4.0;
+        self.osc2.detune = 0.08; // ~8 cents — classic two-saw analog beating.
         self.mixer.osc1_level = 0.8;
         self.mixer.osc2_level = 0.8;
         self.filter.cutoff = 5500.0;
@@ -3679,7 +3684,7 @@ impl Synthesizer {
         self.osc1.amplitude = 1.0;
         self.osc2.wave_type = WaveType::Sawtooth;
         self.osc2.amplitude = 0.9;
-        self.osc2.detune = 3.5;
+        self.osc2.detune = 0.07; // ~7 cents — gentle pad detune for the chorus shimmer.
         self.mixer.osc1_level = 0.75;
         self.mixer.osc2_level = 0.75;
         self.filter.cutoff = 2600.0;
