@@ -187,6 +187,14 @@ impl AudioEngine {
                         .peak_level
                         .store(new_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
 
+                    // 5b. Feed the visualiser ring. Mix stereo → mono so scope/spectrum
+                    // show one trace. Relaxed atomics, no allocation.
+                    for i in 0..frames {
+                        lock_free_synth
+                            .scope
+                            .push((left_buffer[i] + right_buffer[i]) * 0.5);
+                    }
+
                     // 6. Convert stereo to multi-channel output
                     // frames = data.len() / channels, so out_idx < data.len() is always true.
                     for frame_idx in 0..frames {

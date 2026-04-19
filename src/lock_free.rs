@@ -327,12 +327,65 @@ impl Default for SynthParameters {
     }
 }
 
+/// Ring-buffer capacity for the scope/spectrum visualiser. 4096 samples @ 44.1 kHz
+/// ≈ 93 ms of audio — enough to grab 2–3 periods of any note in the audible range
+/// for the oscilloscope and enough resolution (~10.8 Hz/bin with a 4096 FFT) to
+/// separate individual harmonics.
+pub const SCOPE_LEN: usize = 4096;
+
+/// Lock-free scope ring: audio thread does relaxed stores into per-sample atomics,
+/// GUI thread does relaxed loads. A data race on the sample currently being written
+/// is harmless for visualisation — you'd see one pixel of tearing at most.
+pub struct ScopeRing {
+    samples: Vec<std::sync::atomic::AtomicU32>,
+    write_head: std::sync::atomic::AtomicUsize,
+}
+
+impl ScopeRing {
+    pub fn new() -> Self {
+        let samples = (0..SCOPE_LEN)
+            .map(|_| std::sync::atomic::AtomicU32::new(0))
+            .collect();
+        Self {
+            samples,
+            write_head: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Audio thread: push one frame (mono). No allocation, no lock.
+    pub fn push(&self, sample: f32) {
+        let idx = self.write_head.load(std::sync::atomic::Ordering::Relaxed) % SCOPE_LEN;
+        self.samples[idx].store(sample.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.write_head
+            .store(idx + 1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// GUI thread: copy the last `n` samples into `dst` in chronological order.
+    /// `dst.len()` must be `<= SCOPE_LEN`.
+    pub fn snapshot(&self, dst: &mut [f32]) {
+        let n = dst.len().min(SCOPE_LEN);
+        let head = self.write_head.load(std::sync::atomic::Ordering::Relaxed) % SCOPE_LEN;
+        for (i, out) in dst.iter_mut().take(n).enumerate() {
+            let idx = (head + SCOPE_LEN - n + i) % SCOPE_LEN;
+            *out = f32::from_bits(self.samples[idx].load(std::sync::atomic::Ordering::Relaxed));
+        }
+    }
+}
+
+impl Default for ScopeRing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Lock-free synthesizer state for real-time audio processing
 pub struct LockFreeSynth {
     pub params: TripleBuffer<SynthParameters>,
     /// Peak output amplitude written by audio thread, read by GUI for VU meter.
     /// Stored as f32 bits in an AtomicU32 for lock-free access.
     pub peak_level: std::sync::atomic::AtomicU32,
+    /// Live sample ring used by the GUI visualiser (scope + spectrum).
+    pub scope: ScopeRing,
 }
 
 impl LockFreeSynth {
@@ -340,6 +393,7 @@ impl LockFreeSynth {
         Self {
             params: TripleBuffer::new(SynthParameters::default()),
             peak_level: std::sync::atomic::AtomicU32::new(0),
+            scope: ScopeRing::new(),
         }
     }
 
