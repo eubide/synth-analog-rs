@@ -352,12 +352,17 @@ impl ScopeRing {
         }
     }
 
-    /// Audio thread: push one frame (mono). No allocation, no lock.
-    pub fn push(&self, sample: f32) {
-        let idx = self.write_head.load(std::sync::atomic::Ordering::Relaxed) % SCOPE_LEN;
-        self.samples[idx].store(sample.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    /// Audio thread: push a whole block at once. Reads the head once, writes N
+    /// samples, then bumps the head once — 2·N fewer atomic ops than the naive
+    /// per-sample loop, and closes the non-atomic-RMW gap on `write_head`.
+    pub fn push_block(&self, samples: &[f32]) {
+        let mut idx = self.write_head.load(std::sync::atomic::Ordering::Relaxed) % SCOPE_LEN;
+        for &s in samples {
+            self.samples[idx].store(s.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            idx = (idx + 1) % SCOPE_LEN;
+        }
         self.write_head
-            .store(idx + 1, std::sync::atomic::Ordering::Relaxed);
+            .store(idx, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// GUI thread: copy the last `n` samples into `dst` in chronological order.
@@ -386,6 +391,11 @@ pub struct LockFreeSynth {
     pub peak_level: std::sync::atomic::AtomicU32,
     /// Live sample ring used by the GUI visualiser (scope + spectrum).
     pub scope: ScopeRing,
+    /// Actual device sample rate, written once by the audio engine at start-up.
+    /// The visualiser reads this so the spectrum frequency axis matches the
+    /// real hardware (48 kHz is common on macOS — hard-coding 44.1 kHz would
+    /// put every harmonic ~8.8 % off).
+    pub sample_rate: std::sync::atomic::AtomicU32,
 }
 
 impl LockFreeSynth {
@@ -394,6 +404,7 @@ impl LockFreeSynth {
             params: TripleBuffer::new(SynthParameters::default()),
             peak_level: std::sync::atomic::AtomicU32::new(0),
             scope: ScopeRing::new(),
+            sample_rate: std::sync::atomic::AtomicU32::new(44_100),
         }
     }
 

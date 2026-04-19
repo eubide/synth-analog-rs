@@ -14,6 +14,12 @@ use preset_browser::PresetBrowser;
 use std::sync::Arc;
 use visualiser::VisualiserState;
 
+fn current_sample_rate(lock_free_synth: &LockFreeSynth) -> f32 {
+    lock_free_synth
+        .sample_rate
+        .load(std::sync::atomic::Ordering::Relaxed) as f32
+}
+
 /// VU meter display range. Professional meters map ~-48 dB (noise floor) to
 /// 0 dBFS (clip) — wider than a linear 0..1 bar, so typical outputs around
 /// -20 dBFS (~0.1 linear) now sweep through the middle of the bar instead of
@@ -46,12 +52,10 @@ pub struct SynthApp {
     show_presets_window: bool,
     show_visualiser: bool,
     params: SynthParameters,
-    /// Raw peak read from audio thread (0..1).
-    peak_level: f32,
+    /// Current peak in dB, snapshotted per frame for the VU render.
+    peak_db: f32,
     /// Peak-hold line in dB; decays slowly so the eye can catch transient peaks.
     peak_hold_db: f32,
-    /// Last frame instant, to advance the peak-hold decay in real time regardless of frame rate.
-    last_frame: Option<std::time::Instant>,
     /// Scope + spectrum analyser state. Preallocates its scratch buffers.
     visualiser: VisualiserState,
 }
@@ -78,9 +82,8 @@ impl SynthApp {
             show_presets_window: false,
             show_visualiser: false,
             params,
-            peak_level: 0.0,
+            peak_db: VU_FLOOR_DB,
             peak_hold_db: VU_FLOOR_DB,
-            last_frame: None,
             visualiser: VisualiserState::new(),
         }
     }
@@ -147,24 +150,22 @@ impl eframe::App for SynthApp {
             .lock_free_synth
             .peak_level
             .load(std::sync::atomic::Ordering::Relaxed);
-        self.peak_level = f32::from_bits(peak_bits);
+        self.peak_db = linear_to_db(f32::from_bits(peak_bits));
 
         // Advance peak-hold: snap upward on a new peak, else decay at a fixed
-        // dB/sec rate (a linear-in-dB fall feels more uniform than a scalar decay).
-        let now = std::time::Instant::now();
-        let dt = match self.last_frame {
-            Some(prev) => now.duration_since(prev).as_secs_f32().min(0.1),
-            None => 0.0,
-        };
-        self.last_frame = Some(now);
-        let peak_db = linear_to_db(self.peak_level);
-        self.peak_hold_db = self.peak_hold_db.max(peak_db) - VU_HOLD_DECAY_DB_PER_SEC * dt;
-        if self.peak_hold_db < VU_FLOOR_DB {
-            self.peak_hold_db = VU_FLOOR_DB;
+        // dB/sec rate (linear-in-dB decay feels more uniform than scalar).
+        let dt = ctx.input(|i| i.stable_dt).min(0.1);
+        self.peak_hold_db =
+            (self.peak_hold_db.max(self.peak_db) - VU_HOLD_DECAY_DB_PER_SEC * dt).max(VU_FLOOR_DB);
+
+        // Only force 60 fps while something is actually moving. Idle UI then
+        // falls back to input-driven repaints (near-zero CPU).
+        if self.peak_db > VU_FLOOR_DB + 0.5
+            || self.peak_hold_db > VU_FLOOR_DB + 0.5
+            || self.show_visualiser
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
-        // egui only repaints on input by default; request a repaint so the VU
-        // keeps animating even when nothing else changes.
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
 
         self.drain_ui_events();
 
@@ -210,10 +211,9 @@ impl eframe::App for SynthApp {
                 // Log scale makes typical outputs (~-20 dBFS, ≈0.1 linear) sit
                 // mid-bar instead of hugging the left edge; peak-hold gives the
                 // eye something to track on fast transients.
-                let peak_db = linear_to_db(self.peak_level);
-                let level_unit = db_to_unit(peak_db);
+                let level_unit = db_to_unit(self.peak_db);
                 let hold_unit = db_to_unit(self.peak_hold_db);
-                let clipping = peak_db >= -0.5;
+                let clipping = self.peak_db >= -0.5;
                 let (vu_rect, _) =
                     ui.allocate_exact_size(egui::vec2(120.0, 12.0), egui::Sense::hover());
                 if ui.is_rect_visible(vu_rect) {
@@ -514,13 +514,14 @@ impl eframe::App for SynthApp {
         if self.show_visualiser {
             let mut show = self.show_visualiser;
             let scope = &self.lock_free_synth.scope;
+            let sample_rate = current_sample_rate(&self.lock_free_synth);
             let viz = &mut self.visualiser;
             egui::Window::new("Visualizer")
                 .default_size([360.0, 160.0])
                 .resizable(true)
                 .open(&mut show)
                 .show(ui.ctx(), |ui| {
-                    viz.draw(ui, scope);
+                    viz.draw(ui, scope, sample_rate);
                 });
             self.show_visualiser = show;
         }
