@@ -172,14 +172,18 @@ Después de sumar todas las voces, la señal pasa por la cadena de efectos y pro
 
 ```mermaid
 flowchart LR
-    SUM[Suma de voces] 
+    SUM[Suma estéreo de voces<br>L/R por panning igual-potencia]
     --> NORM[Normalización por √N voces<br>evita clipper en acordes]
-    --> VOL[× Master Volume<br>× Expression pedal CC11]
-    --> DLY[Delay: línea circular<br>tiempo + feedback + wet]
-    --> REV[Reverb Freeverb:<br>8 comb filters paralelos<br>+ 4 allpass en serie]
-    --> SAT[Saturación: tanh continua<br>rango lineal ≤0.8, comprime >0.8]
-    --> DCB[DC Blocker: HPF ~0.7 Hz<br>coeff=0.9999, 1er orden]
-    --> LIM[Soft Limiter: clamp ±1<br>+ curva suave en 0.8-1.0]
+    --> MS_ENC[M/S encode:<br>mid = L+R / √2<br>side = R−L / √2]
+    --> VOL[mid × Master Volume<br>× Expression pedal CC11]
+    --> CHO[Chorus: 2 LFO cuadratura<br>delay ~10 ms, mid only]
+    --> DLY[Delay: línea circular<br>tiempo + feedback + wet, mid only]
+    --> REV[Reverb Freeverb:<br>8 comb + 4 allpass, mid only]
+    --> NOISE[Noise floor analógico<br>post-efectos, mid only]
+    --> SAT[Saturación: tanh continua<br>mid only]
+    --> DCB[DC Blocker: HPF ~0.7 Hz<br>coeff=0.9999, mid only]
+    --> MS_DEC[M/S decode:<br>L = mid − side/√2<br>R = mid + side/√2]
+    --> LIM[Clamp ±1.0]
     --> DAC[DAC / Altavoces]
 ```
 
@@ -325,22 +329,23 @@ Tecla pulsada en teclado MIDI
         ├── Amp Envelope ADSR → envelope_value
         ├── VCA: × env × lfo × vel × aftertouch
         └── acumular en sample
-    ├── Normalizar por √N voces
-    ├── × master_volume × expression
-    ├── Delay (línea circular)
-    ├── Reverb (Freeverb: 8 comb + 4 allpass)
-    ├── Saturación tanh
-    ├── DC Blocker HPF 0.7 Hz
-    └── Clamp ±1.0
+    ├── Normalizar por √N voces (L+R independiente)
+    ├── M/S encode: mid=(L+R)/√2  side=(R−L)/√2
+    ├── mid × master_volume × expression
+    ├── Chorus (mid) → Delay (mid) → Reverb (mid)
+    ├── Noise floor analógico (mid)
+    ├── Saturación tanh (mid)
+    ├── DC Blocker HPF 0.7 Hz (mid)
+    └── M/S decode → L/R clamp ±1.0
         │
         ▼
-[cpal: mono → stereo interleaved]
+[Si oversampling > 1×]
+  Síntesis a N×fs → decimate con biquad Butterworth
+  2×: 1 etapa LP  /  4×: 2 etapas LP en cascada
+        │
+        ▼
+[cpal: L/R → stereo interleaved]
   T::from_sample(sample_f32)
-        │
-        ▼
-[Soft Limiter en AudioEngine]
-  |x| ≤ 0.8 → linear
-  |x| > 0.8 → 0.8 + 0.2·(1 - e^(-5·(|x|-0.8)))
         │
         ▼
 DAC → Altavoces 🔊
@@ -358,7 +363,8 @@ DAC → Altavoces 🔊
 | Triple buffer sin locks | El audio thread nunca bloquea esperando al GUI |
 | `MidiEventQueue` con Mutex fino | Nota on/off ocurre a velocidad humana — no compite con el audio |
 | Voice norm `1/√N` | Mantiene RMS constante independiente del número de voces activas |
-| PolyBLEP/BLAMP anti-aliasing | Elimina aliasing digital sin oversampling costoso |
+| PolyBLEP/BLAMP anti-aliasing | Reduce aliasing en banda sin coste de oversampling; oversampling añade una segunda capa de calidad opcional |
+| Oversampling 2×/4× + decimación biquad | Elimina aliasing residual de alto orden; la decimación corre sobre los buffers pre-asignados — sin allocs en el callback |
 | Pink noise per-voice xorshift32 | Determinista, ~8× más rápido que `rand::random()`, independiente por voz |
 | Denormal flush en ladder filter | Previene slowdown ~100× en colas de silencio por denormales IEEE 754 |
 
