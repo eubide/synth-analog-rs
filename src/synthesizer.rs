@@ -34,6 +34,15 @@ const CHORUS_VOICE2_RATE_RATIO: f32 = 1.13; // second LFO slightly detuned
 // ~100× slowdown of subnormal arithmetic in feedback paths.
 const DENORMAL_FLOOR: f32 = 1.0e-20;
 
+#[inline(always)]
+fn flush_denormal(x: f32) -> f32 {
+    if x.abs() < DENORMAL_FLOOR { 0.0 } else { x }
+}
+
+// Freeverb topology: 8 parallel comb filters → 4 series allpass filters.
+const REVERB_COMBS: usize = 8;
+const REVERB_ALLPASSES: usize = 4;
+
 // Tuning ratios relative to C within an octave (index 0=C, 1=C#, ..., 11=B).
 // All modes are anchored so that MIDI 69 (A4) = 440 Hz exactly.
 
@@ -313,16 +322,16 @@ pub struct EffectsChain {
     // Delay state
     pub delay_buffer: Vec<f32>,
     pub delay_index: usize,
-    // Freeverb: 8 parallel comb filters + 4 series allpass filters
-    pub reverb_comb_buffers: Vec<Vec<f32>>,
-    pub reverb_comb_indices: Vec<usize>,
-    pub reverb_comb_filters: Vec<f32>, // LP filter state inside each comb
-    pub reverb_allpass_buffers: Vec<Vec<f32>>,
-    pub reverb_allpass_indices: Vec<usize>,
+    // Freeverb state. Fixed-size outer arrays let the compiler prove the
+    // `for i in 0..N` index is in-bounds and elide the bounds checks per sample.
+    pub reverb_comb_buffers: [Vec<f32>; REVERB_COMBS],
+    pub reverb_comb_indices: [usize; REVERB_COMBS],
+    pub reverb_comb_filters: [f32; REVERB_COMBS], // LP state inside each comb
+    pub reverb_allpass_buffers: [Vec<f32>; REVERB_ALLPASSES],
+    pub reverb_allpass_indices: [usize; REVERB_ALLPASSES],
     // Chorus delay line — sized for 25 ms max delay (≈ centre 10 ms ± 5 ms modulation).
     pub chorus_buffer: Vec<f32>,
     pub chorus_index: usize,
-    // Two LFO phases in quadrature give a thicker, Juno-style ensemble sound.
     pub chorus_lfo_phase1: f32,
     pub chorus_lfo_phase2: f32,
 }
@@ -335,19 +344,20 @@ impl EffectsChain {
         // Comb delays are prime-ish and spread across 25–37 ms to avoid flutter echo.
         // Allpass delays provide diffusion without coloring the frequency response.
         let rate = sample_rate / 44100.0;
-        let comb_sizes: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
-            .map(|n| ((n as f32 * rate) as usize).max(1));
-        let allpass_sizes: [usize; 4] =
+        let comb_sizes: [usize; REVERB_COMBS] =
+            [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
+                .map(|n| ((n as f32 * rate) as usize).max(1));
+        let allpass_sizes: [usize; REVERB_ALLPASSES] =
             [556, 441, 341, 225].map(|n| ((n as f32 * rate) as usize).max(1));
 
         Self {
             delay_buffer: vec![0.0; max_delay_samples],
             delay_index: 0,
-            reverb_comb_buffers: comb_sizes.iter().map(|&n| vec![0.0f32; n]).collect(),
-            reverb_comb_indices: vec![0; 8],
-            reverb_comb_filters: vec![0.0; 8],
-            reverb_allpass_buffers: allpass_sizes.iter().map(|&n| vec![0.0f32; n]).collect(),
-            reverb_allpass_indices: vec![0; 4],
+            reverb_comb_buffers: comb_sizes.map(|n| vec![0.0f32; n]),
+            reverb_comb_indices: [0; REVERB_COMBS],
+            reverb_comb_filters: [0.0; REVERB_COMBS],
+            reverb_allpass_buffers: allpass_sizes.map(|n| vec![0.0f32; n]),
+            reverb_allpass_indices: [0; REVERB_ALLPASSES],
             // Power-of-two size lets apply_chorus replace `% len` with a bitmask.
             chorus_buffer: vec![
                 0.0;
@@ -361,8 +371,13 @@ impl EffectsChain {
         }
     }
 
+    #[inline]
     pub fn apply_delay(&mut self, sample: f32, params: &EffectsParams, sample_rate: f32) -> f32 {
         if params.delay_amount <= 0.0 {
+            // Keep the ring filling so re-enabling the effect doesn't play
+            // a stale tail from before the bypass period.
+            self.delay_buffer[self.delay_index] = sample;
+            self.delay_index = (self.delay_index + 1) % self.delay_buffer.len();
             return sample;
         }
 
@@ -375,14 +390,7 @@ impl EffectsChain {
             self.delay_buffer.len() + self.delay_index - delay_samples
         };
 
-        let delayed_sample = self.delay_buffer[delay_read_index];
-        // Flush denormals in the feedback tail, otherwise decaying echoes
-        // slow the audio thread and cause xruns.
-        let delayed_sample = if delayed_sample.abs() < 1.0e-20 {
-            0.0
-        } else {
-            delayed_sample
-        };
+        let delayed_sample = flush_denormal(self.delay_buffer[delay_read_index]);
         let feedback_sample = delayed_sample * params.delay_feedback;
 
         self.delay_buffer[self.delay_index] = sample + feedback_sample;
@@ -395,6 +403,7 @@ impl EffectsChain {
     /// modulated by quadrature LFOs around a 10 ms centre. Short enough to stay
     /// out of slap-back delay territory, long enough to create stereo-like width
     /// from pitch drift between taps.
+    #[inline]
     pub fn apply_chorus(&mut self, sample: f32, params: &EffectsParams, sample_rate: f32) -> f32 {
         let len = self.chorus_buffer.len();
         // chorus_buffer is constructed as a power of two (see EffectsChain::new),
@@ -442,10 +451,7 @@ impl EffectsChain {
         };
         let tap1 = read_tap(&self.chorus_buffer, self.chorus_index, delay_samples_1);
         let tap2 = read_tap(&self.chorus_buffer, self.chorus_index, delay_samples_2);
-        let mut wet = (tap1 + tap2) * 0.5;
-        if wet.abs() < DENORMAL_FLOOR {
-            wet = 0.0;
-        }
+        let wet = flush_denormal((tap1 + tap2) * 0.5);
 
         self.chorus_buffer[self.chorus_index] = sample;
         self.chorus_index = (self.chorus_index + 1) & mask;
@@ -455,6 +461,7 @@ impl EffectsChain {
         sample * dry_gain + wet * mix
     }
 
+    #[inline]
     pub fn apply_reverb(&mut self, sample: f32, params: &EffectsParams) -> f32 {
         if params.reverb_amount <= 0.0 {
             return sample;
@@ -469,41 +476,29 @@ impl EffectsChain {
         const DAMP: f32 = 0.5;
         const DAMP_INV: f32 = 1.0 - DAMP;
         const AP_G: f32 = 0.5; // allpass diffusion gain
-        const DENORMAL: f32 = 1.0e-20;
 
-        // 8 parallel comb filters with LP damping inside the feedback loop.
-        // The LP filter inside each comb is what makes Freeverb sound warm instead
-        // of metallic: high frequencies decay faster than low frequencies.
+        // Parallel comb filters with LP damping inside the feedback loop.
+        // The LP is what makes Freeverb sound warm instead of metallic: high
+        // frequencies decay faster than low frequencies.
         let mut comb_sum = 0.0f32;
-        for i in 0..8 {
+        for i in 0..REVERB_COMBS {
             let idx = self.reverb_comb_indices[i];
-            let out = self.reverb_comb_buffers[i][idx];
-            let out = if out.abs() < DENORMAL { 0.0 } else { out };
+            let out = flush_denormal(self.reverb_comb_buffers[i][idx]);
             // One-pole LP inside the comb feedback
-            self.reverb_comb_filters[i] = out * DAMP_INV + self.reverb_comb_filters[i] * DAMP;
-            let filtered = if self.reverb_comb_filters[i].abs() < DENORMAL {
-                0.0
-            } else {
-                self.reverb_comb_filters[i]
-            };
-            self.reverb_comb_buffers[i][idx] = sample + filtered * g;
+            self.reverb_comb_filters[i] =
+                flush_denormal(out * DAMP_INV + self.reverb_comb_filters[i] * DAMP);
+            self.reverb_comb_buffers[i][idx] = sample + self.reverb_comb_filters[i] * g;
             let len = self.reverb_comb_buffers[i].len();
             self.reverb_comb_indices[i] = (idx + 1) % len;
             comb_sum += out;
         }
-        let mut reverb = comb_sum * 0.125; // average of 8 combs
+        let mut reverb = comb_sum / REVERB_COMBS as f32;
 
-        // 4 series allpass filters for diffusion.
-        // Allpass filters scatter energy in time without coloring the spectrum,
-        // turning the comb-filter echoes into a smooth density tail.
-        for i in 0..4 {
+        // Series allpass filters scatter energy in time without coloring the
+        // spectrum, turning the comb echoes into a smooth density tail.
+        for i in 0..REVERB_ALLPASSES {
             let idx = self.reverb_allpass_indices[i];
-            let buf_out = self.reverb_allpass_buffers[i][idx];
-            let buf_out = if buf_out.abs() < DENORMAL {
-                0.0
-            } else {
-                buf_out
-            };
+            let buf_out = flush_denormal(self.reverb_allpass_buffers[i][idx]);
             self.reverb_allpass_buffers[i][idx] = reverb + buf_out * AP_G;
             let len = self.reverb_allpass_buffers[i].len();
             self.reverb_allpass_indices[i] = (idx + 1) % len;
