@@ -2,6 +2,7 @@ mod keyboard;
 mod midi_windows;
 mod panels;
 mod preset_browser;
+mod visualiser;
 
 use crate::audio_engine::AudioEngine;
 use crate::lock_free::{LockFreeSynth, MidiEventQueue, SynthParameters, UiEvent, UiEventQueue};
@@ -11,6 +12,32 @@ use eframe::egui;
 use keyboard::KeyboardController;
 use preset_browser::PresetBrowser;
 use std::sync::Arc;
+use visualiser::VisualiserState;
+
+fn current_sample_rate(lock_free_synth: &LockFreeSynth) -> f32 {
+    lock_free_synth
+        .sample_rate
+        .load(std::sync::atomic::Ordering::Relaxed) as f32
+}
+
+/// VU meter display range. Professional meters map ~-48 dB (noise floor) to
+/// 0 dBFS (clip) — wider than a linear 0..1 bar, so typical outputs around
+/// -20 dBFS (~0.1 linear) now sweep through the middle of the bar instead of
+/// barely nudging the left edge.
+const VU_FLOOR_DB: f32 = -48.0;
+const VU_CEILING_DB: f32 = 0.0;
+/// Peak-hold falls at ~12 dB/second — fast enough to feel alive, slow enough
+/// that the eye can actually register the peak.
+const VU_HOLD_DECAY_DB_PER_SEC: f32 = 12.0;
+
+fn linear_to_db(x: f32) -> f32 {
+    // Clamp to floor to avoid log(0); 1e-4 ≈ -80 dB, well below the display range.
+    20.0 * x.max(1e-4).log10()
+}
+
+fn db_to_unit(db: f32) -> f32 {
+    ((db - VU_FLOOR_DB) / (VU_CEILING_DB - VU_FLOOR_DB)).clamp(0.0, 1.0)
+}
 
 pub struct SynthApp {
     lock_free_synth: Arc<LockFreeSynth>,
@@ -23,8 +50,14 @@ pub struct SynthApp {
     show_midi_monitor: bool,
     show_midi_learn: bool,
     show_presets_window: bool,
+    show_visualiser: bool,
     params: SynthParameters,
-    peak_level: f32,
+    /// Current peak in dB, snapshotted per frame for the VU render.
+    peak_db: f32,
+    /// Peak-hold line in dB; decays slowly so the eye can catch transient peaks.
+    peak_hold_db: f32,
+    /// Scope + spectrum analyser state. Preallocates its scratch buffers.
+    visualiser: VisualiserState,
 }
 
 impl SynthApp {
@@ -47,8 +80,11 @@ impl SynthApp {
             show_midi_monitor: false,
             show_midi_learn: false,
             show_presets_window: false,
+            show_visualiser: false,
             params,
-            peak_level: 0.0,
+            peak_db: VU_FLOOR_DB,
+            peak_hold_db: VU_FLOOR_DB,
+            visualiser: VisualiserState::new(),
         }
     }
 
@@ -114,7 +150,22 @@ impl eframe::App for SynthApp {
             .lock_free_synth
             .peak_level
             .load(std::sync::atomic::Ordering::Relaxed);
-        self.peak_level = f32::from_bits(peak_bits);
+        self.peak_db = linear_to_db(f32::from_bits(peak_bits));
+
+        // Advance peak-hold: snap upward on a new peak, else decay at a fixed
+        // dB/sec rate (linear-in-dB decay feels more uniform than scalar).
+        let dt = ctx.input(|i| i.stable_dt).min(0.1);
+        self.peak_hold_db =
+            (self.peak_hold_db.max(self.peak_db) - VU_HOLD_DECAY_DB_PER_SEC * dt).max(VU_FLOOR_DB);
+
+        // Only force 60 fps while something is actually moving. Idle UI then
+        // falls back to input-driven repaints (near-zero CPU).
+        if self.peak_db > VU_FLOOR_DB + 0.5
+            || self.peak_hold_db > VU_FLOOR_DB + 0.5
+            || self.show_visualiser
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
 
         self.drain_ui_events();
 
@@ -156,37 +207,64 @@ impl eframe::App for SynthApp {
                     self.show_presets_window = !self.show_presets_window;
                 }
 
-                // VU meter bar
-                let peak = self.peak_level;
-                let clipping = peak > 0.8;
-                let vu_color = if clipping {
-                    egui::Color32::from_rgb(255, 60, 60)
-                } else if peak > 0.5 {
-                    egui::Color32::from_rgb(255, 220, 40)
-                } else {
-                    egui::Color32::from_rgb(60, 200, 60)
-                };
+                // VU meter: dB-scaled LED bar with peak-hold indicator.
+                // Log scale makes typical outputs (~-20 dBFS, ≈0.1 linear) sit
+                // mid-bar instead of hugging the left edge; peak-hold gives the
+                // eye something to track on fast transients.
+                let level_unit = db_to_unit(self.peak_db);
+                let hold_unit = db_to_unit(self.peak_hold_db);
+                let clipping = self.peak_db >= -0.5;
                 let (vu_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(80.0, 12.0), egui::Sense::hover());
+                    ui.allocate_exact_size(egui::vec2(120.0, 12.0), egui::Sense::hover());
                 if ui.is_rect_visible(vu_rect) {
                     let painter = ui.painter();
-                    painter.rect_filled(vu_rect, 2.0, egui::Color32::from_gray(25));
-                    let filled_w = vu_rect.width() * peak.min(1.0);
-                    painter.rect_filled(
-                        egui::Rect::from_min_size(
-                            vu_rect.min,
-                            egui::vec2(filled_w, vu_rect.height()),
-                        ),
-                        2.0,
-                        vu_color,
-                    );
+                    painter.rect_filled(vu_rect, 2.0, egui::Color32::from_gray(20));
+
+                    const SEGMENTS: usize = 24;
+                    let seg_w = vu_rect.width() / SEGMENTS as f32;
+                    let gap = 1.0_f32;
+                    let lit = (level_unit * SEGMENTS as f32).ceil() as usize;
+                    for i in 0..SEGMENTS {
+                        let seg_db = VU_FLOOR_DB
+                            + (i as f32 + 0.5) / SEGMENTS as f32 * (VU_CEILING_DB - VU_FLOOR_DB);
+                        let base = if seg_db >= -3.0 {
+                            egui::Color32::from_rgb(255, 60, 60)
+                        } else if seg_db >= -12.0 {
+                            egui::Color32::from_rgb(255, 210, 40)
+                        } else {
+                            egui::Color32::from_rgb(60, 200, 60)
+                        };
+                        let color = if i < lit {
+                            base
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 30)
+                        };
+                        let seg_rect = egui::Rect::from_min_size(
+                            egui::pos2(vu_rect.min.x + i as f32 * seg_w, vu_rect.min.y + 1.0),
+                            egui::vec2((seg_w - gap).max(1.0), vu_rect.height() - 2.0),
+                        );
+                        painter.rect_filled(seg_rect, 1.0, color);
+                    }
+
+                    // Peak-hold line
+                    if self.peak_hold_db > VU_FLOOR_DB {
+                        let hold_x = vu_rect.min.x + hold_unit * vu_rect.width();
+                        painter.line_segment(
+                            [
+                                egui::pos2(hold_x, vu_rect.min.y + 1.0),
+                                egui::pos2(hold_x, vu_rect.max.y - 1.0),
+                            ],
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 255, 255)),
+                        );
+                    }
+
                     if clipping {
                         painter.text(
                             vu_rect.center(),
                             egui::Align2::CENTER_CENTER,
                             "CLIP",
                             egui::FontId::monospace(9.0),
-                            egui::Color32::WHITE,
+                            egui::Color32::BLACK,
                         );
                     }
                 }
@@ -227,6 +305,14 @@ impl eframe::App for SynthApp {
                         .clicked()
                     {
                         self.show_presets_window = !self.show_presets_window;
+                    }
+
+                    if ui
+                        .small_button("Scope")
+                        .on_hover_text("Open the waveform / spectrum visualiser")
+                        .clicked()
+                    {
+                        self.show_visualiser = !self.show_visualiser;
                     }
 
                     if ui
@@ -422,6 +508,22 @@ impl eframe::App for SynthApp {
                     self.presets.draw(ui, &mut self.params);
                 });
             self.show_presets_window = show_presets_window;
+        }
+
+        // Visualiser Window
+        if self.show_visualiser {
+            let mut show = self.show_visualiser;
+            let scope = &self.lock_free_synth.scope;
+            let sample_rate = current_sample_rate(&self.lock_free_synth);
+            let viz = &mut self.visualiser;
+            egui::Window::new("Visualizer")
+                .default_size([360.0, 160.0])
+                .resizable(true)
+                .open(&mut show)
+                .show(ui.ctx(), |ui| {
+                    viz.draw(ui, scope, sample_rate);
+                });
+            self.show_visualiser = show;
         }
 
         // Write params back at end of frame

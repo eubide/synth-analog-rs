@@ -27,6 +27,9 @@ impl AudioEngine {
             "Audio engine initialized with {} Hz sample rate",
             sample_rate
         );
+        lock_free_synth
+            .sample_rate
+            .store(sample_rate, std::sync::atomic::Ordering::Relaxed);
 
         let stream = match config.sample_format() {
             SampleFormat::F32 => Self::run::<f32>(
@@ -80,6 +83,8 @@ impl AudioEngine {
         // Pre-allocated stereo buffers
         let mut left_buffer = vec![0.0f32; 1024];
         let mut right_buffer = vec![0.0f32; 1024];
+        // Mono mixdown buffer fed to the visualiser ring in one push_block call.
+        let mut mono_buffer = vec![0.0f32; 1024];
         // 8192 = 2048 frames × 4× oversampling — covers the largest common CPAL buffer size.
         let mut over_left: Vec<f32> = Vec::with_capacity(8192);
         let mut over_right: Vec<f32> = Vec::with_capacity(8192);
@@ -186,6 +191,16 @@ impl AudioEngine {
                     lock_free_synth
                         .peak_level
                         .store(new_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
+
+                    // 5b. Feed the visualiser ring with mono mix of the block.
+                    // One head update per block, not per sample.
+                    if mono_buffer.len() < frames {
+                        mono_buffer.resize(frames, 0.0);
+                    }
+                    for i in 0..frames {
+                        mono_buffer[i] = (left_buffer[i] + right_buffer[i]) * 0.5;
+                    }
+                    lock_free_synth.scope.push_block(&mono_buffer[..frames]);
 
                     // 6. Convert stereo to multi-channel output
                     // frames = data.len() / channels, so out_idx < data.len() is always true.
