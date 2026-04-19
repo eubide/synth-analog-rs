@@ -146,8 +146,8 @@ pub struct SynthParameters {
     pub glide_time: f32, // 0.0 = off, >0 = segundos de deslizamiento
 
     // Pitch bend
-    pub pitch_bend: f32,       // -1.0..=1.0 (centro = 0.0)
-    pub pitch_bend_range: u8,  // semitones, typically 2 or 12
+    pub pitch_bend: f32,      // -1.0..=1.0 (centro = 0.0)
+    pub pitch_bend_range: u8, // semitones, typically 2 or 12
 
     // Aftertouch (channel pressure)
     pub aftertouch: f32,              // 0.0..=1.0
@@ -354,14 +354,22 @@ impl LockFreeSynth {
     }
 }
 
-/// Discrete MIDI events that need guaranteed delivery (not continuous params)
+/// Discrete MIDI events consumed by the audio thread. Only real-time
+/// playback events live here — anything requiring disk I/O or large
+/// allocations (preset load, SysEx dumps) goes through `UiEventQueue`
+/// instead so the audio callback stays allocation- and I/O-free.
 #[derive(Debug, Clone)]
 pub enum MidiEvent {
-    NoteOn { note: u8, velocity: u8 },
-    NoteOff { note: u8 },
-    SustainPedal { pressed: bool },
-    /// Program Change: load preset at position `program` (0-indexed) in sorted list
-    ProgramChange { program: u8 },
+    NoteOn {
+        note: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        note: u8,
+    },
+    SustainPedal {
+        pressed: bool,
+    },
     /// MIDI clock tick (0xF8) — 24 pulses per quarter note
     MidiClock,
     /// MIDI clock start (0xFA)
@@ -370,37 +378,33 @@ pub enum MidiEvent {
     MidiClockContinue,
     /// MIDI clock stop (0xFC)
     MidiClockStop,
-    /// SysEx request dump (F0 7D 01 F7)
-    SysExRequest,
-    /// SysEx patch load (F0 7D 02 [json] F7)
-    SysExPatch { data: Vec<u8> },
     /// PANIC: silence every active voice and clear all held-note state.
     /// Triggered by MIDI CC 120/123, the GUI PANIC button, Esc key, or focus loss.
     AllNotesOff,
 }
 
-/// Lightweight event queue for MIDI note events
-/// Uses Mutex because note events are infrequent (human-speed, not audio-rate)
-pub struct MidiEventQueue {
-    events: std::sync::Mutex<Vec<MidiEvent>>,
+/// Mutex-backed producer/consumer queue for low-rate events. Infrequent
+/// enough (human-speed) that contention is a non-issue; `drain` hands out
+/// the buffer via `mem::take`, so the callback path is allocation-free
+/// once the Vec warms up.
+pub struct EventQueue<T> {
+    events: std::sync::Mutex<Vec<T>>,
 }
 
-impl MidiEventQueue {
+impl<T> EventQueue<T> {
     pub fn new() -> Self {
         Self {
             events: std::sync::Mutex::new(Vec::with_capacity(32)),
         }
     }
 
-    /// Push an event (called from MIDI/GUI thread)
-    pub fn push(&self, event: MidiEvent) {
+    pub fn push(&self, event: T) {
         if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }
     }
 
-    /// Drain all events (called from audio thread at start of each block)
-    pub fn drain(&self) -> Vec<MidiEvent> {
+    pub fn drain(&self) -> Vec<T> {
         if let Ok(mut events) = self.events.lock() {
             std::mem::take(&mut *events)
         } else {
@@ -408,6 +412,29 @@ impl MidiEventQueue {
         }
     }
 }
+
+impl<T> Default for EventQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub type MidiEventQueue = EventQueue<MidiEvent>;
+
+/// Events that must be handled on the GUI thread: anything that does disk
+/// I/O, large allocation, or JSON parsing. The MIDI thread pushes these
+/// straight to the GUI; the audio thread never touches them.
+#[derive(Debug, Clone)]
+pub enum UiEvent {
+    /// Program Change: load preset at position `program` (0-indexed) in sorted list
+    ProgramChange { program: u8 },
+    /// SysEx request dump (F0 7D 01 F7): snapshot current patch to `sysex_dump.json`
+    SysExRequest,
+    /// SysEx patch load (F0 7D 02 [json] F7): apply JSON payload as new patch
+    SysExPatch { data: Vec<u8> },
+}
+
+pub type UiEventQueue = EventQueue<UiEvent>;
 
 #[cfg(test)]
 mod tests {

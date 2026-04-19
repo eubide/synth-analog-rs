@@ -154,7 +154,7 @@ pub struct MixerParams {
     pub noise_level: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ModulationMatrix {
     pub lfo_to_cutoff: f32,
     pub lfo_to_resonance: f32,
@@ -320,8 +320,8 @@ pub struct LadderFilterState {
 /// arpeggiator, and per-patch tuning) and reads/writes voice slots through here.
 pub struct VoiceManager {
     pub voices: Vec<Voice>,
-    pub held_notes: Vec<u8>,        // arpeggiator input
-    pub note_stack: Vec<(u8, u8)>,  // mono/legato/unison stack: (note, velocity)
+    pub held_notes: Vec<u8>,       // arpeggiator input
+    pub note_stack: Vec<(u8, u8)>, // mono/legato/unison stack: (note, velocity)
     pub sustain_held: bool,
     pub voice_mode: VoiceMode,
     pub note_priority: NotePriority,
@@ -421,44 +421,34 @@ impl Default for VoiceManager {
     }
 }
 
-/// LFO subsystem: drives the global low-frequency oscillator and the
-/// Prophet-5-style Poly Mod cross-modulation routes (filter env → osc A,
-/// osc B → osc A / filter cutoff). Owns the runtime phase state and the
-/// preset-saved routing depths; reads `LfoParams` (waveform/rate/targets)
-/// from the caller so the synth keeps a single LfoParams field that
-/// preset save/load can treat as plain data.
-pub struct LfoModulator {
+/// LFO engine: drives the global low-frequency oscillator shared across the
+/// synth. Owns runtime phase state plus the user-tweakable delay/fade-in;
+/// reads `LfoParams` (waveform/rate/targets) from the caller so the synth
+/// keeps a single LfoParams field that preset save/load treats as plain data.
+///
+/// Generic — no Prophet-5-specific routing lives here. The sibling `PolyMod`
+/// struct carries the cross-mod identity of this instrument.
+pub struct Lfo {
     // Runtime state — integer accumulator prevents drift over long sessions.
     pub phase_accumulator: u64,
     pub sample_hold_value: f32,
     pub last_sample_time: f32,
     // LFO delay/fade-in (seconds, 0 = instant) — patch parameter.
     pub delay: f32,
-    // Poly Mod routing depths (-1.0..=1.0). Preset-saved.
-    pub poly_mod_filter_env_to_osc_a_freq: f32, // ±24 semis at full excursion
-    pub poly_mod_filter_env_to_osc_a_pw: f32,
-    pub poly_mod_osc_b_to_osc_a_freq: f32,
-    pub poly_mod_osc_b_to_osc_a_pw: f32,
-    pub poly_mod_osc_b_to_filter_cutoff: f32, // ±4 kHz at full excursion
 }
 
-impl LfoModulator {
+impl Lfo {
     pub fn new() -> Self {
         Self {
             phase_accumulator: 0,
             sample_hold_value: 0.0,
             last_sample_time: 0.0,
             delay: 0.0,
-            poly_mod_filter_env_to_osc_a_freq: 0.0,
-            poly_mod_filter_env_to_osc_a_pw: 0.0,
-            poly_mod_osc_b_to_osc_a_freq: 0.0,
-            poly_mod_osc_b_to_osc_a_pw: 0.0,
-            poly_mod_osc_b_to_filter_cutoff: 0.0,
         }
     }
 
     /// Pure waveform generator — no state. Static so process_block can call
-    /// it without re-borrowing the modulator.
+    /// it without re-borrowing the engine.
     pub fn generate_waveform(waveform: LfoWaveform, phase: f32, sample_hold_value: f32) -> f32 {
         let phase = phase % 1.0;
         match waveform {
@@ -470,7 +460,11 @@ impl LfoModulator {
                 }
             }
             LfoWaveform::Square => {
-                if phase < 0.5 { -1.0 } else { 1.0 }
+                if phase < 0.5 {
+                    -1.0
+                } else {
+                    1.0
+                }
             }
             LfoWaveform::Sawtooth => -1.0 + 2.0 * phase,
             LfoWaveform::ReverseSawtooth => 1.0 - 2.0 * phase,
@@ -479,10 +473,115 @@ impl LfoModulator {
     }
 }
 
-impl Default for LfoModulator {
+impl Default for Lfo {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Prophet-5 Poly Mod routing depths. Five destinations that read the voice's
+/// filter envelope value and osc B output and modulate osc A frequency / pulse
+/// width and the filter cutoff.
+///
+/// Instrument-specific — stays in `synth-analog`. Other synths (Juno-8, FM,
+/// Drum) have their own cross-mod topologies or none at all, so this struct
+/// is NOT a candidate for `synth-core`.
+pub struct PolyMod {
+    pub filter_env_to_osc_a_freq: f32, // ±24 semis at full excursion
+    pub filter_env_to_osc_a_pw: f32,
+    pub osc_b_to_osc_a_freq: f32,
+    pub osc_b_to_osc_a_pw: f32,
+    pub osc_b_to_filter_cutoff: f32, // ±4 kHz at full excursion
+}
+
+impl PolyMod {
+    pub fn new() -> Self {
+        Self {
+            filter_env_to_osc_a_freq: 0.0,
+            filter_env_to_osc_a_pw: 0.0,
+            osc_b_to_osc_a_freq: 0.0,
+            osc_b_to_osc_a_pw: 0.0,
+            osc_b_to_filter_cutoff: 0.0,
+        }
+    }
+}
+
+impl Default for PolyMod {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-block snapshot of modulation inputs + precomputed coefficients consumed
+/// by the voice inner loop. Hoists transcendentals (exp, powf) out of the
+/// per-sample hot path.
+struct ModulationBus {
+    dt: f32,
+    sample_rate: f32,
+
+    // Oscillator A
+    osc1_wave_type: WaveType,
+    osc1_amplitude: f32,
+    osc1_pulse_width_base: f32,
+    osc1_detune_ratio: f32,
+
+    // Oscillator B
+    osc2_wave_type: WaveType,
+    osc2_amplitude: f32,
+    osc2_pulse_width: f32,
+    osc2_detune_ratio: f32,
+    osc2_sync: bool,
+
+    // Mixer
+    mixer_osc1_level: f32,
+    mixer_osc2_level: f32,
+    mixer_noise_level: f32,
+
+    // Filter
+    filter_cutoff: f32,
+    filter_resonance: f32,
+    filter_envelope_amount: f32,
+    filter_keyboard_tracking: f32,
+
+    // Amp envelope
+    envelope_sustain: f32,
+    amp_attack_coeff: f32,
+    amp_decay_coeff: f32,
+    amp_release_coeff: f32,
+
+    // Filter envelope
+    filter_envelope_sustain: f32,
+    flt_attack_coeff: f32,
+    flt_decay_coeff: f32,
+    flt_release_coeff: f32,
+
+    // LFO routing
+    lfo_target_osc1: bool,
+    lfo_target_osc2: bool,
+    lfo_target_filter: bool,
+    lfo_target_amplitude: bool,
+    lfo_delay: f32,
+
+    // Global modulation
+    modulation_matrix: ModulationMatrix,
+    pitch_bend_ratio: f32,
+    aftertouch_cutoff_mod: f32,
+    aftertouch_amplitude_mod: f32,
+
+    // Poly Mod
+    poly_mod_fe_freq: f32,
+    poly_mod_fe_pw: f32,
+    poly_mod_osc_b_freq: f32,
+    poly_mod_osc_b_pw: f32,
+    poly_mod_osc_b_cutoff: f32,
+
+    // Analog imperfections
+    component_tolerance: f32,
+    filter_drift_amount: f32,
+    vca_bleed: f32,
+
+    // Glide
+    glide_coeff: f32,
 }
 
 /// Master effects bus: chorus → delay → reverb. Owns the DSP runtime state
@@ -515,9 +614,8 @@ impl EffectsChain {
         // Comb delays are prime-ish and spread across 25–37 ms to avoid flutter echo.
         // Allpass delays provide diffusion without coloring the frequency response.
         let rate = sample_rate / 44100.0;
-        let comb_sizes: [usize; REVERB_COMBS] =
-            [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
-                .map(|n| ((n as f32 * rate) as usize).max(1));
+        let comb_sizes: [usize; REVERB_COMBS] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
+            .map(|n| ((n as f32 * rate) as usize).max(1));
         let allpass_sizes: [usize; REVERB_ALLPASSES] =
             [556, 441, 341, 225].map(|n| ((n as f32 * rate) as usize).max(1));
 
@@ -694,7 +792,8 @@ pub struct Synthesizer {
     pub arpeggiator: ArpeggiatorParams,
     pub master_volume: f32,
     pub voice_manager: VoiceManager,
-    pub lfo_modulator: LfoModulator,
+    pub lfo_engine: Lfo,
+    pub poly_mod: PolyMod,
     pub sample_rate: f32,
     pub effects_chain: EffectsChain,
     pub arp_step: usize,
@@ -965,7 +1064,8 @@ impl Synthesizer {
             arpeggiator: ArpeggiatorParams::default(),
             master_volume: 0.7,
             voice_manager: VoiceManager::new(),
-            lfo_modulator: LfoModulator::new(),
+            lfo_engine: Lfo::new(),
+            poly_mod: PolyMod::new(),
             sample_rate,
             effects_chain: EffectsChain::new(sample_rate),
             arp_step: 0,
@@ -1053,10 +1153,10 @@ impl Synthesizer {
 
         // Reset LFO phase if keyboard sync is enabled
         if self.lfo.sync {
-            self.lfo_modulator.phase_accumulator = 0;
-            self.lfo_modulator.last_sample_time = 0.0;
+            self.lfo_engine.phase_accumulator = 0;
+            self.lfo_engine.last_sample_time = 0.0;
             // Generate new sample & hold value for consistency
-            self.lfo_modulator.sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
+            self.lfo_engine.sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
         }
 
         // Check if note is already playing - for intentional re-triggering, we restart it
@@ -1081,12 +1181,14 @@ impl Synthesizer {
         if let Some(voice) = self.voice_manager.voices.iter_mut().find(|v| !v.is_active) {
             *voice = Voice::new(note, frequency, velocity_normalized);
         } else if self.voice_manager.voices.len() < self.voice_manager.max_polyphony {
-            self.voice_manager.voices
+            self.voice_manager
+                .voices
                 .push(Voice::new(note, frequency, velocity_normalized));
         } else {
             // Voice stealing: find the best voice to replace
             let steal_index = self.voice_manager.find_voice_to_steal();
-            self.voice_manager.voices[steal_index] = Voice::new(note, frequency, velocity_normalized);
+            self.voice_manager.voices[steal_index] =
+                Voice::new(note, frequency, velocity_normalized);
         }
 
         // Assign pan based on voice index (alternating L/R for natural spread)
@@ -1169,9 +1271,9 @@ impl Synthesizer {
         let vel = Self::apply_velocity_curve(velocity, self.velocity_curve);
 
         if self.lfo.sync && !legato {
-            self.lfo_modulator.phase_accumulator = 0;
-            self.lfo_modulator.last_sample_time = 0.0;
-            self.lfo_modulator.sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
+            self.lfo_engine.phase_accumulator = 0;
+            self.lfo_engine.last_sample_time = 0.0;
+            self.lfo_engine.sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
         }
 
         // Reutilizar la primera voz activa (modo mono → máximo 1 voz)
@@ -1187,7 +1289,9 @@ impl Synthesizer {
                 voice.lfo_delay_elapsed = 0.0; // reiniciar fade-in del LFO
             }
         } else if self.voice_manager.voices.is_empty() {
-            self.voice_manager.voices.push(Voice::new(note, frequency, vel));
+            self.voice_manager
+                .voices
+                .push(Voice::new(note, frequency, vel));
         } else if let Some(voice) = self.voice_manager.voices.iter_mut().find(|v| !v.is_active) {
             *voice = Voice::new(note, frequency, vel);
         } else {
@@ -1207,9 +1311,9 @@ impl Synthesizer {
         let spread = self.voice_manager.unison_spread;
 
         if self.lfo.sync {
-            self.lfo_modulator.phase_accumulator = 0;
-            self.lfo_modulator.last_sample_time = 0.0;
-            self.lfo_modulator.sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
+            self.lfo_engine.phase_accumulator = 0;
+            self.lfo_engine.last_sample_time = 0.0;
+            self.lfo_engine.sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
         }
 
         // Liberar voces activas actuales
@@ -1326,19 +1430,6 @@ impl Synthesizer {
     pub fn process_block(&mut self, left: &mut [f32], right: &mut [f32]) {
         let dt = 1.0 / self.sample_rate;
 
-        // Copy synth parameters to avoid borrowing issues
-        let osc1_wave_type = self.osc1.wave_type;
-        let osc1_amplitude = self.osc1.amplitude;
-        let osc1_detune = self.osc1.detune;
-        let osc1_pulse_width_base = self.osc1.pulse_width;
-        let osc2_wave_type = self.osc2.wave_type;
-        let osc2_amplitude = self.osc2.amplitude;
-        let osc2_detune = self.osc2.detune;
-        let osc2_pulse_width = self.osc2.pulse_width;
-        let osc2_sync = self.osc2_sync;
-        let mixer_osc1_level = self.mixer.osc1_level;
-        let mixer_osc2_level = self.mixer.osc2_level;
-        let mixer_noise_level = self.mixer.noise_level;
         // 1-pole smoothers: τ ≈ 1/(2π·20 Hz) ≈ 8ms — eliminates zipper noise from CC updates
         let smooth_k =
             (1.0 - (-2.0 * std::f32::consts::PI * 20.0 / self.sample_rate).exp()).min(1.0);
@@ -1346,78 +1437,27 @@ impl Synthesizer {
         self.filter_resonance_smooth +=
             smooth_k * (self.filter.resonance - self.filter_resonance_smooth);
         self.master_volume_smooth += smooth_k * (self.master_volume - self.master_volume_smooth);
-        let filter_cutoff = self.filter_cutoff_smooth;
-        let filter_resonance = self.filter_resonance_smooth;
-        let filter_envelope_amount = self.filter.envelope_amount;
-        let filter_keyboard_tracking = self.filter.keyboard_tracking;
-        let envelope_attack = self.amp_envelope.attack;
-        let envelope_decay = self.amp_envelope.decay;
-        let envelope_sustain = self.amp_envelope.sustain;
-        let envelope_release = self.amp_envelope.release;
-        let filter_envelope_attack = self.filter_envelope.attack;
-        let filter_envelope_decay = self.filter_envelope.decay;
-        let filter_envelope_sustain = self.filter_envelope.sustain;
-        let filter_envelope_release = self.filter_envelope.release;
-        let lfo_frequency = self.lfo.frequency;
+
+        let bus = self.build_modulation_bus(dt);
+
         let lfo_amplitude = self.lfo.amplitude;
         let lfo_waveform = self.lfo.waveform;
-        let lfo_target_osc1 = self.lfo.target_osc1_pitch;
-        let lfo_target_osc2 = self.lfo.target_osc2_pitch;
-        let lfo_target_filter = self.lfo.target_filter;
-        let lfo_target_amplitude = self.lfo.target_amplitude;
-        let modulation_matrix = self.modulation_matrix.clone();
-        let master_volume = self.master_volume_smooth;
-        let sample_rate = self.sample_rate;
-        let poly_mod_fe_freq = self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq;
-        let poly_mod_fe_pw = self.lfo_modulator.poly_mod_filter_env_to_osc_a_pw;
-        let poly_mod_osc_b_freq = self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq;
-        let poly_mod_osc_b_pw = self.lfo_modulator.poly_mod_osc_b_to_osc_a_pw;
-        let poly_mod_osc_b_cutoff = self.lfo_modulator.poly_mod_osc_b_to_filter_cutoff;
-        let glide_time = self.glide_time;
-        let pitch_bend = self.pitch_bend;
-        let pitch_bend_range = self.pitch_bend_range;
-        let aftertouch = self.aftertouch;
-        let aftertouch_to_cutoff = self.aftertouch_to_cutoff;
-        let aftertouch_to_amplitude = self.aftertouch_to_amplitude;
-        let expression = self.expression;
+        let lfo_phase_increment =
+            ((self.lfo.frequency / self.sample_rate) * PHASE_SCALE as f32) as u64;
         let mod_wheel = self.mod_wheel;
-        let lfo_delay = self.lfo_modulator.delay;
-        let component_tolerance = self.analog.component_tolerance;
-        let filter_drift_amount = self.analog.filter_drift_amount;
-        let vca_bleed = self.analog.vca_bleed;
-
-        // Precompute values that are constant for the entire block.
-        // Avoids transcendental calls (powf, exp) inside the per-sample voice loop.
-        let osc1_detune_ratio = Self::semitones_to_ratio(osc1_detune / 100.0);
-        let osc2_detune_ratio = Self::semitones_to_ratio(osc2_detune / 100.0);
-        // Pitch bend ratio: ±pitch_bend_range semitones at full deflection.
-        let pitch_bend_ratio = Self::semitones_to_ratio(pitch_bend * pitch_bend_range as f32);
-        // Aftertouch modulations are per-block constants (aftertouch doesn't change within a buffer).
-        // Velocity is per-voice so it stays inside the loop; aftertouch is channel-wide so it doesn't.
-        // Cutoff uses 4× the velocity scale (4000 vs 1000 Hz) because aftertouch sweeps are typically
-        // larger and more expressive than velocity-triggered filter movements.
-        let aftertouch_cutoff_mod = aftertouch * aftertouch_to_cutoff * 4000.0;
-        let aftertouch_amplitude_mod = 1.0 + aftertouch * aftertouch_to_amplitude * 0.5;
+        let master_volume = self.master_volume_smooth;
+        let expression = self.expression;
 
         // Voice gain normalization: prevent loud chords from driving the clipper hard.
         // With N voices summing to ±N, the RMS grows as √N so we scale down by 1/√N.
         // Calculated once per buffer — voice count rarely changes within a block.
-        let active_voice_count = self.voice_manager.voices.iter().filter(|v| v.is_active).count();
+        let active_voice_count = self
+            .voice_manager
+            .voices
+            .iter()
+            .filter(|v| v.is_active)
+            .count();
         let voice_norm = 1.0_f32 / (active_voice_count.max(1) as f32).sqrt();
-        // Envelope RC coefficients — coeff=0 gives instant transition (handles attack/decay/release=0)
-        let amp_attack_coeff = (-dt * 5.0 / envelope_attack).exp();
-        let amp_decay_coeff = (-dt * 5.0 / envelope_decay).exp();
-        let amp_release_coeff = (-dt * 5.0 / envelope_release).exp();
-        let flt_attack_coeff = (-dt * 5.0 / filter_envelope_attack).exp();
-        let flt_decay_coeff = (-dt * 5.0 / filter_envelope_decay).exp();
-        let flt_release_coeff = (-dt * 5.0 / filter_envelope_release).exp();
-        // Glide coefficient: exp(-dt/tau). Constant per block since glide_time and sample_rate don't change.
-        // Precomputed here to avoid calling exp() once per voice per sample in the inner loop.
-        let glide_coeff = if glide_time > 0.001 {
-            (-1.0_f32 / (glide_time * sample_rate)).exp()
-        } else {
-            0.0
-        };
 
         debug_assert_eq!(left.len(), right.len());
         let n = left.len();
@@ -1433,25 +1473,28 @@ impl Synthesizer {
             // Update arpeggiator
             self.update_arpeggiator(dt);
 
-            // Update LFO using integer phase accumulator to prevent drift
-            let lfo_phase_increment =
-                ((lfo_frequency / self.sample_rate) * PHASE_SCALE as f32) as u64;
-            self.lfo_modulator.phase_accumulator =
-                self.lfo_modulator.phase_accumulator.wrapping_add(lfo_phase_increment);
+            // Integer phase accumulator: prevents drift that float-modulo accumulation produces
+            self.lfo_engine.phase_accumulator = self
+                .lfo_engine
+                .phase_accumulator
+                .wrapping_add(lfo_phase_increment);
 
             // Update sample & hold if needed (at ~100Hz rate)
-            self.lfo_modulator.last_sample_time += dt;
-            if lfo_waveform == LfoWaveform::SampleAndHold && self.lfo_modulator.last_sample_time >= 0.01 {
-                self.lfo_modulator.sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
-                self.lfo_modulator.last_sample_time = 0.0;
+            self.lfo_engine.last_sample_time += dt;
+            if lfo_waveform == LfoWaveform::SampleAndHold
+                && self.lfo_engine.last_sample_time >= 0.01
+            {
+                self.lfo_engine.sample_hold_value = (rand::random::<f32>() - 0.5) * 2.0;
+                self.lfo_engine.last_sample_time = 0.0;
             }
 
             // Generate LFO value using the selected waveform
             // Convert accumulator to phase (0.0 to 1.0)
-            let lfo_phase = (self.lfo_modulator.phase_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
+            let lfo_phase =
+                (self.lfo_engine.phase_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
             // mod_wheel adds extra depth on top of lfo_amplitude (0 = unchanged, 1 = double)
             let lfo_value =
-                LfoModulator::generate_waveform(lfo_waveform, lfo_phase, self.lfo_modulator.sample_hold_value)
+                Lfo::generate_waveform(lfo_waveform, lfo_phase, self.lfo_engine.sample_hold_value)
                     * lfo_amplitude
                     * (1.0 + mod_wheel);
 
@@ -1460,228 +1503,9 @@ impl Synthesizer {
                 if !voice.is_active {
                     continue;
                 }
-
-                // LFO delay / fade-in: ramp from 0 to 1 over lfo_delay seconds desde note-on
-                let lfo_fade = if lfo_delay > 0.001 {
-                    if voice.lfo_delay_elapsed < lfo_delay {
-                        voice.lfo_delay_elapsed += dt;
-                    }
-                    (voice.lfo_delay_elapsed / lfo_delay).min(1.0)
-                } else {
-                    1.0
-                };
-                let lfo_value_voice = lfo_value * lfo_fade;
-
-                // Glide: exponential interpolation toward the target frequency
-                if glide_coeff > 0.0 {
-                    voice.glide_current_freq = voice.frequency
-                        + (voice.glide_current_freq - voice.frequency) * glide_coeff;
-                } else {
-                    voice.glide_current_freq = voice.frequency;
-                }
-                let base_freq = voice.glide_current_freq;
-
-                // Per-voice VCO drift: advance the slow drift LFO and compute a
-                // tiny pitch deviation. Each voice has its own rate so they drift
-                // independently, reproducing the tuning "life" of real analog VCOs.
-                voice.drift_phase += voice.drift_rate * dt;
-                if voice.drift_phase >= 1.0 {
-                    voice.drift_phase -= 1.0;
-                }
-                let drift_ratio = 1.0
-                    + DRIFT_FREQ_FACTOR
-                        * OPTIMIZATION_TABLES.fast_sin(voice.drift_phase * 2.0 * PI);
-
-                // Calculate frequencies with detune, drift, and modulation matrix
-                let mut freq1 = base_freq * osc1_detune_ratio * drift_ratio;
-                let mut freq2 = base_freq * osc2_detune_ratio * drift_ratio;
-
-                // Apply modulation matrix to oscillator pitch (gated by lfo_target booleans)
-                if lfo_target_osc1 {
-                    freq1 *= 1.0 + (lfo_value_voice * modulation_matrix.lfo_to_osc1_pitch * 0.1);
-                }
-                if lfo_target_osc2 {
-                    freq2 *= 1.0 + (lfo_value_voice * modulation_matrix.lfo_to_osc2_pitch * 0.1);
-                }
-
-                // Poly Mod: Filter Envelope → Osc A frequency (±24 semitones a plena excursión)
-                if poly_mod_fe_freq.abs() > 0.001 {
-                    let semitones = poly_mod_fe_freq * 24.0 * voice.filter_envelope_value;
-                    freq1 *= Self::semitones_to_ratio(semitones);
-                }
-
-                // Poly Mod: Filter Envelope → Osc A pulse width
-                let mut osc1_pw_voice = osc1_pulse_width_base;
-                if poly_mod_fe_pw.abs() > 0.001 {
-                    let pw_shift = poly_mod_fe_pw * 0.4 * voice.filter_envelope_value;
-                    osc1_pw_voice = (osc1_pw_voice + pw_shift).clamp(0.05, 0.95);
-                }
-
-                // Poly Mod: Osc B → Osc A (1-sample delay avoids circular dependency;
-                // matches the finite propagation time in real analog hardware)
-                let osc_b_mod = voice.osc2_last_out;
-                if poly_mod_osc_b_freq.abs() > 0.001 {
-                    let semitones = poly_mod_osc_b_freq * 24.0 * osc_b_mod;
-                    freq1 *= Self::semitones_to_ratio(semitones);
-                }
-                if poly_mod_osc_b_pw.abs() > 0.001 {
-                    let pw_shift = poly_mod_osc_b_pw * 0.4 * osc_b_mod;
-                    osc1_pw_voice = (osc1_pw_voice + pw_shift).clamp(0.05, 0.95);
-                }
-
-                // Pitch bend: applied globally to both oscillators
-                freq1 *= pitch_bend_ratio;
-                freq2 *= pitch_bend_ratio;
-
-                // Update phases using integer accumulators to prevent drift
-                let dt1 = freq1 * dt;
-                let dt2 = freq2 * dt;
-                let phase1_increment = (dt1 * PHASE_SCALE as f32) as u64;
-                let phase2_increment = (dt2 * PHASE_SCALE as f32) as u64;
-
-                voice.phase1_accumulator = voice.phase1_accumulator.wrapping_add(phase1_increment);
-                voice.phase2_accumulator = voice.phase2_accumulator.wrapping_add(phase2_increment);
-
-                // Convert accumulators to phase values (0.0 to 1.0)
-                let phase1 = (voice.phase1_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
-                let mut phase2 =
-                    (voice.phase2_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
-
-                // Oscillator sync: if enabled, reset osc2 phase when osc1 completes a cycle
-                let prev_phase1_accumulator =
-                    voice.phase1_accumulator.wrapping_sub(phase1_increment);
-                let prev_phase1 =
-                    (prev_phase1_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
-
-                if osc2_sync && prev_phase1 > phase1 {
-                    // Wrapped around (cycle completed)
-                    voice.phase2_accumulator = 0;
-                    phase2 = 0.0;
-                }
-
-                // Generate oscillator outputs using calculated phases
-                let osc1_out = Self::generate_oscillator_static(
-                    osc1_wave_type,
-                    phase1,
-                    dt1,
-                    osc1_pw_voice, // puede estar modulado por poly mod
-                ) * osc1_amplitude;
-                let osc2_out =
-                    Self::generate_oscillator_static(osc2_wave_type, phase2, dt2, osc2_pulse_width)
-                        * osc2_amplitude;
-
-                // Pink noise via per-voice xorshift32 PRNG + Paul Kellett 3-stage IIR.
-                // Pink noise has -3 dB/octave rolloff, closer to the Prophet-5 noise
-                // source (which is filtered before entering the signal path) than white.
-                // xorshift32 is deterministic and ~8× cheaper than rand::random().
-                let noise = if mixer_noise_level > 0.0 {
-                    voice.noise_prng ^= voice.noise_prng << 13;
-                    voice.noise_prng ^= voice.noise_prng >> 17;
-                    voice.noise_prng ^= voice.noise_prng << 5;
-                    let white = (voice.noise_prng as i32) as f32 * (1.0 / 2_147_483_648.0);
-                    voice.noise_b0 = 0.99886 * voice.noise_b0 + white * 0.0555179;
-                    voice.noise_b1 = 0.99332 * voice.noise_b1 + white * 0.0750759;
-                    voice.noise_b2 = 0.96900 * voice.noise_b2 + white * 0.153_852;
-                    (voice.noise_b0 + voice.noise_b1 + voice.noise_b2 + white * 0.0556418)
-                        * mixer_noise_level
-                } else {
-                    0.0
-                };
-                voice.osc2_last_out = osc2_out;
-
-                let mut mixed = osc1_out * mixer_osc1_level + osc2_out * mixer_osc2_level + noise;
-
-                let filter_envelope_value = Self::process_filter_envelope_static(
-                    voice,
-                    filter_envelope_sustain,
-                    flt_attack_coeff,
-                    flt_decay_coeff,
-                    flt_release_coeff,
-                );
-
-                let kbd_multiplier =
-                    Self::semitones_to_ratio((voice.note as f32 - 60.0) * filter_keyboard_tracking);
-
-                // Apply modulation matrix to filter (gated by lfo_target_filter)
-                let lfo_cutoff_mod = if lfo_target_filter {
-                    lfo_value_voice * modulation_matrix.lfo_to_cutoff * 1000.0
-                } else {
-                    0.0
-                };
-                let velocity_cutoff_mod =
-                    voice.velocity * modulation_matrix.velocity_to_cutoff * 1000.0;
-                let osc_b_cutoff_mod = osc_b_mod * poly_mod_osc_b_cutoff * 4000.0;
-                let modulated_cutoff = (filter_cutoff
-                    + lfo_cutoff_mod
-                    + velocity_cutoff_mod
-                    + aftertouch_cutoff_mod
-                    + osc_b_cutoff_mod
-                    + filter_cutoff * filter_envelope_amount * filter_envelope_value)
-                    * kbd_multiplier;
-
-                // Filter temperature drift: walk toward a target that's re-picked
-                // every 1–3 s; τ ≈ 0.5 s so individual transitions are inaudible
-                // but thermal sway shows up over minutes.
-                voice.filter_drift_timer -= dt;
-                if voice.filter_drift_timer <= 0.0 {
-                    voice.filter_drift_target =
-                        1.0 + (rand::random::<f32>() - 0.5) * FILTER_DRIFT_RANGE;
-                    voice.filter_drift_timer = FILTER_DRIFT_MIN_PERIOD
-                        + rand::random::<f32>()
-                            * (FILTER_DRIFT_MAX_PERIOD - FILTER_DRIFT_MIN_PERIOD);
-                }
-                voice.filter_drift_value += (voice.filter_drift_target - voice.filter_drift_value)
-                    * FILTER_DRIFT_ALPHA
-                    * dt;
-
-                let cutoff_tol = 1.0 + (voice.tolerance_cutoff_mul - 1.0) * component_tolerance;
-                let cutoff_drift = 1.0 + (voice.filter_drift_value - 1.0) * filter_drift_amount;
-                let final_cutoff =
-                    (modulated_cutoff * cutoff_tol * cutoff_drift).clamp(20.0, 20000.0);
-
-                let lfo_resonance_mod = lfo_value_voice * modulation_matrix.lfo_to_resonance * 2.0;
-                let res_tol = 1.0 + (voice.tolerance_res_mul - 1.0) * component_tolerance;
-                // Clamp just below 4.0 to prevent runaway feedback at self-oscillation.
-                let final_resonance =
-                    ((filter_resonance + lfo_resonance_mod) * res_tol).clamp(0.0, 3.95);
-
-                // Apply ladder filter (24dB/octave vintage analog style)
-                mixed = Self::apply_ladder_filter_static(
-                    mixed,
-                    &mut voice.filter_state,
-                    final_cutoff,
-                    final_resonance,
-                    sample_rate,
-                );
-
-                let envelope_value = Self::process_envelope_static(
-                    voice,
-                    envelope_sustain,
-                    dt,
-                    amp_attack_coeff,
-                    amp_decay_coeff,
-                    amp_release_coeff,
-                );
-
-                // Apply modulation matrix to amplitude (gated by lfo_target_amplitude)
-                let lfo_amplitude_mod = if lfo_target_amplitude {
-                    1.0 + (lfo_value_voice * modulation_matrix.lfo_to_amplitude * 0.5)
-                } else {
-                    1.0
-                };
-                let velocity_amplitude_mod =
-                    0.5 + (voice.velocity * modulation_matrix.velocity_to_amplitude * 0.5);
-
-                // A real analog VCA never fully shuts — a constant offset lets a
-                // sliver of oscillator signal escape, giving notes an "alive" taper.
-                let amp_gain = envelope_value + vca_bleed;
-                mixed *= amp_gain
-                    * lfo_amplitude_mod
-                    * velocity_amplitude_mod
-                    * aftertouch_amplitude_mod;
-
-                left_acc += mixed * voice.pan_left;
-                right_acc += mixed * voice.pan_right;
+                let (l, r) = Self::render_voice_sample(voice, &bus, lfo_value);
+                left_acc += l;
+                right_acc += r;
             }
 
             // Normalize voice sum: keeps chords at comparable loudness to single notes.
@@ -1727,6 +1551,312 @@ impl Synthesizer {
             left[si] = (mono_m - stereo_s * std::f32::consts::FRAC_1_SQRT_2).clamp(-1.0, 1.0);
             right[si] = (mono_m + stereo_s * std::f32::consts::FRAC_1_SQRT_2).clamp(-1.0, 1.0);
         }
+    }
+
+    /// Snapshot current parameters + precompute per-block coefficients.
+    fn build_modulation_bus(&self, dt: f32) -> ModulationBus {
+        let pitch_bend_ratio =
+            Self::semitones_to_ratio(self.pitch_bend * self.pitch_bend_range as f32);
+        // Aftertouch cutoff uses 4× the velocity scale (4000 vs 1000 Hz) because
+        // aftertouch sweeps are typically larger and more expressive than
+        // velocity-triggered filter movements.
+        let aftertouch_cutoff_mod = self.aftertouch * self.aftertouch_to_cutoff * 4000.0;
+        let aftertouch_amplitude_mod = 1.0 + self.aftertouch * self.aftertouch_to_amplitude * 0.5;
+
+        let glide_coeff = if self.glide_time > 0.001 {
+            (-1.0_f32 / (self.glide_time * self.sample_rate)).exp()
+        } else {
+            0.0
+        };
+
+        let (amp_attack_coeff, amp_decay_coeff, amp_release_coeff) =
+            Self::envelope_coeffs(&self.amp_envelope, dt);
+        let (flt_attack_coeff, flt_decay_coeff, flt_release_coeff) =
+            Self::envelope_coeffs(&self.filter_envelope, dt);
+
+        ModulationBus {
+            dt,
+            sample_rate: self.sample_rate,
+
+            osc1_wave_type: self.osc1.wave_type,
+            osc1_amplitude: self.osc1.amplitude,
+            osc1_pulse_width_base: self.osc1.pulse_width,
+            osc1_detune_ratio: Self::semitones_to_ratio(self.osc1.detune / 100.0),
+
+            osc2_wave_type: self.osc2.wave_type,
+            osc2_amplitude: self.osc2.amplitude,
+            osc2_pulse_width: self.osc2.pulse_width,
+            osc2_detune_ratio: Self::semitones_to_ratio(self.osc2.detune / 100.0),
+            osc2_sync: self.osc2_sync,
+
+            mixer_osc1_level: self.mixer.osc1_level,
+            mixer_osc2_level: self.mixer.osc2_level,
+            mixer_noise_level: self.mixer.noise_level,
+
+            filter_cutoff: self.filter_cutoff_smooth,
+            filter_resonance: self.filter_resonance_smooth,
+            filter_envelope_amount: self.filter.envelope_amount,
+            filter_keyboard_tracking: self.filter.keyboard_tracking,
+
+            envelope_sustain: self.amp_envelope.sustain,
+            amp_attack_coeff,
+            amp_decay_coeff,
+            amp_release_coeff,
+
+            filter_envelope_sustain: self.filter_envelope.sustain,
+            flt_attack_coeff,
+            flt_decay_coeff,
+            flt_release_coeff,
+
+            lfo_target_osc1: self.lfo.target_osc1_pitch,
+            lfo_target_osc2: self.lfo.target_osc2_pitch,
+            lfo_target_filter: self.lfo.target_filter,
+            lfo_target_amplitude: self.lfo.target_amplitude,
+            lfo_delay: self.lfo_engine.delay,
+
+            modulation_matrix: self.modulation_matrix,
+            pitch_bend_ratio,
+            aftertouch_cutoff_mod,
+            aftertouch_amplitude_mod,
+
+            poly_mod_fe_freq: self.poly_mod.filter_env_to_osc_a_freq,
+            poly_mod_fe_pw: self.poly_mod.filter_env_to_osc_a_pw,
+            poly_mod_osc_b_freq: self.poly_mod.osc_b_to_osc_a_freq,
+            poly_mod_osc_b_pw: self.poly_mod.osc_b_to_osc_a_pw,
+            poly_mod_osc_b_cutoff: self.poly_mod.osc_b_to_filter_cutoff,
+
+            component_tolerance: self.analog.component_tolerance,
+            filter_drift_amount: self.analog.filter_drift_amount,
+            vca_bleed: self.analog.vca_bleed,
+
+            glide_coeff,
+        }
+    }
+
+    /// Per-block RC coefficients for one ADSR stage. `5.0` = 5τ reach target,
+    /// a standard exponential-envelope convention.
+    #[inline(always)]
+    fn envelope_coeffs(env: &EnvelopeParams, dt: f32) -> (f32, f32, f32) {
+        let k = -dt * 5.0;
+        (
+            (k / env.attack).exp(),
+            (k / env.decay).exp(),
+            (k / env.release).exp(),
+        )
+    }
+
+    /// Render one stereo sample for a single active voice. Returns the panned
+    /// `(left, right)` contribution; caller sums across voices and applies the
+    /// master stage.
+    fn render_voice_sample(voice: &mut Voice, bus: &ModulationBus, lfo_value: f32) -> (f32, f32) {
+        let dt = bus.dt;
+
+        // LFO delay / fade-in: ramp from 0 to 1 over lfo_delay seconds desde note-on
+        let lfo_fade = if bus.lfo_delay > 0.001 {
+            if voice.lfo_delay_elapsed < bus.lfo_delay {
+                voice.lfo_delay_elapsed += dt;
+            }
+            (voice.lfo_delay_elapsed / bus.lfo_delay).min(1.0)
+        } else {
+            1.0
+        };
+        let lfo_value_voice = lfo_value * lfo_fade;
+
+        // Glide: exponential interpolation toward the target frequency
+        if bus.glide_coeff > 0.0 {
+            voice.glide_current_freq =
+                voice.frequency + (voice.glide_current_freq - voice.frequency) * bus.glide_coeff;
+        } else {
+            voice.glide_current_freq = voice.frequency;
+        }
+        let base_freq = voice.glide_current_freq;
+
+        // Per-voice VCO drift: advance the slow drift LFO and compute a
+        // tiny pitch deviation. Each voice has its own rate so they drift
+        // independently, reproducing the tuning "life" of real analog VCOs.
+        voice.drift_phase += voice.drift_rate * dt;
+        if voice.drift_phase >= 1.0 {
+            voice.drift_phase -= 1.0;
+        }
+        let drift_ratio =
+            1.0 + DRIFT_FREQ_FACTOR * OPTIMIZATION_TABLES.fast_sin(voice.drift_phase * 2.0 * PI);
+
+        // Calculate frequencies with detune, drift, and modulation matrix
+        let mut freq1 = base_freq * bus.osc1_detune_ratio * drift_ratio;
+        let mut freq2 = base_freq * bus.osc2_detune_ratio * drift_ratio;
+
+        // Apply modulation matrix to oscillator pitch (gated by lfo_target booleans)
+        if bus.lfo_target_osc1 {
+            freq1 *= 1.0 + (lfo_value_voice * bus.modulation_matrix.lfo_to_osc1_pitch * 0.1);
+        }
+        if bus.lfo_target_osc2 {
+            freq2 *= 1.0 + (lfo_value_voice * bus.modulation_matrix.lfo_to_osc2_pitch * 0.1);
+        }
+
+        // Poly Mod: Filter Envelope → Osc A frequency (±24 semitones a plena excursión)
+        if bus.poly_mod_fe_freq.abs() > 0.001 {
+            let semitones = bus.poly_mod_fe_freq * 24.0 * voice.filter_envelope_value;
+            freq1 *= Self::semitones_to_ratio(semitones);
+        }
+
+        // Poly Mod: Filter Envelope → Osc A pulse width
+        let mut osc1_pw_voice = bus.osc1_pulse_width_base;
+        if bus.poly_mod_fe_pw.abs() > 0.001 {
+            let pw_shift = bus.poly_mod_fe_pw * 0.4 * voice.filter_envelope_value;
+            osc1_pw_voice = (osc1_pw_voice + pw_shift).clamp(0.05, 0.95);
+        }
+
+        // Poly Mod: Osc B → Osc A (1-sample delay avoids circular dependency;
+        // matches the finite propagation time in real analog hardware)
+        let osc_b_mod = voice.osc2_last_out;
+        if bus.poly_mod_osc_b_freq.abs() > 0.001 {
+            let semitones = bus.poly_mod_osc_b_freq * 24.0 * osc_b_mod;
+            freq1 *= Self::semitones_to_ratio(semitones);
+        }
+        if bus.poly_mod_osc_b_pw.abs() > 0.001 {
+            let pw_shift = bus.poly_mod_osc_b_pw * 0.4 * osc_b_mod;
+            osc1_pw_voice = (osc1_pw_voice + pw_shift).clamp(0.05, 0.95);
+        }
+
+        // Pitch bend: applied globally to both oscillators
+        freq1 *= bus.pitch_bend_ratio;
+        freq2 *= bus.pitch_bend_ratio;
+
+        // Update phases using integer accumulators to prevent drift
+        let dt1 = freq1 * dt;
+        let dt2 = freq2 * dt;
+        let phase1_increment = (dt1 * PHASE_SCALE as f32) as u64;
+        let phase2_increment = (dt2 * PHASE_SCALE as f32) as u64;
+
+        voice.phase1_accumulator = voice.phase1_accumulator.wrapping_add(phase1_increment);
+        voice.phase2_accumulator = voice.phase2_accumulator.wrapping_add(phase2_increment);
+
+        // Convert accumulators to phase values (0.0 to 1.0)
+        let phase1 = (voice.phase1_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
+        let mut phase2 = (voice.phase2_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
+
+        // Oscillator sync: if enabled, reset osc2 phase when osc1 completes a cycle
+        let prev_phase1_accumulator = voice.phase1_accumulator.wrapping_sub(phase1_increment);
+        let prev_phase1 = (prev_phase1_accumulator & PHASE_MASK) as f32 / PHASE_SCALE as f32;
+
+        if bus.osc2_sync && prev_phase1 > phase1 {
+            voice.phase2_accumulator = 0;
+            phase2 = 0.0;
+        }
+
+        // Generate oscillator outputs using calculated phases
+        let osc1_out =
+            Self::generate_oscillator_static(bus.osc1_wave_type, phase1, dt1, osc1_pw_voice)
+                * bus.osc1_amplitude;
+        let osc2_out =
+            Self::generate_oscillator_static(bus.osc2_wave_type, phase2, dt2, bus.osc2_pulse_width)
+                * bus.osc2_amplitude;
+
+        // Pink noise via per-voice xorshift32 PRNG + Paul Kellett 3-stage IIR.
+        // Pink noise has -3 dB/octave rolloff, closer to the Prophet-5 noise
+        // source (which is filtered before entering the signal path) than white.
+        // xorshift32 is deterministic and ~8× cheaper than rand::random().
+        let noise = if bus.mixer_noise_level > 0.0 {
+            voice.noise_prng ^= voice.noise_prng << 13;
+            voice.noise_prng ^= voice.noise_prng >> 17;
+            voice.noise_prng ^= voice.noise_prng << 5;
+            let white = (voice.noise_prng as i32) as f32 * (1.0 / 2_147_483_648.0);
+            voice.noise_b0 = 0.99886 * voice.noise_b0 + white * 0.0555179;
+            voice.noise_b1 = 0.99332 * voice.noise_b1 + white * 0.0750759;
+            voice.noise_b2 = 0.96900 * voice.noise_b2 + white * 0.153_852;
+            (voice.noise_b0 + voice.noise_b1 + voice.noise_b2 + white * 0.0556418)
+                * bus.mixer_noise_level
+        } else {
+            0.0
+        };
+        voice.osc2_last_out = osc2_out;
+
+        let mut mixed = osc1_out * bus.mixer_osc1_level + osc2_out * bus.mixer_osc2_level + noise;
+
+        let filter_envelope_value = Self::process_filter_envelope_static(
+            voice,
+            bus.filter_envelope_sustain,
+            bus.flt_attack_coeff,
+            bus.flt_decay_coeff,
+            bus.flt_release_coeff,
+        );
+
+        let kbd_multiplier =
+            Self::semitones_to_ratio((voice.note as f32 - 60.0) * bus.filter_keyboard_tracking);
+
+        // Apply modulation matrix to filter (gated by lfo_target_filter)
+        let lfo_cutoff_mod = if bus.lfo_target_filter {
+            lfo_value_voice * bus.modulation_matrix.lfo_to_cutoff * 1000.0
+        } else {
+            0.0
+        };
+        let velocity_cutoff_mod =
+            voice.velocity * bus.modulation_matrix.velocity_to_cutoff * 1000.0;
+        let osc_b_cutoff_mod = osc_b_mod * bus.poly_mod_osc_b_cutoff * 4000.0;
+        let modulated_cutoff = (bus.filter_cutoff
+            + lfo_cutoff_mod
+            + velocity_cutoff_mod
+            + bus.aftertouch_cutoff_mod
+            + osc_b_cutoff_mod
+            + bus.filter_cutoff * bus.filter_envelope_amount * filter_envelope_value)
+            * kbd_multiplier;
+
+        // Filter temperature drift: walk toward a target that's re-picked
+        // every 1–3 s; τ ≈ 0.5 s so individual transitions are inaudible
+        // but thermal sway shows up over minutes.
+        voice.filter_drift_timer -= dt;
+        if voice.filter_drift_timer <= 0.0 {
+            voice.filter_drift_target = 1.0 + (rand::random::<f32>() - 0.5) * FILTER_DRIFT_RANGE;
+            voice.filter_drift_timer = FILTER_DRIFT_MIN_PERIOD
+                + rand::random::<f32>() * (FILTER_DRIFT_MAX_PERIOD - FILTER_DRIFT_MIN_PERIOD);
+        }
+        voice.filter_drift_value +=
+            (voice.filter_drift_target - voice.filter_drift_value) * FILTER_DRIFT_ALPHA * dt;
+
+        let cutoff_tol = 1.0 + (voice.tolerance_cutoff_mul - 1.0) * bus.component_tolerance;
+        let cutoff_drift = 1.0 + (voice.filter_drift_value - 1.0) * bus.filter_drift_amount;
+        let final_cutoff = (modulated_cutoff * cutoff_tol * cutoff_drift).clamp(20.0, 20000.0);
+
+        let lfo_resonance_mod = lfo_value_voice * bus.modulation_matrix.lfo_to_resonance * 2.0;
+        let res_tol = 1.0 + (voice.tolerance_res_mul - 1.0) * bus.component_tolerance;
+        // Clamp just below 4.0 to prevent runaway feedback at self-oscillation.
+        let final_resonance =
+            ((bus.filter_resonance + lfo_resonance_mod) * res_tol).clamp(0.0, 3.95);
+
+        // Apply ladder filter (24dB/octave vintage analog style)
+        mixed = Self::apply_ladder_filter_static(
+            mixed,
+            &mut voice.filter_state,
+            final_cutoff,
+            final_resonance,
+            bus.sample_rate,
+        );
+
+        let envelope_value = Self::process_envelope_static(
+            voice,
+            bus.envelope_sustain,
+            dt,
+            bus.amp_attack_coeff,
+            bus.amp_decay_coeff,
+            bus.amp_release_coeff,
+        );
+
+        // Apply modulation matrix to amplitude (gated by lfo_target_amplitude)
+        let lfo_amplitude_mod = if bus.lfo_target_amplitude {
+            1.0 + (lfo_value_voice * bus.modulation_matrix.lfo_to_amplitude * 0.5)
+        } else {
+            1.0
+        };
+        let velocity_amplitude_mod =
+            0.5 + (voice.velocity * bus.modulation_matrix.velocity_to_amplitude * 0.5);
+
+        // A real analog VCA never fully shuts — a constant offset lets a
+        // sliver of oscillator signal escape, giving notes an "alive" taper.
+        let amp_gain = envelope_value + bus.vca_bleed;
+        mixed *=
+            amp_gain * lfo_amplitude_mod * velocity_amplitude_mod * bus.aftertouch_amplitude_mod;
+
+        (mixed * voice.pan_left, mixed * voice.pan_right)
     }
 
     fn generate_oscillator_static(
@@ -2144,11 +2274,11 @@ impl Synthesizer {
         self.modulation_matrix = preset.modulation_matrix;
         self.effects = preset.effects;
         self.master_volume = preset.master_volume;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = preset.poly_mod_filter_env_to_osc_a_freq;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_pw = preset.poly_mod_filter_env_to_osc_a_pw;
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq = preset.poly_mod_osc_b_to_osc_a_freq;
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_pw = preset.poly_mod_osc_b_to_osc_a_pw;
-        self.lfo_modulator.poly_mod_osc_b_to_filter_cutoff = preset.poly_mod_osc_b_to_filter_cutoff;
+        self.poly_mod.filter_env_to_osc_a_freq = preset.poly_mod_filter_env_to_osc_a_freq;
+        self.poly_mod.filter_env_to_osc_a_pw = preset.poly_mod_filter_env_to_osc_a_pw;
+        self.poly_mod.osc_b_to_osc_a_freq = preset.poly_mod_osc_b_to_osc_a_freq;
+        self.poly_mod.osc_b_to_osc_a_pw = preset.poly_mod_osc_b_to_osc_a_pw;
+        self.poly_mod.osc_b_to_filter_cutoff = preset.poly_mod_osc_b_to_filter_cutoff;
     }
 
     pub fn load_preset(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -2511,14 +2641,14 @@ impl Synthesizer {
             filter_envelope: self.filter_envelope.clone(),
             amp_envelope: self.amp_envelope.clone(),
             lfo: self.lfo.clone(),
-            modulation_matrix: self.modulation_matrix.clone(),
+            modulation_matrix: self.modulation_matrix,
             effects: self.effects.clone(),
             master_volume: self.master_volume,
-            poly_mod_filter_env_to_osc_a_freq: self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq,
-            poly_mod_filter_env_to_osc_a_pw: self.lfo_modulator.poly_mod_filter_env_to_osc_a_pw,
-            poly_mod_osc_b_to_osc_a_freq: self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq,
-            poly_mod_osc_b_to_osc_a_pw: self.lfo_modulator.poly_mod_osc_b_to_osc_a_pw,
-            poly_mod_osc_b_to_filter_cutoff: self.lfo_modulator.poly_mod_osc_b_to_filter_cutoff,
+            poly_mod_filter_env_to_osc_a_freq: self.poly_mod.filter_env_to_osc_a_freq,
+            poly_mod_filter_env_to_osc_a_pw: self.poly_mod.filter_env_to_osc_a_pw,
+            poly_mod_osc_b_to_osc_a_freq: self.poly_mod.osc_b_to_osc_a_freq,
+            poly_mod_osc_b_to_osc_a_pw: self.poly_mod.osc_b_to_osc_a_pw,
+            poly_mod_osc_b_to_filter_cutoff: self.poly_mod.osc_b_to_filter_cutoff,
         }
     }
 
@@ -2546,11 +2676,11 @@ impl Synthesizer {
         self.effects = EffectsParams::default();
         self.arpeggiator = ArpeggiatorParams::default();
         self.master_volume = 0.5;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.0;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_pw = 0.0;
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq = 0.0;
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_pw = 0.0;
-        self.lfo_modulator.poly_mod_osc_b_to_filter_cutoff = 0.0;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.0;
+        self.poly_mod.filter_env_to_osc_a_pw = 0.0;
+        self.poly_mod.osc_b_to_osc_a_freq = 0.0;
+        self.poly_mod.osc_b_to_osc_a_pw = 0.0;
+        self.poly_mod.osc_b_to_filter_cutoff = 0.0;
     }
 
     /// Write the 32 built-in presets to disk only if they don't already exist.
@@ -2826,7 +2956,7 @@ impl Synthesizer {
         self.effects.chorus_depth = 0.55;
         self.modulation_matrix.velocity_to_cutoff = 0.4;
         self.modulation_matrix.velocity_to_amplitude = 0.25;
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq = 0.08;
+        self.poly_mod.osc_b_to_osc_a_freq = 0.08;
         self.save_preset_with_category("Vintage Lead", "Lead")
     }
 
@@ -2987,7 +3117,7 @@ impl Synthesizer {
         self.amp_envelope.release = 0.2;
         self.modulation_matrix.velocity_to_cutoff = 0.6;
         self.modulation_matrix.velocity_to_amplitude = 0.3;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.12;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.12;
         self.save_preset_with_category("Brass Stab", "Brass")
     }
 
@@ -3015,7 +3145,7 @@ impl Synthesizer {
         self.modulation_matrix.lfo_to_osc1_pitch = 0.15;
         self.modulation_matrix.velocity_to_cutoff = 0.55;
         self.modulation_matrix.velocity_to_amplitude = 0.25;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.08;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.08;
         self.save_preset_with_category("Trumpet Lead", "Brass")
     }
 
@@ -3081,7 +3211,7 @@ impl Synthesizer {
         self.modulation_matrix.velocity_to_cutoff = 0.5;
         self.modulation_matrix.velocity_to_amplitude = 0.3;
         self.effects.reverb_amount = 0.3;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.06;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.06;
         self.save_preset_with_category("Sax Lead", "Brass")
     }
 
@@ -3137,8 +3267,8 @@ impl Synthesizer {
         self.amp_envelope.sustain = 0.8;
         self.amp_envelope.release = 3.0;
         // Extreme Poly Mod: osc B drives osc A pitch over a wide range.
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq = 0.5;
-        self.lfo_modulator.poly_mod_osc_b_to_filter_cutoff = 0.4;
+        self.poly_mod.osc_b_to_osc_a_freq = 0.5;
+        self.poly_mod.osc_b_to_filter_cutoff = 0.4;
         self.effects.reverb_amount = 0.7;
         self.effects.delay_amount = 0.4;
         self.save_preset_with_category("Sweep FX", "FX")
@@ -3190,7 +3320,7 @@ impl Synthesizer {
         self.lfo.target_osc1_pitch = true;
         self.modulation_matrix.lfo_to_osc1_pitch = 0.8;
         // Poly Mod pushes the pitch-bent zap further.
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq = 0.3;
+        self.poly_mod.osc_b_to_osc_a_freq = 0.3;
         self.effects.delay_amount = 0.4;
         self.save_preset_with_category("Zap Sound", "FX")
     }
@@ -3221,7 +3351,7 @@ impl Synthesizer {
         self.modulation_matrix.velocity_to_cutoff = 0.65;
         self.modulation_matrix.velocity_to_amplitude = 0.3;
         // Textbook Prophet brass Poly Mod: filter envelope adds FM bite to osc A.
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.15;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.15;
         self.save_preset_with_category("Jump Brass", "Brass")
     }
 
@@ -3284,7 +3414,7 @@ impl Synthesizer {
         self.modulation_matrix.lfo_to_cutoff = 0.7;
         self.modulation_matrix.velocity_to_cutoff = 0.4;
         // Iconic Prophet trick: filter envelope modulates osc A for the sync-sweep motion.
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.18;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.18;
         self.effects.chorus_mix = 0.25;
         self.save_preset_with_category("Vintage Sync Lead", "Lead")
     }
@@ -3437,8 +3567,8 @@ impl Synthesizer {
         self.modulation_matrix.velocity_to_amplitude = 0.3;
         // Classic Prophet brass Poly Mod recipe: gentle osc B into osc A freq
         // plus filter envelope into osc A pitch for the tell-tale wobble.
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq = 0.1;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.1;
+        self.poly_mod.osc_b_to_osc_a_freq = 0.1;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.1;
         self.effects.chorus_mix = 0.15;
         self.save_preset_with_category("Runaway Brass", "Brass")
     }
@@ -3474,7 +3604,7 @@ impl Synthesizer {
         self.modulation_matrix.velocity_to_cutoff = 0.55;
         self.modulation_matrix.velocity_to_amplitude = 0.3;
         // Filter envelope modulates osc A freq: sync pitch sweep that defines the lead.
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.22;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.22;
         self.effects.chorus_mix = 0.25;
         self.save_preset_with_category("Thriller Sync Lead", "Lead")
     }
@@ -3505,8 +3635,8 @@ impl Synthesizer {
         self.modulation_matrix.velocity_to_amplitude = 0.45; // Bells want dynamic strike response.
         // The defining move: deep osc B → osc A FM, modulated by the filter envelope
         // so the bright "strike" transient decays into a cleaner sine.
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq = 0.55;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.3;
+        self.poly_mod.osc_b_to_osc_a_freq = 0.55;
+        self.poly_mod.filter_env_to_osc_a_freq = 0.3;
         self.effects.reverb_amount = 0.7;
         self.effects.reverb_size = 0.9;
         self.save_preset_with_category("Poly Mod Bell", "FX")
@@ -3630,11 +3760,11 @@ impl Synthesizer {
             arp_octaves: self.arpeggiator.octaves,
             arp_gate_length: self.arpeggiator.gate_length,
             master_volume: self.master_volume,
-            poly_mod_filter_env_to_osc_a_freq: self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq,
-            poly_mod_filter_env_to_osc_a_pw: self.lfo_modulator.poly_mod_filter_env_to_osc_a_pw,
-            poly_mod_osc_b_to_osc_a_freq: self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq,
-            poly_mod_osc_b_to_osc_a_pw: self.lfo_modulator.poly_mod_osc_b_to_osc_a_pw,
-            poly_mod_osc_b_to_filter_cutoff: self.lfo_modulator.poly_mod_osc_b_to_filter_cutoff,
+            poly_mod_filter_env_to_osc_a_freq: self.poly_mod.filter_env_to_osc_a_freq,
+            poly_mod_filter_env_to_osc_a_pw: self.poly_mod.filter_env_to_osc_a_pw,
+            poly_mod_osc_b_to_osc_a_freq: self.poly_mod.osc_b_to_osc_a_freq,
+            poly_mod_osc_b_to_osc_a_pw: self.poly_mod.osc_b_to_osc_a_pw,
+            poly_mod_osc_b_to_filter_cutoff: self.poly_mod.osc_b_to_filter_cutoff,
             glide_time: self.glide_time,
             pitch_bend: self.pitch_bend,
             pitch_bend_range: self.pitch_bend_range,
@@ -3658,7 +3788,7 @@ impl Synthesizer {
             unison_spread: self.voice_manager.unison_spread,
             max_voices: self.voice_manager.max_polyphony as u8,
             arp_sync_to_midi: self.arp_sync_to_midi,
-            lfo_delay: self.lfo_modulator.delay,
+            lfo_delay: self.lfo_engine.delay,
             chorus_mix: self.effects.chorus_mix,
             chorus_rate: self.effects.chorus_rate,
             chorus_depth: self.effects.chorus_depth,
@@ -3727,11 +3857,11 @@ impl Synthesizer {
         self.arpeggiator.octaves = params.arp_octaves;
         self.arpeggiator.gate_length = params.arp_gate_length;
         self.master_volume = params.master_volume;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = params.poly_mod_filter_env_to_osc_a_freq;
-        self.lfo_modulator.poly_mod_filter_env_to_osc_a_pw = params.poly_mod_filter_env_to_osc_a_pw;
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_freq = params.poly_mod_osc_b_to_osc_a_freq;
-        self.lfo_modulator.poly_mod_osc_b_to_osc_a_pw = params.poly_mod_osc_b_to_osc_a_pw;
-        self.lfo_modulator.poly_mod_osc_b_to_filter_cutoff = params.poly_mod_osc_b_to_filter_cutoff;
+        self.poly_mod.filter_env_to_osc_a_freq = params.poly_mod_filter_env_to_osc_a_freq;
+        self.poly_mod.filter_env_to_osc_a_pw = params.poly_mod_filter_env_to_osc_a_pw;
+        self.poly_mod.osc_b_to_osc_a_freq = params.poly_mod_osc_b_to_osc_a_freq;
+        self.poly_mod.osc_b_to_osc_a_pw = params.poly_mod_osc_b_to_osc_a_pw;
+        self.poly_mod.osc_b_to_filter_cutoff = params.poly_mod_osc_b_to_filter_cutoff;
         self.glide_time = params.glide_time;
         self.pitch_bend = params.pitch_bend;
         self.pitch_bend_range = params.pitch_bend_range;
@@ -3755,7 +3885,7 @@ impl Synthesizer {
         self.voice_manager.unison_spread = params.unison_spread;
         self.voice_manager.max_polyphony = params.max_voices as usize;
         self.arp_sync_to_midi = params.arp_sync_to_midi;
-        self.lfo_modulator.delay = params.lfo_delay;
+        self.lfo_engine.delay = params.lfo_delay;
         self.effects.chorus_mix = params.chorus_mix;
         self.effects.chorus_rate = params.chorus_rate;
         self.effects.chorus_depth = params.chorus_depth;
@@ -3967,7 +4097,13 @@ mod tests {
         let params = synth.to_synth_params();
         synth.apply_params(&params);
         assert!(!synth.voice_manager.voices.is_empty());
-        assert!(synth.voice_manager.voices.iter().any(|v| v.note == 60 && v.is_active));
+        assert!(
+            synth
+                .voice_manager
+                .voices
+                .iter()
+                .any(|v| v.note == 60 && v.is_active)
+        );
     }
 
     #[test]
@@ -4371,9 +4507,20 @@ mod tests {
     fn test_note_off_triggers_release_state() {
         let mut synth = Synthesizer::new();
         synth.note_on(60, 100);
-        assert!(synth.voice_manager.voices.iter().any(|v| v.note == 60 && v.is_active));
+        assert!(
+            synth
+                .voice_manager
+                .voices
+                .iter()
+                .any(|v| v.note == 60 && v.is_active)
+        );
         synth.note_off(60);
-        let v = synth.voice_manager.voices.iter().find(|v| v.note == 60).unwrap();
+        let v = synth
+            .voice_manager
+            .voices
+            .iter()
+            .find(|v| v.note == 60)
+            .unwrap();
         assert_eq!(v.envelope_state, EnvelopeState::Release);
     }
 
@@ -4383,7 +4530,15 @@ mod tests {
         for note in [60, 64, 67, 72] {
             synth.note_on(note, 100);
         }
-        assert!(synth.voice_manager.voices.iter().filter(|v| v.is_active).count() >= 4);
+        assert!(
+            synth
+                .voice_manager
+                .voices
+                .iter()
+                .filter(|v| v.is_active)
+                .count()
+                >= 4
+        );
         synth.all_notes_off();
         assert!(synth.voice_manager.voices.iter().all(|v| !v.is_active));
         assert!(synth.voice_manager.note_stack.is_empty());
@@ -4398,12 +4553,22 @@ mod tests {
         synth.note_on(60, 100);
         synth.note_off(60);
         // With sustain held, the voice must still be active and not yet releasing.
-        let v = synth.voice_manager.voices.iter().find(|v| v.note == 60).unwrap();
+        let v = synth
+            .voice_manager
+            .voices
+            .iter()
+            .find(|v| v.note == 60)
+            .unwrap();
         assert!(v.is_active);
         assert!(v.is_sustained);
         // Releasing the pedal must drop the sustained voices into Release.
         synth.sustain_pedal(false);
-        let v = synth.voice_manager.voices.iter().find(|v| v.note == 60).unwrap();
+        let v = synth
+            .voice_manager
+            .voices
+            .iter()
+            .find(|v| v.note == 60)
+            .unwrap();
         assert_eq!(v.envelope_state, EnvelopeState::Release);
     }
 
@@ -4412,8 +4577,8 @@ mod tests {
     #[test]
     fn test_lfo_triangle_range_and_endpoints() {
         // At phase=0.0 triangle = -1, at phase=0.5 triangle = +1, at phase=1.0 wraps to -1
-        let at_zero = LfoModulator::generate_waveform(LfoWaveform::Triangle, 0.0, 0.0);
-        let at_half = LfoModulator::generate_waveform(LfoWaveform::Triangle, 0.5, 0.0);
+        let at_zero = Lfo::generate_waveform(LfoWaveform::Triangle, 0.0, 0.0);
+        let at_half = Lfo::generate_waveform(LfoWaveform::Triangle, 0.5, 0.0);
         assert!(
             (at_zero - (-1.0)).abs() < 0.01,
             "triangle at 0 should be -1, got {}",
@@ -4426,8 +4591,7 @@ mod tests {
         );
         // All values must be in [-1, 1]
         for i in 0..100 {
-            let v =
-                LfoModulator::generate_waveform(LfoWaveform::Triangle, i as f32 / 100.0, 0.0);
+            let v = Lfo::generate_waveform(LfoWaveform::Triangle, i as f32 / 100.0, 0.0);
             assert!(
                 (-1.0..=1.0).contains(&v),
                 "triangle out of range at phase {}: {}",
@@ -4441,7 +4605,7 @@ mod tests {
     fn test_lfo_square_only_two_values() {
         for i in 0..100 {
             let phase = i as f32 / 100.0;
-            let v = LfoModulator::generate_waveform(LfoWaveform::Square, phase, 0.0);
+            let v = Lfo::generate_waveform(LfoWaveform::Square, phase, 0.0);
             assert!(
                 v == -1.0 || v == 1.0,
                 "square must be ±1, got {} at phase {}",
@@ -4450,20 +4614,14 @@ mod tests {
             );
         }
         // First half is -1, second half is +1
-        assert_eq!(
-            LfoModulator::generate_waveform(LfoWaveform::Square, 0.0, 0.0),
-            -1.0
-        );
-        assert_eq!(
-            LfoModulator::generate_waveform(LfoWaveform::Square, 0.75, 0.0),
-            1.0
-        );
+        assert_eq!(Lfo::generate_waveform(LfoWaveform::Square, 0.0, 0.0), -1.0);
+        assert_eq!(Lfo::generate_waveform(LfoWaveform::Square, 0.75, 0.0), 1.0);
     }
 
     #[test]
     fn test_lfo_sawtooth_range_and_direction() {
-        let at_zero = LfoModulator::generate_waveform(LfoWaveform::Sawtooth, 0.0, 0.0);
-        let at_one = LfoModulator::generate_waveform(LfoWaveform::Sawtooth, 0.9999, 0.0);
+        let at_zero = Lfo::generate_waveform(LfoWaveform::Sawtooth, 0.0, 0.0);
+        let at_one = Lfo::generate_waveform(LfoWaveform::Sawtooth, 0.9999, 0.0);
         // Rises from -1 to +1
         assert!(
             (at_zero - (-1.0)).abs() < 0.01,
@@ -4478,8 +4636,7 @@ mod tests {
         // Monotonically increasing within one period
         let mut prev = f32::MIN;
         for i in 0..100 {
-            let v =
-                LfoModulator::generate_waveform(LfoWaveform::Sawtooth, i as f32 / 100.0, 0.0);
+            let v = Lfo::generate_waveform(LfoWaveform::Sawtooth, i as f32 / 100.0, 0.0);
             assert!(v >= prev, "sawtooth should be monotone increasing");
             prev = v;
         }
@@ -4487,8 +4644,8 @@ mod tests {
 
     #[test]
     fn test_lfo_reverse_sawtooth_range_and_direction() {
-        let at_zero = LfoModulator::generate_waveform(LfoWaveform::ReverseSawtooth, 0.0, 0.0);
-        let at_one = LfoModulator::generate_waveform(LfoWaveform::ReverseSawtooth, 0.9999, 0.0);
+        let at_zero = Lfo::generate_waveform(LfoWaveform::ReverseSawtooth, 0.0, 0.0);
+        let at_one = Lfo::generate_waveform(LfoWaveform::ReverseSawtooth, 0.9999, 0.0);
         assert!(
             (at_zero - 1.0).abs() < 0.01,
             "rsaw at 0 should be +1, got {}",
@@ -4505,11 +4662,7 @@ mod tests {
     fn test_lfo_sample_and_hold_returns_held_value() {
         let held = 0.42_f32;
         for i in 0..10 {
-            let v = LfoModulator::generate_waveform(
-                LfoWaveform::SampleAndHold,
-                i as f32 / 10.0,
-                held,
-            );
+            let v = Lfo::generate_waveform(LfoWaveform::SampleAndHold, i as f32 / 10.0, held);
             assert_eq!(v, held, "S&H must return the held value unchanged");
         }
     }
@@ -4648,7 +4801,12 @@ mod tests {
         synth.note_on(64, 100);
         synth.note_on(67, 100);
         // Mono must never exceed one active voice
-        let active = synth.voice_manager.voices.iter().filter(|v| v.is_active).count();
+        let active = synth
+            .voice_manager
+            .voices
+            .iter()
+            .filter(|v| v.is_active)
+            .count();
         assert_eq!(
             active, 1,
             "mono mode should have exactly 1 active voice, got {}",
@@ -4663,7 +4821,12 @@ mod tests {
         synth.note_on(60, 100);
         synth.note_on(64, 100); // 64 is now playing
         synth.note_off(64); // should return to 60
-        let active: Vec<_> = synth.voice_manager.voices.iter().filter(|v| v.is_active).collect();
+        let active: Vec<_> = synth
+            .voice_manager
+            .voices
+            .iter()
+            .filter(|v| v.is_active)
+            .collect();
         assert_eq!(active.len(), 1);
         assert_eq!(
             active[0].note, 60,
@@ -4676,7 +4839,12 @@ mod tests {
         let mut synth = Synthesizer::new();
         synth.voice_manager.voice_mode = VoiceMode::Unison;
         synth.note_on(60, 100);
-        let active: Vec<_> = synth.voice_manager.voices.iter().filter(|v| v.is_active).collect();
+        let active: Vec<_> = synth
+            .voice_manager
+            .voices
+            .iter()
+            .filter(|v| v.is_active)
+            .collect();
         assert!(active.len() > 1, "unison should activate multiple voices");
         // All voices must have the same MIDI note number
         for v in &active {
@@ -4691,7 +4859,8 @@ mod tests {
         synth.voice_manager.unison_spread = 20.0; // 20 cents spread
         synth.note_on(60, 100);
         let freqs: Vec<f32> = synth
-            .voice_manager.voices
+            .voice_manager
+            .voices
             .iter()
             .filter(|v| v.is_active)
             .map(|v| v.frequency)
@@ -4714,7 +4883,12 @@ mod tests {
         synth.voice_manager.note_priority = NotePriority::Low;
         synth.note_on(72, 100); // high note
         synth.note_on(60, 100); // low note — should take priority
-        let active: Vec<_> = synth.voice_manager.voices.iter().filter(|v| v.is_active).collect();
+        let active: Vec<_> = synth
+            .voice_manager
+            .voices
+            .iter()
+            .filter(|v| v.is_active)
+            .collect();
         assert_eq!(active.len(), 1);
         assert_eq!(
             active[0].note, 60,
@@ -4729,7 +4903,12 @@ mod tests {
         synth.voice_manager.note_priority = NotePriority::High;
         synth.note_on(60, 100); // low note
         synth.note_on(72, 100); // high note — should take priority
-        let active: Vec<_> = synth.voice_manager.voices.iter().filter(|v| v.is_active).collect();
+        let active: Vec<_> = synth
+            .voice_manager
+            .voices
+            .iter()
+            .filter(|v| v.is_active)
+            .collect();
         assert_eq!(active.len(), 1);
         assert_eq!(
             active[0].note, 72,
@@ -4746,7 +4925,12 @@ mod tests {
         for note in 36..=(36 + synth.voice_manager.max_polyphony as u8 + 2) {
             synth.note_on(note, 100);
         }
-        let active = synth.voice_manager.voices.iter().filter(|v| v.is_active).count();
+        let active = synth
+            .voice_manager
+            .voices
+            .iter()
+            .filter(|v| v.is_active)
+            .count();
         assert!(
             active <= synth.voice_manager.max_polyphony,
             "active voices {} must not exceed max_polyphony {}",
@@ -5208,7 +5392,8 @@ mod tests {
         synth.process_block(&mut buf_l, &mut buf_r);
 
         let state_before = synth
-            .voice_manager.voices
+            .voice_manager
+            .voices
             .iter()
             .find(|v| v.is_active)
             .map(|v| v.envelope_state)
@@ -5224,7 +5409,8 @@ mod tests {
         synth.note_on(64, 100);
 
         let state_after = synth
-            .voice_manager.voices
+            .voice_manager
+            .voices
             .iter()
             .find(|v| v.is_active)
             .map(|v| v.envelope_state)
@@ -5237,7 +5423,11 @@ mod tests {
         );
         // Note must have changed to the new pitch.
         assert!(
-            synth.voice_manager.voices.iter().any(|v| v.is_active && v.note == 64),
+            synth
+                .voice_manager
+                .voices
+                .iter()
+                .any(|v| v.is_active && v.note == 64),
             "Active voice should now be playing note 64"
         );
     }
@@ -5348,11 +5538,11 @@ false
         synth.effects.chorus_depth = 0.55;
         synth.modulation_matrix.velocity_to_cutoff = 0.48;
         synth.modulation_matrix.velocity_to_amplitude = 0.27;
-        synth.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.18;
-        synth.lfo_modulator.poly_mod_filter_env_to_osc_a_pw = -0.11;
-        synth.lfo_modulator.poly_mod_osc_b_to_osc_a_freq = 0.33;
-        synth.lfo_modulator.poly_mod_osc_b_to_osc_a_pw = 0.07;
-        synth.lfo_modulator.poly_mod_osc_b_to_filter_cutoff = -0.42;
+        synth.poly_mod.filter_env_to_osc_a_freq = 0.18;
+        synth.poly_mod.filter_env_to_osc_a_pw = -0.11;
+        synth.poly_mod.osc_b_to_osc_a_freq = 0.33;
+        synth.poly_mod.osc_b_to_osc_a_pw = 0.07;
+        synth.poly_mod.osc_b_to_filter_cutoff = -0.42;
 
         let preset = synth.snapshot_preset("FullFlow", "Test");
         let json = synth.preset_to_json(&preset).expect("serialize");
@@ -5380,11 +5570,11 @@ false
         assert!((synth.effects.chorus_depth - 0.55).abs() < 0.01);
         assert!((synth.modulation_matrix.velocity_to_cutoff - 0.48).abs() < 0.01);
         assert!((synth.modulation_matrix.velocity_to_amplitude - 0.27).abs() < 0.01);
-        assert!((synth.lfo_modulator.poly_mod_filter_env_to_osc_a_freq - 0.18).abs() < 0.01);
-        assert!((synth.lfo_modulator.poly_mod_filter_env_to_osc_a_pw - (-0.11)).abs() < 0.01);
-        assert!((synth.lfo_modulator.poly_mod_osc_b_to_osc_a_freq - 0.33).abs() < 0.01);
-        assert!((synth.lfo_modulator.poly_mod_osc_b_to_osc_a_pw - 0.07).abs() < 0.01);
-        assert!((synth.lfo_modulator.poly_mod_osc_b_to_filter_cutoff - (-0.42)).abs() < 0.01);
+        assert!((synth.poly_mod.filter_env_to_osc_a_freq - 0.18).abs() < 0.01);
+        assert!((synth.poly_mod.filter_env_to_osc_a_pw - (-0.11)).abs() < 0.01);
+        assert!((synth.poly_mod.osc_b_to_osc_a_freq - 0.33).abs() < 0.01);
+        assert!((synth.poly_mod.osc_b_to_osc_a_pw - 0.07).abs() < 0.01);
+        assert!((synth.poly_mod.osc_b_to_filter_cutoff - (-0.42)).abs() < 0.01);
     }
 
     #[test]
@@ -5403,15 +5593,15 @@ false
         // would bleed into the next preset builder, producing unintended
         // cross-modulation on patches that should be clean.
         let mut synth = Synthesizer::new();
-        synth.lfo_modulator.poly_mod_filter_env_to_osc_a_freq = 0.5;
-        synth.lfo_modulator.poly_mod_osc_b_to_filter_cutoff = -0.3;
+        synth.poly_mod.filter_env_to_osc_a_freq = 0.5;
+        synth.poly_mod.osc_b_to_filter_cutoff = -0.3;
         synth.filter.keyboard_tracking = 0.8;
         synth.modulation_matrix.velocity_to_cutoff = 0.6;
 
         synth.reset_patch_to_defaults();
 
-        assert_eq!(synth.lfo_modulator.poly_mod_filter_env_to_osc_a_freq, 0.0);
-        assert_eq!(synth.lfo_modulator.poly_mod_osc_b_to_filter_cutoff, 0.0);
+        assert_eq!(synth.poly_mod.filter_env_to_osc_a_freq, 0.0);
+        assert_eq!(synth.poly_mod.osc_b_to_filter_cutoff, 0.0);
         assert_eq!(synth.filter.keyboard_tracking, 0.0);
         assert_eq!(synth.modulation_matrix.velocity_to_cutoff, 0.0);
     }

@@ -74,14 +74,8 @@ impl AudioEngine {
     {
         let channels = config.channels as usize;
 
-        // Synthesizer lives exclusively in the audio thread
         let mut synthesizer = Synthesizer::new();
         synthesizer.sample_rate = sample_rate as f32;
-
-        // Cache preset list before entering the real-time callback.
-        // list_presets() does filesystem I/O which must never run on the audio thread.
-        let preset_names: std::sync::Arc<Vec<String>> =
-            std::sync::Arc::new(Synthesizer::list_presets());
 
         // Pre-allocated stereo buffers
         let mut left_buffer = vec![0.0f32; 1024];
@@ -114,16 +108,6 @@ impl AudioEngine {
                             MidiEvent::SustainPedal { pressed } => {
                                 synthesizer.sustain_pedal(pressed);
                             }
-                            MidiEvent::ProgramChange { program } => {
-                                if !preset_names.is_empty() {
-                                    let idx = (program as usize) % preset_names.len();
-                                    if let Err(e) = synthesizer.load_preset(&preset_names[idx]) {
-                                        log::warn!("Program Change: failed to load preset '{}': {}", preset_names[idx], e);
-                                    } else {
-                                        log::info!("Program Change {}: loaded '{}'", program, preset_names[idx]);
-                                    }
-                                }
-                            }
                             MidiEvent::MidiClock => {
                                 let now = std::time::Instant::now();
                                 let dt = now.duration_since(last_clock_instant).as_secs_f32();
@@ -140,24 +124,6 @@ impl AudioEngine {
                             MidiEvent::MidiClockStop => {
                                 synthesizer.midi_clock_running = false;
                                 log::info!("MIDI clock stopped");
-                            }
-                            MidiEvent::SysExRequest => {
-                                // Guardar preset actual. Nota: I/O en audio thread es no-ideal
-                                // pero SysEx es tan raro que el dropout es aceptable.
-                                if let Err(e) = synthesizer.save_preset("sysex_dump") {
-                                    log::warn!("SysEx dump failed: {}", e);
-                                } else {
-                                    log::info!("SysEx: preset guardado como sysex_dump");
-                                }
-                            }
-                            MidiEvent::SysExPatch { data } => {
-                                if let Ok(json_str) = std::str::from_utf8(&data) {
-                                    if let Err(e) = synthesizer.load_preset_from_json(json_str) {
-                                        log::warn!("SysEx patch load failed: {}", e);
-                                    }
-                                } else {
-                                    log::warn!("SysEx: datos no son UTF-8 válido");
-                                }
                             }
                             MidiEvent::AllNotesOff => {
                                 synthesizer.all_notes_off();
@@ -210,10 +176,16 @@ impl AudioEngine {
                     let block_peak = (0..frames).fold(0.0f32, |a, i| {
                         a.max(left_buffer[i].abs()).max(right_buffer[i].abs())
                     });
-                    let stored = f32::from_bits(lock_free_synth.peak_level.load(std::sync::atomic::Ordering::Relaxed));
+                    let stored = f32::from_bits(
+                        lock_free_synth
+                            .peak_level
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    );
                     let decayed = (stored - 0.003).max(0.0);
                     let new_peak = block_peak.max(decayed);
-                    lock_free_synth.peak_level.store(new_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                    lock_free_synth
+                        .peak_level
+                        .store(new_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
 
                     // 6. Convert stereo to multi-channel output
                     // frames = data.len() / channels, so out_idx < data.len() is always true.
