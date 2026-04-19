@@ -383,28 +383,28 @@ pub enum MidiEvent {
     AllNotesOff,
 }
 
-/// Lightweight event queue for MIDI note events
-/// Uses Mutex because note events are infrequent (human-speed, not audio-rate)
-pub struct MidiEventQueue {
-    events: std::sync::Mutex<Vec<MidiEvent>>,
+/// Mutex-backed producer/consumer queue for low-rate events. Infrequent
+/// enough (human-speed) that contention is a non-issue; `drain` hands out
+/// the buffer via `mem::take`, so the callback path is allocation-free
+/// once the Vec warms up.
+pub struct EventQueue<T> {
+    events: std::sync::Mutex<Vec<T>>,
 }
 
-impl MidiEventQueue {
+impl<T> EventQueue<T> {
     pub fn new() -> Self {
         Self {
             events: std::sync::Mutex::new(Vec::with_capacity(32)),
         }
     }
 
-    /// Push an event (called from MIDI/GUI thread)
-    pub fn push(&self, event: MidiEvent) {
+    pub fn push(&self, event: T) {
         if let Ok(mut events) = self.events.lock() {
             events.push(event);
         }
     }
 
-    /// Drain all events (called from audio thread at start of each block)
-    pub fn drain(&self) -> Vec<MidiEvent> {
+    pub fn drain(&self) -> Vec<T> {
         if let Ok(mut events) = self.events.lock() {
             std::mem::take(&mut *events)
         } else {
@@ -413,13 +413,17 @@ impl MidiEventQueue {
     }
 }
 
+impl<T> Default for EventQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub type MidiEventQueue = EventQueue<MidiEvent>;
+
 /// Events that must be handled on the GUI thread: anything that does disk
 /// I/O, large allocation, or JSON parsing. The MIDI thread pushes these
 /// straight to the GUI; the audio thread never touches them.
-///
-/// This is the primitive that would live in `synth-core/ipc/` — every synth
-/// needs the same separation between "play this note" (audio-thread-safe)
-/// and "load a preset" (GUI/disk-thread).
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     /// Program Change: load preset at position `program` (0-indexed) in sorted list
@@ -430,41 +434,7 @@ pub enum UiEvent {
     SysExPatch { data: Vec<u8> },
 }
 
-/// GUI-thread event queue. Same lock-shape as `MidiEventQueue` — the events
-/// arrive at human speed so the Mutex is effectively uncontested.
-pub struct UiEventQueue {
-    events: std::sync::Mutex<Vec<UiEvent>>,
-}
-
-impl UiEventQueue {
-    pub fn new() -> Self {
-        Self {
-            events: std::sync::Mutex::new(Vec::with_capacity(8)),
-        }
-    }
-
-    /// Push an event (called from MIDI thread)
-    pub fn push(&self, event: UiEvent) {
-        if let Ok(mut events) = self.events.lock() {
-            events.push(event);
-        }
-    }
-
-    /// Drain all events (called from GUI thread once per frame)
-    pub fn drain(&self) -> Vec<UiEvent> {
-        if let Ok(mut events) = self.events.lock() {
-            std::mem::take(&mut *events)
-        } else {
-            Vec::new()
-        }
-    }
-}
-
-impl Default for UiEventQueue {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub type UiEventQueue = EventQueue<UiEvent>;
 
 #[cfg(test)]
 mod tests {

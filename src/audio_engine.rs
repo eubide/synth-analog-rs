@@ -74,13 +74,8 @@ impl AudioEngine {
     {
         let channels = config.channels as usize;
 
-        // Synthesizer lives exclusively in the audio thread
         let mut synthesizer = Synthesizer::new();
         synthesizer.sample_rate = sample_rate as f32;
-
-        // Note: Program Change / SysEx events are handled on the GUI thread
-        // (see UiEventQueue in lock_free.rs). The audio callback never touches
-        // the filesystem or parses JSON — both would risk buffer underruns.
 
         // Pre-allocated stereo buffers
         let mut left_buffer = vec![0.0f32; 1024];

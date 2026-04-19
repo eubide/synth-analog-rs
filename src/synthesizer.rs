@@ -154,7 +154,7 @@ pub struct MixerParams {
     pub noise_level: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ModulationMatrix {
     pub lfo_to_cutoff: f32,
     pub lfo_to_resonance: f32,
@@ -513,11 +513,8 @@ impl Default for PolyMod {
 }
 
 /// Per-block snapshot of modulation inputs + precomputed coefficients consumed
-/// by the voice inner loop. Built once at the top of `process_block`, passed
-/// by reference to `render_voice_sample`. Acts as the timbre/infra frontier:
-/// everything here could belong to a future `synth-core` VoiceFrame primitive,
-/// while the surrounding master stage (effects, DC blocker, tanh, M/S) stays
-/// instrument-specific.
+/// by the voice inner loop. Hoists transcendentals (exp, powf) out of the
+/// per-sample hot path.
 struct ModulationBus {
     dt: f32,
     sample_rate: f32,
@@ -1443,9 +1440,10 @@ impl Synthesizer {
 
         let bus = self.build_modulation_bus(dt);
 
-        let lfo_frequency = self.lfo.frequency;
         let lfo_amplitude = self.lfo.amplitude;
         let lfo_waveform = self.lfo.waveform;
+        let lfo_phase_increment =
+            ((self.lfo.frequency / self.sample_rate) * PHASE_SCALE as f32) as u64;
         let mod_wheel = self.mod_wheel;
         let master_volume = self.master_volume_smooth;
         let expression = self.expression;
@@ -1475,9 +1473,7 @@ impl Synthesizer {
             // Update arpeggiator
             self.update_arpeggiator(dt);
 
-            // Update LFO using integer phase accumulator to prevent drift
-            let lfo_phase_increment =
-                ((lfo_frequency / self.sample_rate) * PHASE_SCALE as f32) as u64;
+            // Integer phase accumulator: prevents drift that float-modulo accumulation produces
             self.lfo_engine.phase_accumulator = self
                 .lfo_engine
                 .phase_accumulator
@@ -1558,25 +1554,25 @@ impl Synthesizer {
     }
 
     /// Snapshot current parameters + precompute per-block coefficients.
-    /// Keeps `process_block` readable by isolating the "copy to avoid borrow
-    /// conflicts" ritual and the exp()/powf precomputation.
     fn build_modulation_bus(&self, dt: f32) -> ModulationBus {
-        // Pitch bend ratio: ±pitch_bend_range semitones at full deflection.
         let pitch_bend_ratio =
             Self::semitones_to_ratio(self.pitch_bend * self.pitch_bend_range as f32);
-        // Aftertouch modulations are per-block constants (aftertouch doesn't change within a buffer).
-        // Velocity is per-voice so it stays inside the loop; aftertouch is channel-wide so it doesn't.
-        // Cutoff uses 4× the velocity scale (4000 vs 1000 Hz) because aftertouch sweeps are typically
-        // larger and more expressive than velocity-triggered filter movements.
+        // Aftertouch cutoff uses 4× the velocity scale (4000 vs 1000 Hz) because
+        // aftertouch sweeps are typically larger and more expressive than
+        // velocity-triggered filter movements.
         let aftertouch_cutoff_mod = self.aftertouch * self.aftertouch_to_cutoff * 4000.0;
         let aftertouch_amplitude_mod = 1.0 + self.aftertouch * self.aftertouch_to_amplitude * 0.5;
 
-        // Glide coefficient: exp(-dt/tau). Constant per block since glide_time and sample_rate don't change.
         let glide_coeff = if self.glide_time > 0.001 {
             (-1.0_f32 / (self.glide_time * self.sample_rate)).exp()
         } else {
             0.0
         };
+
+        let (amp_attack_coeff, amp_decay_coeff, amp_release_coeff) =
+            Self::envelope_coeffs(&self.amp_envelope, dt);
+        let (flt_attack_coeff, flt_decay_coeff, flt_release_coeff) =
+            Self::envelope_coeffs(&self.filter_envelope, dt);
 
         ModulationBus {
             dt,
@@ -1603,14 +1599,14 @@ impl Synthesizer {
             filter_keyboard_tracking: self.filter.keyboard_tracking,
 
             envelope_sustain: self.amp_envelope.sustain,
-            amp_attack_coeff: (-dt * 5.0 / self.amp_envelope.attack).exp(),
-            amp_decay_coeff: (-dt * 5.0 / self.amp_envelope.decay).exp(),
-            amp_release_coeff: (-dt * 5.0 / self.amp_envelope.release).exp(),
+            amp_attack_coeff,
+            amp_decay_coeff,
+            amp_release_coeff,
 
             filter_envelope_sustain: self.filter_envelope.sustain,
-            flt_attack_coeff: (-dt * 5.0 / self.filter_envelope.attack).exp(),
-            flt_decay_coeff: (-dt * 5.0 / self.filter_envelope.decay).exp(),
-            flt_release_coeff: (-dt * 5.0 / self.filter_envelope.release).exp(),
+            flt_attack_coeff,
+            flt_decay_coeff,
+            flt_release_coeff,
 
             lfo_target_osc1: self.lfo.target_osc1_pitch,
             lfo_target_osc2: self.lfo.target_osc2_pitch,
@@ -1618,7 +1614,7 @@ impl Synthesizer {
             lfo_target_amplitude: self.lfo.target_amplitude,
             lfo_delay: self.lfo_engine.delay,
 
-            modulation_matrix: self.modulation_matrix.clone(),
+            modulation_matrix: self.modulation_matrix,
             pitch_bend_ratio,
             aftertouch_cutoff_mod,
             aftertouch_amplitude_mod,
@@ -1637,12 +1633,21 @@ impl Synthesizer {
         }
     }
 
-    /// Render one stereo sample for a single active voice. Reads all synth-wide
-    /// parameters from `bus` (no `&self` needed) and mutates only `voice` state —
-    /// the voice-local phase accumulators, envelope stages, drift LFOs, etc.
-    ///
-    /// Returns the panned `(left, right)` contribution for this voice; the caller
-    /// sums them across voices and applies the master stage.
+    /// Per-block RC coefficients for one ADSR stage. `5.0` = 5τ reach target,
+    /// a standard exponential-envelope convention.
+    #[inline(always)]
+    fn envelope_coeffs(env: &EnvelopeParams, dt: f32) -> (f32, f32, f32) {
+        let k = -dt * 5.0;
+        (
+            (k / env.attack).exp(),
+            (k / env.decay).exp(),
+            (k / env.release).exp(),
+        )
+    }
+
+    /// Render one stereo sample for a single active voice. Returns the panned
+    /// `(left, right)` contribution; caller sums across voices and applies the
+    /// master stage.
     fn render_voice_sample(voice: &mut Voice, bus: &ModulationBus, lfo_value: f32) -> (f32, f32) {
         let dt = bus.dt;
 
@@ -2636,7 +2641,7 @@ impl Synthesizer {
             filter_envelope: self.filter_envelope.clone(),
             amp_envelope: self.amp_envelope.clone(),
             lfo: self.lfo.clone(),
-            modulation_matrix: self.modulation_matrix.clone(),
+            modulation_matrix: self.modulation_matrix,
             effects: self.effects.clone(),
             master_volume: self.master_volume,
             poly_mod_filter_env_to_osc_a_freq: self.poly_mod.filter_env_to_osc_a_freq,

@@ -1229,10 +1229,6 @@ impl eframe::App for SynthApp {
             .load(std::sync::atomic::Ordering::Relaxed);
         self.peak_level = f32::from_bits(peak_bits);
 
-        // Handle UI-layer MIDI events (Program Change, SysEx) here on the GUI
-        // thread — they all touch disk or parse JSON, either of which would
-        // stall the audio callback. Apply results by updating `self.params`
-        // which gets pushed to the lock-free buffer at end-of-frame.
         self.drain_ui_events();
 
         // PANIC on focus loss: si la ventana pierde el foco mientras hay teclas
