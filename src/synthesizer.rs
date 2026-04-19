@@ -18,9 +18,9 @@ const DRIFT_FREQ_FACTOR: f32 = 2.5 * 0.000578;
 
 // Analog character windows — picked once per voice, scaled by the user-facing knobs.
 const TOLERANCE_CUTOFF_RANGE: f32 = 0.04; // ±2 % cutoff per voice
-const TOLERANCE_RES_RANGE: f32 = 0.06;    // ±3 % resonance per voice
-const FILTER_DRIFT_RANGE: f32 = 0.06;     // ±3 % cutoff walk target
-const FILTER_DRIFT_ALPHA: f32 = 2.0;      // IIR α → τ ≈ 0.5 s
+const TOLERANCE_RES_RANGE: f32 = 0.06; // ±3 % resonance per voice
+const FILTER_DRIFT_RANGE: f32 = 0.06; // ±3 % cutoff walk target
+const FILTER_DRIFT_ALPHA: f32 = 2.0; // IIR α → τ ≈ 0.5 s
 const FILTER_DRIFT_MIN_PERIOD: f32 = 1.0; // seconds between re-picks
 const FILTER_DRIFT_MAX_PERIOD: f32 = 3.0;
 
@@ -39,50 +39,50 @@ const DENORMAL_FLOOR: f32 = 1.0e-20;
 
 // 5-limit Just Intonation
 const TUNING_JI: [f64; 12] = [
-    1.0,          // C  — 1/1
-    25.0/24.0,    // C# — 25/24
-    9.0/8.0,      // D  — 9/8
-    6.0/5.0,      // Eb — 6/5
-    5.0/4.0,      // E  — 5/4
-    4.0/3.0,      // F  — 4/3
-    45.0/32.0,    // F# — 45/32
-    3.0/2.0,      // G  — 3/2
-    8.0/5.0,      // Ab — 8/5
-    5.0/3.0,      // A  — 5/3
-    9.0/5.0,      // Bb — 9/5
-    15.0/8.0,     // B  — 15/8
+    1.0,         // C  — 1/1
+    25.0 / 24.0, // C# — 25/24
+    9.0 / 8.0,   // D  — 9/8
+    6.0 / 5.0,   // Eb — 6/5
+    5.0 / 4.0,   // E  — 5/4
+    4.0 / 3.0,   // F  — 4/3
+    45.0 / 32.0, // F# — 45/32
+    3.0 / 2.0,   // G  — 3/2
+    8.0 / 5.0,   // Ab — 8/5
+    5.0 / 3.0,   // A  — 5/3
+    9.0 / 5.0,   // Bb — 9/5
+    15.0 / 8.0,  // B  — 15/8
 ];
 
 // Pythagorean tuning (stacked pure fifths from C)
 const TUNING_PYTHAGOREAN: [f64; 12] = [
     1.0,
-    2187.0/2048.0,
-    9.0/8.0,
-    32.0/27.0,
-    81.0/64.0,
-    4.0/3.0,
-    729.0/512.0,
-    3.0/2.0,
-    128.0/81.0,
-    27.0/16.0,
-    16.0/9.0,
-    243.0/128.0,
+    2187.0 / 2048.0,
+    9.0 / 8.0,
+    32.0 / 27.0,
+    81.0 / 64.0,
+    4.0 / 3.0,
+    729.0 / 512.0,
+    3.0 / 2.0,
+    128.0 / 81.0,
+    27.0 / 16.0,
+    16.0 / 9.0,
+    243.0 / 128.0,
 ];
 
 // Werckmeister III (1691) — historical well-temperament
 const TUNING_WERCKMEISTER3: [f64; 12] = [
-    1.0,          // C
-    256.0/243.0,  // C# — 256/243
-    64.0/54.0,    // D  — 64/54 (≈ 9/8 adjusted)
-    32.0/27.0,    // Eb — 32/27
-    81.0/64.0,    // E  — 81/64
-    4.0/3.0,      // F  — 4/3
-    1024.0/729.0, // F# — 1024/729
-    3.0/2.0,      // G  — 3/2
-    128.0/81.0,   // Ab — 128/81
-    27.0/16.0,    // A  — 27/16 (NOT 5/3 — Werckmeister A is a Pythagorean sixth)
-    16.0/9.0,     // Bb — 16/9
-    243.0/128.0,  // B  — 243/128
+    1.0,            // C
+    256.0 / 243.0,  // C# — 256/243
+    64.0 / 54.0,    // D  — 64/54 (≈ 9/8 adjusted)
+    32.0 / 27.0,    // Eb — 32/27
+    81.0 / 64.0,    // E  — 81/64
+    4.0 / 3.0,      // F  — 4/3
+    1024.0 / 729.0, // F# — 1024/729
+    3.0 / 2.0,      // G  — 3/2
+    128.0 / 81.0,   // Ab — 128/81
+    27.0 / 16.0,    // A  — 27/16 (NOT 5/3 — Werckmeister A is a Pythagorean sixth)
+    16.0 / 9.0,     // Bb — 16/9
+    243.0 / 128.0,  // B  — 243/128
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -305,6 +305,215 @@ pub struct LadderFilterState {
     pub stage4: f32,
 }
 
+/// Master effects bus: chorus → delay → reverb. Owns the DSP runtime state
+/// (delay lines, comb/allpass buffers, modulation phases) but reads parameters
+/// from `EffectsParams` passed in by the caller, so preset save/load can keep
+/// treating params as plain data.
+pub struct EffectsChain {
+    // Delay state
+    pub delay_buffer: Vec<f32>,
+    pub delay_index: usize,
+    // Freeverb: 8 parallel comb filters + 4 series allpass filters
+    pub reverb_comb_buffers: Vec<Vec<f32>>,
+    pub reverb_comb_indices: Vec<usize>,
+    pub reverb_comb_filters: Vec<f32>, // LP filter state inside each comb
+    pub reverb_allpass_buffers: Vec<Vec<f32>>,
+    pub reverb_allpass_indices: Vec<usize>,
+    // Chorus delay line — sized for 25 ms max delay (≈ centre 10 ms ± 5 ms modulation).
+    pub chorus_buffer: Vec<f32>,
+    pub chorus_index: usize,
+    // Two LFO phases in quadrature give a thicker, Juno-style ensemble sound.
+    pub chorus_lfo_phase1: f32,
+    pub chorus_lfo_phase2: f32,
+}
+
+impl EffectsChain {
+    pub fn new(sample_rate: f32) -> Self {
+        let max_delay_samples = (sample_rate * 2.0) as usize; // 2 second max delay
+
+        // Freeverb delay line lengths (Jezar's original tuning at 44.1 kHz).
+        // Comb delays are prime-ish and spread across 25–37 ms to avoid flutter echo.
+        // Allpass delays provide diffusion without coloring the frequency response.
+        let rate = sample_rate / 44100.0;
+        let comb_sizes: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
+            .map(|n| ((n as f32 * rate) as usize).max(1));
+        let allpass_sizes: [usize; 4] =
+            [556, 441, 341, 225].map(|n| ((n as f32 * rate) as usize).max(1));
+
+        Self {
+            delay_buffer: vec![0.0; max_delay_samples],
+            delay_index: 0,
+            reverb_comb_buffers: comb_sizes.iter().map(|&n| vec![0.0f32; n]).collect(),
+            reverb_comb_indices: vec![0; 8],
+            reverb_comb_filters: vec![0.0; 8],
+            reverb_allpass_buffers: allpass_sizes.iter().map(|&n| vec![0.0f32; n]).collect(),
+            reverb_allpass_indices: vec![0; 4],
+            // Power-of-two size lets apply_chorus replace `% len` with a bitmask.
+            chorus_buffer: vec![
+                0.0;
+                ((sample_rate * 0.025) as usize)
+                    .max(1024)
+                    .next_power_of_two()
+            ],
+            chorus_index: 0,
+            chorus_lfo_phase1: 0.0,
+            chorus_lfo_phase2: 0.25, // start 90° out so the two voices don't phase-lock
+        }
+    }
+
+    pub fn apply_delay(&mut self, sample: f32, params: &EffectsParams, sample_rate: f32) -> f32 {
+        if params.delay_amount <= 0.0 {
+            return sample;
+        }
+
+        let delay_samples = (params.delay_time * sample_rate) as usize;
+        let delay_samples = delay_samples.min(self.delay_buffer.len() - 1);
+
+        let delay_read_index = if self.delay_index >= delay_samples {
+            self.delay_index - delay_samples
+        } else {
+            self.delay_buffer.len() + self.delay_index - delay_samples
+        };
+
+        let delayed_sample = self.delay_buffer[delay_read_index];
+        // Flush denormals in the feedback tail, otherwise decaying echoes
+        // slow the audio thread and cause xruns.
+        let delayed_sample = if delayed_sample.abs() < 1.0e-20 {
+            0.0
+        } else {
+            delayed_sample
+        };
+        let feedback_sample = delayed_sample * params.delay_feedback;
+
+        self.delay_buffer[self.delay_index] = sample + feedback_sample;
+        self.delay_index = (self.delay_index + 1) % self.delay_buffer.len();
+
+        sample + (delayed_sample * params.delay_amount)
+    }
+
+    /// Mono chorus/ensemble inspired by Juno-6 and Prophet-10: two delay taps
+    /// modulated by quadrature LFOs around a 10 ms centre. Short enough to stay
+    /// out of slap-back delay territory, long enough to create stereo-like width
+    /// from pitch drift between taps.
+    pub fn apply_chorus(&mut self, sample: f32, params: &EffectsParams, sample_rate: f32) -> f32 {
+        let len = self.chorus_buffer.len();
+        // chorus_buffer is constructed as a power of two (see EffectsChain::new),
+        // so wrap arithmetic collapses to a bitmask. Keep this invariant.
+        let mask = len - 1;
+        let mix = params.chorus_mix;
+        if mix <= 0.0 {
+            // Keep feeding the ring even when bypassed — turning chorus back on
+            // should not produce a stale transient from silent history.
+            self.chorus_buffer[self.chorus_index] = sample;
+            self.chorus_index = (self.chorus_index + 1) & mask;
+            return sample;
+        }
+
+        let rate = params.chorus_rate.clamp(0.05, 5.0);
+        let depth = params.chorus_depth.clamp(0.0, 1.0);
+
+        // Triangle is cheaper than sine and audibly identical at these depths.
+        let phase_inc = rate / sample_rate;
+        self.chorus_lfo_phase1 = (self.chorus_lfo_phase1 + phase_inc).fract();
+        self.chorus_lfo_phase2 =
+            (self.chorus_lfo_phase2 + phase_inc * CHORUS_VOICE2_RATE_RATIO).fract();
+        let tri = |p: f32| {
+            if p < 0.5 {
+                4.0 * p - 1.0
+            } else {
+                3.0 - 4.0 * p
+            }
+        };
+        let lfo1 = tri(self.chorus_lfo_phase1);
+        let lfo2 = tri(self.chorus_lfo_phase2);
+
+        let mod_ms = CHORUS_MOD_MS * depth;
+        let delay_samples_1 = ((CHORUS_CENTRE_MS + mod_ms * lfo1) * 0.001 * sample_rate).max(2.0);
+        let delay_samples_2 = ((CHORUS_CENTRE_MS + mod_ms * lfo2) * 0.001 * sample_rate).max(2.0);
+
+        // Fractional-delay read with linear interpolation — the LFO motion changes
+        // the read position every sample so interpolation is required to avoid zipper.
+        let read_tap = |buf: &[f32], idx: usize, delay: f32| -> f32 {
+            let d_int = delay as usize;
+            let d_frac = delay - d_int as f32;
+            let base = (idx + buf.len() - d_int) & mask;
+            let prev = base.wrapping_sub(1) & mask;
+            buf[base] * (1.0 - d_frac) + buf[prev] * d_frac
+        };
+        let tap1 = read_tap(&self.chorus_buffer, self.chorus_index, delay_samples_1);
+        let tap2 = read_tap(&self.chorus_buffer, self.chorus_index, delay_samples_2);
+        let mut wet = (tap1 + tap2) * 0.5;
+        if wet.abs() < DENORMAL_FLOOR {
+            wet = 0.0;
+        }
+
+        self.chorus_buffer[self.chorus_index] = sample;
+        self.chorus_index = (self.chorus_index + 1) & mask;
+
+        // Slight dry bias so chords don't thin out above mix ≈ 0.7.
+        let dry_gain = 1.0 - mix * 0.5;
+        sample * dry_gain + wet * mix
+    }
+
+    pub fn apply_reverb(&mut self, sample: f32, params: &EffectsParams) -> f32 {
+        if params.reverb_amount <= 0.0 {
+            return sample;
+        }
+
+        // Freeverb-style reverb (Jezar at Dreampoint, 1997).
+        //
+        // reverb_size maps to Freeverb's "roomsize" (feedback gain g).
+        // A fixed damping of 0.5 gives a warm, analog-sounding decay without
+        // the metallic flutter of undamped combs.
+        let g = (0.56 + params.reverb_size * 0.42).min(0.985); // room feedback
+        const DAMP: f32 = 0.5;
+        const DAMP_INV: f32 = 1.0 - DAMP;
+        const AP_G: f32 = 0.5; // allpass diffusion gain
+        const DENORMAL: f32 = 1.0e-20;
+
+        // 8 parallel comb filters with LP damping inside the feedback loop.
+        // The LP filter inside each comb is what makes Freeverb sound warm instead
+        // of metallic: high frequencies decay faster than low frequencies.
+        let mut comb_sum = 0.0f32;
+        for i in 0..8 {
+            let idx = self.reverb_comb_indices[i];
+            let out = self.reverb_comb_buffers[i][idx];
+            let out = if out.abs() < DENORMAL { 0.0 } else { out };
+            // One-pole LP inside the comb feedback
+            self.reverb_comb_filters[i] = out * DAMP_INV + self.reverb_comb_filters[i] * DAMP;
+            let filtered = if self.reverb_comb_filters[i].abs() < DENORMAL {
+                0.0
+            } else {
+                self.reverb_comb_filters[i]
+            };
+            self.reverb_comb_buffers[i][idx] = sample + filtered * g;
+            let len = self.reverb_comb_buffers[i].len();
+            self.reverb_comb_indices[i] = (idx + 1) % len;
+            comb_sum += out;
+        }
+        let mut reverb = comb_sum * 0.125; // average of 8 combs
+
+        // 4 series allpass filters for diffusion.
+        // Allpass filters scatter energy in time without coloring the spectrum,
+        // turning the comb-filter echoes into a smooth density tail.
+        for i in 0..4 {
+            let idx = self.reverb_allpass_indices[i];
+            let buf_out = self.reverb_allpass_buffers[i][idx];
+            let buf_out = if buf_out.abs() < DENORMAL {
+                0.0
+            } else {
+                buf_out
+            };
+            self.reverb_allpass_buffers[i][idx] = reverb + buf_out * AP_G;
+            let len = self.reverb_allpass_buffers[i].len();
+            self.reverb_allpass_indices[i] = (idx + 1) % len;
+            reverb = buf_out - reverb;
+        }
+
+        sample + reverb * params.reverb_amount
+    }
+}
+
 pub struct Synthesizer {
     pub osc1: OscillatorParams,
     pub osc2: OscillatorParams,
@@ -324,19 +533,12 @@ pub struct Synthesizer {
     pub lfo_sample_hold_value: f32, // Current sample & hold value
     pub lfo_last_sample_time: f32,  // Time since last sample update
     pub max_polyphony: usize,
-    pub delay_buffer: Vec<f32>,
-    pub delay_index: usize,
-    // Freeverb: 8 parallel comb filters + 4 series allpass filters
-    pub reverb_comb_buffers: Vec<Vec<f32>>,
-    pub reverb_comb_indices: Vec<usize>,
-    pub reverb_comb_filters: Vec<f32>, // LP filter state inside each comb
-    pub reverb_allpass_buffers: Vec<Vec<f32>>,
-    pub reverb_allpass_indices: Vec<usize>,
+    pub effects_chain: EffectsChain,
     pub held_notes: Vec<u8>,
-    pub sustain_held: bool,    // sustain pedal activo
+    pub sustain_held: bool, // sustain pedal activo
     pub voice_mode: VoiceMode,
     pub note_priority: NotePriority,
-    pub unison_spread: f32,    // cents spread en unison mode
+    pub unison_spread: f32,        // cents spread en unison mode
     pub note_stack: Vec<(u8, u8)>, // (note, velocity) para mono/legato/unison
     pub arp_step: usize,
     pub arp_timer: f32,
@@ -368,7 +570,7 @@ pub struct Synthesizer {
     pub arp_sync_to_midi: bool,
     pub midi_clock_running: bool,
     pub midi_clock_bpm: f32,
-    pub midi_clock_tick_acc: f32,   // segundos acumulados desde primer tick del quarter note actual
+    pub midi_clock_tick_acc: f32, // segundos acumulados desde primer tick del quarter note actual
     pub midi_clock_tick_count: u32, // ticks desde el inicio del quarter note actual
     // Master DC blocker (one-pole HPF, coeff ≈ 0.9999 → ~0.7 Hz cutoff at 44.1 kHz)
     pub master_dc_x: f32,
@@ -379,12 +581,6 @@ pub struct Synthesizer {
     pub master_volume_smooth: f32,
     // Analog character: global knobs for subtle circuit imperfections.
     pub analog: AnalogCharacter,
-    // Chorus delay line — sized for 25 ms max delay (≈ centre 10 ms ± 5 ms modulation).
-    pub chorus_buffer: Vec<f32>,
-    pub chorus_index: usize,
-    // Two LFO phases in quadrature give a thicker, Juno-style ensemble sound.
-    pub chorus_lfo_phase1: f32,
-    pub chorus_lfo_phase2: f32,
     // Master-bus pink noise generator for the constant analog hiss floor.
     pub master_noise_prng: u32,
     pub master_noise_b0: f32,
@@ -395,15 +591,23 @@ pub struct Synthesizer {
     // Tuning mode: 0=Equal Temperament, 1=Just Intonation, 2=Pythagorean, 3=Werckmeister III
     pub tuning_mode: u8,
     // Biquad LP decimation filter state (two cascaded stages for 4× support)
-    pub decim_x1_l: f32, pub decim_x2_l: f32,
-    pub decim_y1_l: f32, pub decim_y2_l: f32,
-    pub decim_x1_r: f32, pub decim_x2_r: f32,
-    pub decim_y1_r: f32, pub decim_y2_r: f32,
+    pub decim_x1_l: f32,
+    pub decim_x2_l: f32,
+    pub decim_y1_l: f32,
+    pub decim_y2_l: f32,
+    pub decim_x1_r: f32,
+    pub decim_x2_r: f32,
+    pub decim_y1_r: f32,
+    pub decim_y2_r: f32,
     // Second cascade stage (4× oversampling only)
-    pub decim2_x1_l: f32, pub decim2_x2_l: f32,
-    pub decim2_y1_l: f32, pub decim2_y2_l: f32,
-    pub decim2_x1_r: f32, pub decim2_x2_r: f32,
-    pub decim2_y1_r: f32, pub decim2_y2_r: f32,
+    pub decim2_x1_l: f32,
+    pub decim2_x2_l: f32,
+    pub decim2_y1_l: f32,
+    pub decim2_y2_l: f32,
+    pub decim2_x1_r: f32,
+    pub decim2_x2_r: f32,
+    pub decim2_y1_r: f32,
+    pub decim2_y2_r: f32,
     pub oversampling: u8,
 }
 
@@ -490,8 +694,8 @@ impl Default for AnalogCharacter {
             // Subtle defaults — audible on careful listening but never distracting.
             component_tolerance: 0.3,
             filter_drift_amount: 0.3,
-            vca_bleed: 0.002,       // ≈ -54 dB leakage through a closed VCA
-            noise_floor: 0.0008,    // ≈ -62 dB background hiss
+            vca_bleed: 0.002,    // ≈ -54 dB leakage through a closed VCA
+            noise_floor: 0.0008, // ≈ -62 dB background hiss
         }
     }
 }
@@ -597,16 +801,6 @@ impl Voice {
 impl Synthesizer {
     pub fn new() -> Self {
         let sample_rate = 44100.0;
-        let max_delay_samples = (sample_rate * 2.0) as usize; // 2 second max delay
-
-        // Freeverb delay line lengths (Jezar's original tuning at 44.1 kHz).
-        // Comb delays are prime-ish and spread across 25–37 ms to avoid flutter echo.
-        // Allpass delays provide diffusion without coloring the frequency response.
-        let rate = sample_rate / 44100.0;
-        let comb_sizes: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
-            .map(|n| ((n as f32 * rate) as usize).max(1));
-        let allpass_sizes: [usize; 4] = [556, 441, 341, 225]
-            .map(|n| ((n as f32 * rate) as usize).max(1));
 
         Self {
             osc1: OscillatorParams::default(),
@@ -627,13 +821,7 @@ impl Synthesizer {
             lfo_sample_hold_value: 0.0,
             lfo_last_sample_time: 0.0,
             max_polyphony: 8,
-            delay_buffer: vec![0.0; max_delay_samples],
-            delay_index: 0,
-            reverb_comb_buffers: comb_sizes.iter().map(|&n| vec![0.0f32; n]).collect(),
-            reverb_comb_indices: vec![0; 8],
-            reverb_comb_filters: vec![0.0; 8],
-            reverb_allpass_buffers: allpass_sizes.iter().map(|&n| vec![0.0f32; n]).collect(),
-            reverb_allpass_indices: vec![0; 4],
+            effects_chain: EffectsChain::new(sample_rate),
             held_notes: Vec::new(),
             sustain_held: false,
             voice_mode: VoiceMode::Poly,
@@ -669,28 +857,28 @@ impl Synthesizer {
             filter_resonance_smooth: 1.0,
             master_volume_smooth: 0.7,
             analog: AnalogCharacter::default(),
-            // Power-of-two size lets apply_chorus replace `% len` with a bitmask.
-            chorus_buffer: vec![
-                0.0;
-                ((sample_rate * 0.025) as usize).max(1024).next_power_of_two()
-            ],
-            chorus_index: 0,
-            chorus_lfo_phase1: 0.0,
-            chorus_lfo_phase2: 0.25, // start 90° out so the two voices don't phase-lock
             master_noise_prng: rand::random::<u32>() | 1,
             master_noise_b0: 0.0,
             master_noise_b1: 0.0,
             master_noise_b2: 0.0,
             stereo_spread: 0.0,
             tuning_mode: 0,
-            decim_x1_l: 0.0, decim_x2_l: 0.0,
-            decim_y1_l: 0.0, decim_y2_l: 0.0,
-            decim_x1_r: 0.0, decim_x2_r: 0.0,
-            decim_y1_r: 0.0, decim_y2_r: 0.0,
-            decim2_x1_l: 0.0, decim2_x2_l: 0.0,
-            decim2_y1_l: 0.0, decim2_y2_l: 0.0,
-            decim2_x1_r: 0.0, decim2_x2_r: 0.0,
-            decim2_y1_r: 0.0, decim2_y2_r: 0.0,
+            decim_x1_l: 0.0,
+            decim_x2_l: 0.0,
+            decim_y1_l: 0.0,
+            decim_y2_l: 0.0,
+            decim_x1_r: 0.0,
+            decim_x2_r: 0.0,
+            decim_y1_r: 0.0,
+            decim_y2_r: 0.0,
+            decim2_x1_l: 0.0,
+            decim2_x2_l: 0.0,
+            decim2_y1_l: 0.0,
+            decim2_y2_l: 0.0,
+            decim2_x1_r: 0.0,
+            decim2_x2_r: 0.0,
+            decim2_y1_r: 0.0,
+            decim2_y2_r: 0.0,
             oversampling: 1,
         }
     }
@@ -768,7 +956,11 @@ impl Synthesizer {
         }
 
         // Assign pan based on voice index (alternating L/R for natural spread)
-        if let Some(idx) = self.voices.iter().position(|v| v.is_active && v.note == note) {
+        if let Some(idx) = self
+            .voices
+            .iter()
+            .position(|v| v.is_active && v.note == note)
+        {
             let sign = if idx % 2 == 0 { 1.0_f32 } else { -1.0_f32 };
             let spread = self.stereo_spread;
             Self::set_voice_pan(&mut self.voices[idx], sign * spread);
@@ -790,8 +982,11 @@ impl Synthesizer {
                 } else {
                     for voice in &mut self.voices {
                         if voice.note == note && voice.is_active {
-                            if self.sustain_held { voice.is_sustained = true; }
-                            else { voice.release(); }
+                            if self.sustain_held {
+                                voice.is_sustained = true;
+                            } else {
+                                voice.release();
+                            }
                         }
                     }
                 }
@@ -801,8 +996,11 @@ impl Synthesizer {
                 if self.note_stack.is_empty() {
                     for voice in &mut self.voices {
                         if voice.is_active {
-                            if self.sustain_held { voice.is_sustained = true; }
-                            else { voice.release(); }
+                            if self.sustain_held {
+                                voice.is_sustained = true;
+                            } else {
+                                voice.release();
+                            }
                         }
                     }
                 } else {
@@ -817,8 +1015,11 @@ impl Synthesizer {
                 if self.note_stack.is_empty() {
                     for voice in &mut self.voices {
                         if voice.is_active {
-                            if self.sustain_held { voice.is_sustained = true; }
-                            else { voice.release(); }
+                            if self.sustain_held {
+                                voice.is_sustained = true;
+                            } else {
+                                voice.release();
+                            }
                         }
                     }
                 }
@@ -1091,9 +1292,11 @@ impl Synthesizer {
         let mixer_osc2_level = self.mixer.osc2_level;
         let mixer_noise_level = self.mixer.noise_level;
         // 1-pole smoothers: τ ≈ 1/(2π·20 Hz) ≈ 8ms — eliminates zipper noise from CC updates
-        let smooth_k = (1.0 - (-2.0 * std::f32::consts::PI * 20.0 / self.sample_rate).exp()).min(1.0);
+        let smooth_k =
+            (1.0 - (-2.0 * std::f32::consts::PI * 20.0 / self.sample_rate).exp()).min(1.0);
         self.filter_cutoff_smooth += smooth_k * (self.filter.cutoff - self.filter_cutoff_smooth);
-        self.filter_resonance_smooth += smooth_k * (self.filter.resonance - self.filter_resonance_smooth);
+        self.filter_resonance_smooth +=
+            smooth_k * (self.filter.resonance - self.filter_resonance_smooth);
         self.master_volume_smooth += smooth_k * (self.master_volume - self.master_volume_smooth);
         let filter_cutoff = self.filter_cutoff_smooth;
         let filter_resonance = self.filter_resonance_smooth;
@@ -1315,12 +1518,9 @@ impl Synthesizer {
                     dt1,
                     osc1_pw_voice, // puede estar modulado por poly mod
                 ) * osc1_amplitude;
-                let osc2_out = Self::generate_oscillator_static(
-                    osc2_wave_type,
-                    phase2,
-                    dt2,
-                    osc2_pulse_width,
-                ) * osc2_amplitude;
+                let osc2_out =
+                    Self::generate_oscillator_static(osc2_wave_type, phase2, dt2, osc2_pulse_width)
+                        * osc2_amplitude;
 
                 // Pink noise via per-voice xorshift32 PRNG + Paul Kellett 3-stage IIR.
                 // Pink noise has -3 dB/octave rolloff, closer to the Prophet-5 noise
@@ -1379,15 +1579,17 @@ impl Synthesizer {
                     voice.filter_drift_target =
                         1.0 + (rand::random::<f32>() - 0.5) * FILTER_DRIFT_RANGE;
                     voice.filter_drift_timer = FILTER_DRIFT_MIN_PERIOD
-                        + rand::random::<f32>() * (FILTER_DRIFT_MAX_PERIOD - FILTER_DRIFT_MIN_PERIOD);
+                        + rand::random::<f32>()
+                            * (FILTER_DRIFT_MAX_PERIOD - FILTER_DRIFT_MIN_PERIOD);
                 }
-                voice.filter_drift_value +=
-                    (voice.filter_drift_target - voice.filter_drift_value) * FILTER_DRIFT_ALPHA * dt;
+                voice.filter_drift_value += (voice.filter_drift_target - voice.filter_drift_value)
+                    * FILTER_DRIFT_ALPHA
+                    * dt;
 
                 let cutoff_tol = 1.0 + (voice.tolerance_cutoff_mul - 1.0) * component_tolerance;
                 let cutoff_drift = 1.0 + (voice.filter_drift_value - 1.0) * filter_drift_amount;
-                let final_cutoff = (modulated_cutoff * cutoff_tol * cutoff_drift)
-                    .clamp(20.0, 20000.0);
+                let final_cutoff =
+                    (modulated_cutoff * cutoff_tol * cutoff_drift).clamp(20.0, 20000.0);
 
                 let lfo_resonance_mod = lfo_value_voice * modulation_matrix.lfo_to_resonance * 2.0;
                 let res_tol = 1.0 + (voice.tolerance_res_mul - 1.0) * component_tolerance;
@@ -1425,7 +1627,10 @@ impl Synthesizer {
                 // A real analog VCA never fully shuts — a constant offset lets a
                 // sliver of oscillator signal escape, giving notes an "alive" taper.
                 let amp_gain = envelope_value + vca_bleed;
-                mixed *= amp_gain * lfo_amplitude_mod * velocity_amplitude_mod * aftertouch_amplitude_mod;
+                mixed *= amp_gain
+                    * lfo_amplitude_mod
+                    * velocity_amplitude_mod
+                    * aftertouch_amplitude_mod;
 
                 left_acc += mixed * voice.pan_left;
                 right_acc += mixed * voice.pan_right;
@@ -1444,9 +1649,13 @@ impl Synthesizer {
 
             // Apply effects processing. Chorus sits before delay/reverb so the
             // delay taps and reverb tail inherit the ensemble thickness.
-            mono_m = self.apply_chorus(mono_m);
-            mono_m = self.apply_delay(mono_m);
-            mono_m = self.apply_reverb(mono_m);
+            mono_m = self
+                .effects_chain
+                .apply_chorus(mono_m, &self.effects, self.sample_rate);
+            mono_m = self
+                .effects_chain
+                .apply_delay(mono_m, &self.effects, self.sample_rate);
+            mono_m = self.effects_chain.apply_reverb(mono_m, &self.effects);
 
             // Analog circuit hiss — the faint background the player never notices
             // until it's missing. Added after the effects so the noise feels like
@@ -1833,96 +2042,6 @@ impl Synthesizer {
         Some(note)
     }
 
-    fn apply_delay(&mut self, sample: f32) -> f32 {
-        if self.effects.delay_amount <= 0.0 {
-            return sample;
-        }
-
-        let delay_samples = (self.effects.delay_time * self.sample_rate) as usize;
-        let delay_samples = delay_samples.min(self.delay_buffer.len() - 1);
-
-        let delay_read_index = if self.delay_index >= delay_samples {
-            self.delay_index - delay_samples
-        } else {
-            self.delay_buffer.len() + self.delay_index - delay_samples
-        };
-
-        let delayed_sample = self.delay_buffer[delay_read_index];
-        // Flush denormals in the feedback tail, otherwise decaying echoes
-        // slow the audio thread and cause xruns.
-        let delayed_sample = if delayed_sample.abs() < 1.0e-20 {
-            0.0
-        } else {
-            delayed_sample
-        };
-        let feedback_sample = delayed_sample * self.effects.delay_feedback;
-
-        self.delay_buffer[self.delay_index] = sample + feedback_sample;
-        self.delay_index = (self.delay_index + 1) % self.delay_buffer.len();
-
-        sample + (delayed_sample * self.effects.delay_amount)
-    }
-
-    /// Mono chorus/ensemble inspired by Juno-6 and Prophet-10: two delay taps
-    /// modulated by quadrature LFOs around a 10 ms centre. Short enough to stay
-    /// out of slap-back delay territory, long enough to create stereo-like width
-    /// from pitch drift between taps.
-    fn apply_chorus(&mut self, sample: f32) -> f32 {
-        let len = self.chorus_buffer.len();
-        // chorus_buffer is constructed as a power of two (see Synthesizer::new),
-        // so wrap arithmetic collapses to a bitmask. Keep this invariant.
-        let mask = len - 1;
-        let mix = self.effects.chorus_mix;
-        if mix <= 0.0 {
-            // Keep feeding the ring even when bypassed — turning chorus back on
-            // should not produce a stale transient from silent history.
-            self.chorus_buffer[self.chorus_index] = sample;
-            self.chorus_index = (self.chorus_index + 1) & mask;
-            return sample;
-        }
-
-        let rate = self.effects.chorus_rate.clamp(0.05, 5.0);
-        let depth = self.effects.chorus_depth.clamp(0.0, 1.0);
-
-        // Triangle is cheaper than sine and audibly identical at these depths.
-        let phase_inc = rate / self.sample_rate;
-        self.chorus_lfo_phase1 = (self.chorus_lfo_phase1 + phase_inc).fract();
-        self.chorus_lfo_phase2 =
-            (self.chorus_lfo_phase2 + phase_inc * CHORUS_VOICE2_RATE_RATIO).fract();
-        let tri = |p: f32| if p < 0.5 { 4.0 * p - 1.0 } else { 3.0 - 4.0 * p };
-        let lfo1 = tri(self.chorus_lfo_phase1);
-        let lfo2 = tri(self.chorus_lfo_phase2);
-
-        let mod_ms = CHORUS_MOD_MS * depth;
-        let delay_samples_1 =
-            ((CHORUS_CENTRE_MS + mod_ms * lfo1) * 0.001 * self.sample_rate).max(2.0);
-        let delay_samples_2 =
-            ((CHORUS_CENTRE_MS + mod_ms * lfo2) * 0.001 * self.sample_rate).max(2.0);
-
-        // Fractional-delay read with linear interpolation — the LFO motion changes
-        // the read position every sample so interpolation is required to avoid zipper.
-        let read_tap = |buf: &[f32], idx: usize, delay: f32| -> f32 {
-            let d_int = delay as usize;
-            let d_frac = delay - d_int as f32;
-            let base = (idx + buf.len() - d_int) & mask;
-            let prev = base.wrapping_sub(1) & mask;
-            buf[base] * (1.0 - d_frac) + buf[prev] * d_frac
-        };
-        let tap1 = read_tap(&self.chorus_buffer, self.chorus_index, delay_samples_1);
-        let tap2 = read_tap(&self.chorus_buffer, self.chorus_index, delay_samples_2);
-        let mut wet = (tap1 + tap2) * 0.5;
-        if wet.abs() < DENORMAL_FLOOR {
-            wet = 0.0;
-        }
-
-        self.chorus_buffer[self.chorus_index] = sample;
-        self.chorus_index = (self.chorus_index + 1) & mask;
-
-        // Slight dry bias so chords don't thin out above mix ≈ 0.7.
-        let dry_gain = 1.0 - mix * 0.5;
-        sample * dry_gain + wet * mix
-    }
-
     /// Faint constant hiss from the analog output stage — Paul Kellett pink noise
     /// at circuit-floor level. Shared across voices, written to the master bus once
     /// per sample (cheap: three MAC + one xorshift).
@@ -1938,61 +2057,6 @@ impl Synthesizer {
         self.master_noise_b0 + self.master_noise_b1 + self.master_noise_b2 + white * 0.0556418
     }
 
-    fn apply_reverb(&mut self, sample: f32) -> f32 {
-        if self.effects.reverb_amount <= 0.0 {
-            return sample;
-        }
-
-        // Freeverb-style reverb (Jezar at Dreampoint, 1997).
-        //
-        // reverb_size maps to Freeverb's "roomsize" (feedback gain g).
-        // A fixed damping of 0.5 gives a warm, analog-sounding decay without
-        // the metallic flutter of undamped combs.
-        let g = (0.56 + self.effects.reverb_size * 0.42).min(0.985); // room feedback
-        const DAMP: f32 = 0.5;
-        const DAMP_INV: f32 = 1.0 - DAMP;
-        const AP_G: f32 = 0.5; // allpass diffusion gain
-        const DENORMAL: f32 = 1.0e-20;
-
-        // 8 parallel comb filters with LP damping inside the feedback loop.
-        // The LP filter inside each comb is what makes Freeverb sound warm instead
-        // of metallic: high frequencies decay faster than low frequencies.
-        let mut comb_sum = 0.0f32;
-        for i in 0..8 {
-            let idx = self.reverb_comb_indices[i];
-            let out = self.reverb_comb_buffers[i][idx];
-            let out = if out.abs() < DENORMAL { 0.0 } else { out };
-            // One-pole LP inside the comb feedback
-            self.reverb_comb_filters[i] =
-                out * DAMP_INV + self.reverb_comb_filters[i] * DAMP;
-            let filtered = if self.reverb_comb_filters[i].abs() < DENORMAL {
-                0.0
-            } else {
-                self.reverb_comb_filters[i]
-            };
-            self.reverb_comb_buffers[i][idx] = sample + filtered * g;
-            let len = self.reverb_comb_buffers[i].len();
-            self.reverb_comb_indices[i] = (idx + 1) % len;
-            comb_sum += out;
-        }
-        let mut reverb = comb_sum * 0.125; // average of 8 combs
-
-        // 4 series allpass filters for diffusion.
-        // Allpass filters scatter energy in time without coloring the spectrum,
-        // turning the comb-filter echoes into a smooth density tail.
-        for i in 0..4 {
-            let idx = self.reverb_allpass_indices[i];
-            let buf_out = self.reverb_allpass_buffers[i][idx];
-            let buf_out = if buf_out.abs() < DENORMAL { 0.0 } else { buf_out };
-            self.reverb_allpass_buffers[i][idx] = reverb + buf_out * AP_G;
-            let len = self.reverb_allpass_buffers[i].len();
-            self.reverb_allpass_indices[i] = (idx + 1) % len;
-            reverb = buf_out - reverb;
-        }
-
-        sample + reverb * self.effects.reverb_amount
-    }
-
     pub fn save_preset(&self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Ensure presets directory exists
         self.ensure_presets_dir()?;
@@ -2006,7 +2070,11 @@ impl Synthesizer {
         Ok(())
     }
 
-    pub fn save_preset_with_category(&self, name: &str, category: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_preset_with_category(
+        &self,
+        name: &str,
+        category: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.ensure_presets_dir()?;
         let preset = self.snapshot_preset(name, category);
         let preset_json = self.preset_to_json(&preset)?;
@@ -3762,22 +3830,34 @@ impl Synthesizer {
             let r = over_right[i];
 
             let lf = Self::decimate_biquad(
-                l, &mut self.decim_x1_l, &mut self.decim_x2_l,
-                &mut self.decim_y1_l, &mut self.decim_y2_l,
+                l,
+                &mut self.decim_x1_l,
+                &mut self.decim_x2_l,
+                &mut self.decim_y1_l,
+                &mut self.decim_y2_l,
             );
             let rf = Self::decimate_biquad(
-                r, &mut self.decim_x1_r, &mut self.decim_x2_r,
-                &mut self.decim_y1_r, &mut self.decim_y2_r,
+                r,
+                &mut self.decim_x1_r,
+                &mut self.decim_x2_r,
+                &mut self.decim_y1_r,
+                &mut self.decim_y2_r,
             );
 
             let (lf, rf) = if factor == 4 {
                 let l2 = Self::decimate_biquad(
-                    lf, &mut self.decim2_x1_l, &mut self.decim2_x2_l,
-                    &mut self.decim2_y1_l, &mut self.decim2_y2_l,
+                    lf,
+                    &mut self.decim2_x1_l,
+                    &mut self.decim2_x2_l,
+                    &mut self.decim2_y1_l,
+                    &mut self.decim2_y2_l,
                 );
                 let r2 = Self::decimate_biquad(
-                    rf, &mut self.decim2_x1_r, &mut self.decim2_x2_r,
-                    &mut self.decim2_y1_r, &mut self.decim2_y2_r,
+                    rf,
+                    &mut self.decim2_x1_r,
+                    &mut self.decim2_x2_r,
+                    &mut self.decim2_y1_r,
+                    &mut self.decim2_y2_r,
                 );
                 (l2, r2)
             } else {
@@ -3940,10 +4020,17 @@ mod tests {
 
         // Process 20 blocks (about 213ms at 48kHz) to get past the attack phase
         for _ in 0..20 {
-            for s in buf_l.iter_mut() { *s = 0.0; }
-            for s in buf_r.iter_mut() { *s = 0.0; }
+            for s in buf_l.iter_mut() {
+                *s = 0.0;
+            }
+            for s in buf_r.iter_mut() {
+                *s = 0.0;
+            }
             synth.process_block(&mut buf_l, &mut buf_r);
-            let peak = buf_l.iter().chain(buf_r.iter()).fold(0.0f32, |max, &s| max.max(s.abs()));
+            let peak = buf_l
+                .iter()
+                .chain(buf_r.iter())
+                .fold(0.0f32, |max, &s| max.max(s.abs()));
             max_peak = max_peak.max(peak);
         }
 
@@ -3967,10 +4054,17 @@ mod tests {
         let mut buf_r_old = vec![0.0f32; 512];
         let mut max_peak_old = 0.0f32;
         for _ in 0..20 {
-            for s in buf_l_old.iter_mut() { *s = 0.0; }
-            for s in buf_r_old.iter_mut() { *s = 0.0; }
+            for s in buf_l_old.iter_mut() {
+                *s = 0.0;
+            }
+            for s in buf_r_old.iter_mut() {
+                *s = 0.0;
+            }
             synth_old.process_block(&mut buf_l_old, &mut buf_r_old);
-            let peak = buf_l_old.iter().chain(buf_r_old.iter()).fold(0.0f32, |max, &s| max.max(s.abs()));
+            let peak = buf_l_old
+                .iter()
+                .chain(buf_r_old.iter())
+                .fold(0.0f32, |max, &s| max.max(s.abs()));
             max_peak_old = max_peak_old.max(peak);
         }
 
@@ -4021,9 +4115,13 @@ mod tests {
         // At 200 samples drawn from a ±2 % window, stddev is ≈ 0.012.
         // Anything ≪ 0.005 means the RNG is effectively constant — bug.
         let mean_c: f32 = cutoffs.iter().sum::<f32>() / cutoffs.len() as f32;
-        let var_c: f32 = cutoffs.iter().map(|c| (c - mean_c).powi(2)).sum::<f32>()
-            / cutoffs.len() as f32;
-        assert!(var_c.sqrt() > 0.005, "cutoff tolerance stddev too small: {}", var_c.sqrt());
+        let var_c: f32 =
+            cutoffs.iter().map(|c| (c - mean_c).powi(2)).sum::<f32>() / cutoffs.len() as f32;
+        assert!(
+            var_c.sqrt() > 0.005,
+            "cutoff tolerance stddev too small: {}",
+            var_c.sqrt()
+        );
     }
 
     #[test]
@@ -4050,7 +4148,7 @@ mod tests {
     fn test_chorus_buffer_is_power_of_two() {
         // Power-of-two is load-bearing: apply_chorus uses `& mask` wrap.
         let synth = Synthesizer::new();
-        let len = synth.chorus_buffer.len();
+        let len = synth.effects_chain.chorus_buffer.len();
         assert!(
             len.is_power_of_two(),
             "chorus_buffer len must be power of two, got {}",
@@ -4068,11 +4166,17 @@ mod tests {
         synth.effects.chorus_mix = 0.0;
         let input_samples = [0.3_f32, -0.5, 0.1, 0.8, -0.2];
         for &s in &input_samples {
-            let out = synth.apply_chorus(s);
-            assert_eq!(out, s, "chorus bypassed must not alter signal: in={} out={}", s, out);
+            let out = synth
+                .effects_chain
+                .apply_chorus(s, &synth.effects, synth.sample_rate);
+            assert_eq!(
+                out, s,
+                "chorus bypassed must not alter signal: in={} out={}",
+                s, out
+            );
         }
         // Ring buffer must still have advanced.
-        assert_eq!(synth.chorus_index, input_samples.len());
+        assert_eq!(synth.effects_chain.chorus_index, input_samples.len());
     }
 
     #[test]
@@ -4086,10 +4190,14 @@ mod tests {
         // from the current input.
         for i in 0..2000 {
             let s = ((i as f32) * 0.01).sin();
-            synth.apply_chorus(s);
+            synth
+                .effects_chain
+                .apply_chorus(s, &synth.effects, synth.sample_rate);
         }
         let same_input = 0.5_f32;
-        let out = synth.apply_chorus(same_input);
+        let out = synth
+            .effects_chain
+            .apply_chorus(same_input, &synth.effects, synth.sample_rate);
         assert!(
             (out - same_input).abs() > 0.001,
             "chorus with mix=0.8 should alter signal: in={} out={}",
@@ -4107,7 +4215,10 @@ mod tests {
         let mut buf_l = vec![0.0_f32; 512];
         let mut buf_r = vec![0.0_f32; 512];
         synth.process_block(&mut buf_l, &mut buf_r);
-        let peak = buf_l.iter().chain(buf_r.iter()).fold(0.0_f32, |m, &s| m.max(s.abs()));
+        let peak = buf_l
+            .iter()
+            .chain(buf_r.iter())
+            .fold(0.0_f32, |m, &s| m.max(s.abs()));
         assert!(peak < 1e-6, "silence expected, got peak={}", peak);
     }
 
@@ -4121,7 +4232,11 @@ mod tests {
         synth.process_block(&mut buf_l, &mut buf_r);
         let all: Vec<f32> = buf_l.iter().chain(buf_r.iter()).copied().collect();
         let rms = (all.iter().map(|s| s * s).sum::<f32>() / all.len() as f32).sqrt();
-        assert!(rms > 1e-5, "noise floor should produce audible hiss, rms={}", rms);
+        assert!(
+            rms > 1e-5,
+            "noise floor should produce audible hiss, rms={}",
+            rms
+        );
     }
 
     #[test]
@@ -4251,12 +4366,26 @@ mod tests {
         // At phase=0.0 triangle = -1, at phase=0.5 triangle = +1, at phase=1.0 wraps to -1
         let at_zero = Synthesizer::generate_lfo_waveform(LfoWaveform::Triangle, 0.0, 0.0);
         let at_half = Synthesizer::generate_lfo_waveform(LfoWaveform::Triangle, 0.5, 0.0);
-        assert!((at_zero - (-1.0)).abs() < 0.01, "triangle at 0 should be -1, got {}", at_zero);
-        assert!((at_half - 1.0).abs() < 0.01, "triangle at 0.5 should be +1, got {}", at_half);
+        assert!(
+            (at_zero - (-1.0)).abs() < 0.01,
+            "triangle at 0 should be -1, got {}",
+            at_zero
+        );
+        assert!(
+            (at_half - 1.0).abs() < 0.01,
+            "triangle at 0.5 should be +1, got {}",
+            at_half
+        );
         // All values must be in [-1, 1]
         for i in 0..100 {
-            let v = Synthesizer::generate_lfo_waveform(LfoWaveform::Triangle, i as f32 / 100.0, 0.0);
-            assert!((-1.0..=1.0).contains(&v), "triangle out of range at phase {}: {}", i, v);
+            let v =
+                Synthesizer::generate_lfo_waveform(LfoWaveform::Triangle, i as f32 / 100.0, 0.0);
+            assert!(
+                (-1.0..=1.0).contains(&v),
+                "triangle out of range at phase {}: {}",
+                i,
+                v
+            );
         }
     }
 
@@ -4265,11 +4394,22 @@ mod tests {
         for i in 0..100 {
             let phase = i as f32 / 100.0;
             let v = Synthesizer::generate_lfo_waveform(LfoWaveform::Square, phase, 0.0);
-            assert!(v == -1.0 || v == 1.0, "square must be ±1, got {} at phase {}", v, phase);
+            assert!(
+                v == -1.0 || v == 1.0,
+                "square must be ±1, got {} at phase {}",
+                v,
+                phase
+            );
         }
         // First half is -1, second half is +1
-        assert_eq!(Synthesizer::generate_lfo_waveform(LfoWaveform::Square, 0.0, 0.0), -1.0);
-        assert_eq!(Synthesizer::generate_lfo_waveform(LfoWaveform::Square, 0.75, 0.0), 1.0);
+        assert_eq!(
+            Synthesizer::generate_lfo_waveform(LfoWaveform::Square, 0.0, 0.0),
+            -1.0
+        );
+        assert_eq!(
+            Synthesizer::generate_lfo_waveform(LfoWaveform::Square, 0.75, 0.0),
+            1.0
+        );
     }
 
     #[test]
@@ -4277,12 +4417,21 @@ mod tests {
         let at_zero = Synthesizer::generate_lfo_waveform(LfoWaveform::Sawtooth, 0.0, 0.0);
         let at_one = Synthesizer::generate_lfo_waveform(LfoWaveform::Sawtooth, 0.9999, 0.0);
         // Rises from -1 to +1
-        assert!((at_zero - (-1.0)).abs() < 0.01, "saw at 0 should be ~-1, got {}", at_zero);
-        assert!(at_one > 0.9, "saw near 1.0 should be close to +1, got {}", at_one);
+        assert!(
+            (at_zero - (-1.0)).abs() < 0.01,
+            "saw at 0 should be ~-1, got {}",
+            at_zero
+        );
+        assert!(
+            at_one > 0.9,
+            "saw near 1.0 should be close to +1, got {}",
+            at_one
+        );
         // Monotonically increasing within one period
         let mut prev = f32::MIN;
         for i in 0..100 {
-            let v = Synthesizer::generate_lfo_waveform(LfoWaveform::Sawtooth, i as f32 / 100.0, 0.0);
+            let v =
+                Synthesizer::generate_lfo_waveform(LfoWaveform::Sawtooth, i as f32 / 100.0, 0.0);
             assert!(v >= prev, "sawtooth should be monotone increasing");
             prev = v;
         }
@@ -4292,15 +4441,27 @@ mod tests {
     fn test_lfo_reverse_sawtooth_range_and_direction() {
         let at_zero = Synthesizer::generate_lfo_waveform(LfoWaveform::ReverseSawtooth, 0.0, 0.0);
         let at_one = Synthesizer::generate_lfo_waveform(LfoWaveform::ReverseSawtooth, 0.9999, 0.0);
-        assert!((at_zero - 1.0).abs() < 0.01, "rsaw at 0 should be +1, got {}", at_zero);
-        assert!(at_one < -0.9, "rsaw near 1.0 should be close to -1, got {}", at_one);
+        assert!(
+            (at_zero - 1.0).abs() < 0.01,
+            "rsaw at 0 should be +1, got {}",
+            at_zero
+        );
+        assert!(
+            at_one < -0.9,
+            "rsaw near 1.0 should be close to -1, got {}",
+            at_one
+        );
     }
 
     #[test]
     fn test_lfo_sample_and_hold_returns_held_value() {
         let held = 0.42_f32;
         for i in 0..10 {
-            let v = Synthesizer::generate_lfo_waveform(LfoWaveform::SampleAndHold, i as f32 / 10.0, held);
+            let v = Synthesizer::generate_lfo_waveform(
+                LfoWaveform::SampleAndHold,
+                i as f32 / 10.0,
+                held,
+            );
             assert_eq!(v, held, "S&H must return the held value unchanged");
         }
     }
@@ -4355,7 +4516,12 @@ mod tests {
         // Curve 1: sqrt — more sensitive at low velocities
         let linear = Synthesizer::apply_velocity_curve(64, 0);
         let soft = Synthesizer::apply_velocity_curve(64, 1);
-        assert!(soft > linear, "soft curve should boost low velocities: linear={} soft={}", linear, soft);
+        assert!(
+            soft > linear,
+            "soft curve should boost low velocities: linear={} soft={}",
+            linear,
+            soft
+        );
         assert!((Synthesizer::apply_velocity_curve(127, 1) - 1.0).abs() < 0.01);
     }
 
@@ -4364,7 +4530,12 @@ mod tests {
         // Curve 2: squared — requires stronger playing
         let linear = Synthesizer::apply_velocity_curve(64, 0);
         let hard = Synthesizer::apply_velocity_curve(64, 2);
-        assert!(hard < linear, "hard curve should reduce mid velocities: linear={} hard={}", linear, hard);
+        assert!(
+            hard < linear,
+            "hard curve should reduce mid velocities: linear={} hard={}",
+            linear,
+            hard
+        );
         assert!((Synthesizer::apply_velocity_curve(127, 2) - 1.0).abs() < 0.01);
     }
 
@@ -4372,7 +4543,12 @@ mod tests {
 
     #[test]
     fn test_wave_type_roundtrip() {
-        for wt in [WaveType::Sine, WaveType::Square, WaveType::Triangle, WaveType::Sawtooth] {
+        for wt in [
+            WaveType::Sine,
+            WaveType::Square,
+            WaveType::Triangle,
+            WaveType::Sawtooth,
+        ] {
             let u = Synthesizer::wave_type_to_u8_pub(wt);
             assert_eq!(Synthesizer::u8_to_wave_type_pub(u), wt);
         }
@@ -4393,12 +4569,20 @@ mod tests {
             assert_eq!(Synthesizer::u8_to_lfo_waveform_pub(u), wf);
         }
         // Out-of-range falls back to Triangle
-        assert_eq!(Synthesizer::u8_to_lfo_waveform_pub(99), LfoWaveform::Triangle);
+        assert_eq!(
+            Synthesizer::u8_to_lfo_waveform_pub(99),
+            LfoWaveform::Triangle
+        );
     }
 
     #[test]
     fn test_arp_pattern_roundtrip() {
-        for p in [ArpPattern::Up, ArpPattern::Down, ArpPattern::UpDown, ArpPattern::Random] {
+        for p in [
+            ArpPattern::Up,
+            ArpPattern::Down,
+            ArpPattern::UpDown,
+            ArpPattern::Random,
+        ] {
             let u = Synthesizer::arp_pattern_to_u8_pub(p);
             assert_eq!(Synthesizer::u8_to_arp_pattern_pub(u), p);
         }
@@ -4417,7 +4601,11 @@ mod tests {
         synth.note_on(67, 100);
         // Mono must never exceed one active voice
         let active = synth.voices.iter().filter(|v| v.is_active).count();
-        assert_eq!(active, 1, "mono mode should have exactly 1 active voice, got {}", active);
+        assert_eq!(
+            active, 1,
+            "mono mode should have exactly 1 active voice, got {}",
+            active
+        );
     }
 
     #[test]
@@ -4426,10 +4614,13 @@ mod tests {
         synth.voice_mode = VoiceMode::Mono;
         synth.note_on(60, 100);
         synth.note_on(64, 100); // 64 is now playing
-        synth.note_off(64);     // should return to 60
+        synth.note_off(64); // should return to 60
         let active: Vec<_> = synth.voices.iter().filter(|v| v.is_active).collect();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].note, 60, "mono should return to note 60 after releasing 64");
+        assert_eq!(
+            active[0].note, 60,
+            "mono should return to note 60 after releasing 64"
+        );
     }
 
     #[test]
@@ -4451,11 +4642,19 @@ mod tests {
         synth.voice_mode = VoiceMode::Unison;
         synth.unison_spread = 20.0; // 20 cents spread
         synth.note_on(60, 100);
-        let freqs: Vec<f32> = synth.voices.iter().filter(|v| v.is_active).map(|v| v.frequency).collect();
+        let freqs: Vec<f32> = synth
+            .voices
+            .iter()
+            .filter(|v| v.is_active)
+            .map(|v| v.frequency)
+            .collect();
         assert!(freqs.len() >= 2);
         // At least some voices must differ in frequency
         let all_same = freqs.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01);
-        assert!(!all_same, "unison voices should have different detuned frequencies");
+        assert!(
+            !all_same,
+            "unison voices should have different detuned frequencies"
+        );
     }
 
     // ─── Note priority in Mono mode ────────────────────────────────────────
@@ -4469,7 +4668,10 @@ mod tests {
         synth.note_on(60, 100); // low note — should take priority
         let active: Vec<_> = synth.voices.iter().filter(|v| v.is_active).collect();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].note, 60, "Low priority should play the lowest note");
+        assert_eq!(
+            active[0].note, 60,
+            "Low priority should play the lowest note"
+        );
     }
 
     #[test]
@@ -4481,7 +4683,10 @@ mod tests {
         synth.note_on(72, 100); // high note — should take priority
         let active: Vec<_> = synth.voices.iter().filter(|v| v.is_active).collect();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].note, 72, "High priority should play the highest note");
+        assert_eq!(
+            active[0].note, 72,
+            "High priority should play the highest note"
+        );
     }
 
     // ─── Polyphony limit & voice stealing ─────────────────────────────────
@@ -4521,7 +4726,10 @@ mod tests {
         voice.envelope_time = 1.5; // simulated time in sustain
         voice.release();
         assert_eq!(voice.envelope_state, EnvelopeState::Release);
-        assert_eq!(voice.envelope_time, 0.0, "release should reset envelope_time to 0");
+        assert_eq!(
+            voice.envelope_time, 0.0,
+            "release should reset envelope_time to 0"
+        );
     }
 
     #[test]
@@ -4530,7 +4738,11 @@ mod tests {
         voice.envelope_state = EnvelopeState::Sustain;
         voice.release_or_sustain(true); // pedal held
         assert!(voice.is_sustained);
-        assert_eq!(voice.envelope_state, EnvelopeState::Sustain, "should not release when pedal held");
+        assert_eq!(
+            voice.envelope_state,
+            EnvelopeState::Sustain,
+            "should not release when pedal held"
+        );
     }
 
     #[test]
@@ -4561,9 +4773,21 @@ mod tests {
         let mut buf_bent_r = vec![0.0f32; 256];
         synth_bent.process_block(&mut buf_bent_l, &mut buf_bent_r);
 
-        let diff: f32 = buf_no_bend_l.iter().zip(&buf_bent_l).map(|(a, b)| (a - b).abs()).sum::<f32>()
-            + buf_no_bend_r.iter().zip(&buf_bent_r).map(|(a, b)| (a - b).abs()).sum::<f32>();
-        assert!(diff > 0.001, "pitch bend should alter audio output, diff={}", diff);
+        let diff: f32 = buf_no_bend_l
+            .iter()
+            .zip(&buf_bent_l)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f32>()
+            + buf_no_bend_r
+                .iter()
+                .zip(&buf_bent_r)
+                .map(|(a, b)| (a - b).abs())
+                .sum::<f32>();
+        assert!(
+            diff > 0.001,
+            "pitch bend should alter audio output, diff={}",
+            diff
+        );
     }
 
     // ─── MIDI clock ────────────────────────────────────────────────────────
@@ -4594,7 +4818,10 @@ mod tests {
         for _ in 0..24 {
             synth.midi_clock_tick(0.02);
         }
-        assert_eq!(synth.midi_clock_bpm, initial_bpm, "disabled clock should not update BPM");
+        assert_eq!(
+            synth.midi_clock_bpm, initial_bpm,
+            "disabled clock should not update BPM"
+        );
     }
 
     // ─── Arpeggiator in Poly mode ──────────────────────────────────────────
@@ -4606,7 +4833,11 @@ mod tests {
         synth.note_on(60, 100);
         synth.note_on(64, 100);
         synth.note_on(67, 100);
-        assert_eq!(synth.held_notes.len(), 3, "arpeggiator should collect 3 held notes");
+        assert_eq!(
+            synth.held_notes.len(),
+            3,
+            "arpeggiator should collect 3 held notes"
+        );
         assert!(synth.held_notes.contains(&60));
         assert!(synth.held_notes.contains(&64));
         assert!(synth.held_notes.contains(&67));
@@ -4619,7 +4850,10 @@ mod tests {
         synth.note_on(60, 100);
         synth.note_on(64, 100);
         synth.note_off(60);
-        assert!(!synth.held_notes.contains(&60), "note_off should remove note from held_notes");
+        assert!(
+            !synth.held_notes.contains(&60),
+            "note_off should remove note from held_notes"
+        );
         assert!(synth.held_notes.contains(&64));
     }
 
@@ -4629,19 +4863,31 @@ mod tests {
     fn test_semitones_to_ratio_octave() {
         // 12 semitones = 2× frequency
         let ratio = Synthesizer::semitones_to_ratio(12.0);
-        assert!((ratio - 2.0).abs() < 0.001, "12 semitones should give ratio 2.0, got {}", ratio);
+        assert!(
+            (ratio - 2.0).abs() < 0.001,
+            "12 semitones should give ratio 2.0, got {}",
+            ratio
+        );
     }
 
     #[test]
     fn test_semitones_to_ratio_zero() {
         let ratio = Synthesizer::semitones_to_ratio(0.0);
-        assert!((ratio - 1.0).abs() < 0.001, "0 semitones should give ratio 1.0, got {}", ratio);
+        assert!(
+            (ratio - 1.0).abs() < 0.001,
+            "0 semitones should give ratio 1.0, got {}",
+            ratio
+        );
     }
 
     #[test]
     fn test_semitones_to_ratio_negative() {
         let ratio = Synthesizer::semitones_to_ratio(-12.0);
-        assert!((ratio - 0.5).abs() < 0.001, "-12 semitones should give ratio 0.5, got {}", ratio);
+        assert!(
+            (ratio - 0.5).abs() < 0.001,
+            "-12 semitones should give ratio 0.5, got {}",
+            ratio
+        );
     }
 
     // ─── fast_tanh ─────────────────────────────────────────────────────────
@@ -4654,10 +4900,26 @@ mod tests {
     #[test]
     fn test_fast_tanh_clamps_beyond_three() {
         // The Padé approximant's domain is |x| ≤ 3; outside it hard-clamps to ±1.
-        assert_eq!(Synthesizer::fast_tanh(3.1), 1.0, "fast_tanh(3.1) must be 1.0");
-        assert_eq!(Synthesizer::fast_tanh(10.0), 1.0, "fast_tanh(10.0) must be 1.0");
-        assert_eq!(Synthesizer::fast_tanh(-3.1), -1.0, "fast_tanh(-3.1) must be -1.0");
-        assert_eq!(Synthesizer::fast_tanh(-10.0), -1.0, "fast_tanh(-10.0) must be -1.0");
+        assert_eq!(
+            Synthesizer::fast_tanh(3.1),
+            1.0,
+            "fast_tanh(3.1) must be 1.0"
+        );
+        assert_eq!(
+            Synthesizer::fast_tanh(10.0),
+            1.0,
+            "fast_tanh(10.0) must be 1.0"
+        );
+        assert_eq!(
+            Synthesizer::fast_tanh(-3.1),
+            -1.0,
+            "fast_tanh(-3.1) must be -1.0"
+        );
+        assert_eq!(
+            Synthesizer::fast_tanh(-10.0),
+            -1.0,
+            "fast_tanh(-10.0) must be -1.0"
+        );
     }
 
     #[test]
@@ -4671,7 +4933,9 @@ mod tests {
             assert!(
                 (pos + neg).abs() < 1e-6,
                 "fast_tanh not symmetric at x={:.1}: f(x)={} f(-x)={}",
-                x, pos, neg
+                x,
+                pos,
+                neg
             );
         }
     }
@@ -4689,7 +4953,9 @@ mod tests {
                 assert!(
                     relative_error < 0.001,
                     "fast_tanh deviates from identity at x={:.2}: approx={:.6} rel_err={:.4}",
-                    x, approx, relative_error
+                    x,
+                    approx,
+                    relative_error
                 );
             }
         }
@@ -4703,7 +4969,13 @@ mod tests {
         for i in -30..=30 {
             let x = i as f32 * 0.1;
             let v = Synthesizer::fast_tanh(x);
-            assert!(v >= prev, "fast_tanh not monotone at x={:.1}: prev={} current={}", x, prev, v);
+            assert!(
+                v >= prev,
+                "fast_tanh not monotone at x={:.1}: prev={} current={}",
+                x,
+                prev,
+                v
+            );
             prev = v;
         }
     }
@@ -4714,7 +4986,12 @@ mod tests {
         for i in -100..=100 {
             let x = i as f32 * 0.1;
             let v = Synthesizer::fast_tanh(x);
-            assert!((-1.0..=1.0).contains(&v), "fast_tanh out of bounds at x={}: {}", x, v);
+            assert!(
+                (-1.0..=1.0).contains(&v),
+                "fast_tanh out of bounds at x={}: {}",
+                x,
+                v
+            );
         }
     }
 
@@ -4730,15 +5007,37 @@ mod tests {
         let n_samples = 4096;
         let skip = 512; // let transient settle
 
-        let mut state_low = LadderFilterState { stage1: 0.0, stage2: 0.0, stage3: 0.0, stage4: 0.0 };
-        let mut state_high = LadderFilterState { stage1: 0.0, stage2: 0.0, stage3: 0.0, stage4: 0.0 };
+        let mut state_low = LadderFilterState {
+            stage1: 0.0,
+            stage2: 0.0,
+            stage3: 0.0,
+            stage4: 0.0,
+        };
+        let mut state_high = LadderFilterState {
+            stage1: 0.0,
+            stage2: 0.0,
+            stage3: 0.0,
+            stage4: 0.0,
+        };
         let mut energy_low = 0.0_f32;
         let mut energy_high = 0.0_f32;
 
         for i in 0..n_samples {
             let input = (2.0 * PI * freq * i as f32 / sample_rate).sin();
-            let out_low = Synthesizer::apply_ladder_filter_static(input, &mut state_low, 200.0, resonance, sample_rate);
-            let out_high = Synthesizer::apply_ladder_filter_static(input, &mut state_high, 18000.0, resonance, sample_rate);
+            let out_low = Synthesizer::apply_ladder_filter_static(
+                input,
+                &mut state_low,
+                200.0,
+                resonance,
+                sample_rate,
+            );
+            let out_high = Synthesizer::apply_ladder_filter_static(
+                input,
+                &mut state_high,
+                18000.0,
+                resonance,
+                sample_rate,
+            );
             if i >= skip {
                 energy_low += out_low * out_low;
                 energy_high += out_high * out_high;
@@ -4750,7 +5049,8 @@ mod tests {
         assert!(
             rms_low < rms_high * 0.1,
             "200 Hz cutoff should attenuate 5 kHz by >20 dB vs 18 kHz: rms_low={:.4} rms_high={:.4}",
-            rms_low, rms_high
+            rms_low,
+            rms_high
         );
     }
 
@@ -4760,7 +5060,12 @@ mod tests {
         // at 440 Hz must pass through mostly unattenuated.
         // Using amplitude 0.05 keeps all 4 tanh stages in their linear region (tanh(x)≈x for |x|≪1).
         let sample_rate = 44100.0;
-        let mut state = LadderFilterState { stage1: 0.0, stage2: 0.0, stage3: 0.0, stage4: 0.0 };
+        let mut state = LadderFilterState {
+            stage1: 0.0,
+            stage2: 0.0,
+            stage3: 0.0,
+            stage4: 0.0,
+        };
         let n_samples = 2048;
         let skip = 256;
         let amplitude = 0.05_f32;
@@ -4769,7 +5074,13 @@ mod tests {
 
         for i in 0..n_samples {
             let input = amplitude * (2.0 * PI * 440.0 * i as f32 / sample_rate).sin();
-            let output = Synthesizer::apply_ladder_filter_static(input, &mut state, 18000.0, 0.0, sample_rate);
+            let output = Synthesizer::apply_ladder_filter_static(
+                input,
+                &mut state,
+                18000.0,
+                0.0,
+                sample_rate,
+            );
             if i >= skip {
                 energy_in += input * input;
                 energy_out += output * output;
@@ -4801,7 +5112,11 @@ mod tests {
         }
 
         let stolen = synth.find_voice_to_steal();
-        assert_eq!(stolen, 3, "voice stealing should pick the Release-state voice (index 3), got {}", stolen);
+        assert_eq!(
+            stolen, 3,
+            "voice stealing should pick the Release-state voice (index 3), got {}",
+            stolen
+        );
     }
 
     #[test]
@@ -4820,7 +5135,11 @@ mod tests {
         synth.voices[5].envelope_value = 0.05;
 
         let stolen = synth.find_voice_to_steal();
-        assert_eq!(stolen, 5, "among Sustain voices, the quietest (index 5) should be stolen, got {}", stolen);
+        assert_eq!(
+            stolen, 5,
+            "among Sustain voices, the quietest (index 5) should be stolen, got {}",
+            stolen
+        );
     }
 
     // ─── Legato envelope non-retrigger ─────────────────────────────────────
@@ -4840,25 +5159,39 @@ mod tests {
         let mut buf_r = vec![0.0f32; 1024];
         synth.process_block(&mut buf_l, &mut buf_r);
 
-        let state_before = synth.voices.iter()
+        let state_before = synth
+            .voices
+            .iter()
             .find(|v| v.is_active)
             .map(|v| v.envelope_state)
             .expect("must have an active voice after note_on");
-        assert_ne!(state_before, EnvelopeState::Attack,
-            "After 23ms with 1ms attack, should have left Attack (got {:?})", state_before);
+        assert_ne!(
+            state_before,
+            EnvelopeState::Attack,
+            "After 23ms with 1ms attack, should have left Attack (got {:?})",
+            state_before
+        );
 
         // Second note — legato should NOT reset the envelope.
         synth.note_on(64, 100);
 
-        let state_after = synth.voices.iter()
+        let state_after = synth
+            .voices
+            .iter()
             .find(|v| v.is_active)
             .map(|v| v.envelope_state)
             .expect("must still have an active voice");
-        assert_ne!(state_after, EnvelopeState::Attack,
-            "Legato second note must not retrigger envelope to Attack (got {:?})", state_after);
+        assert_ne!(
+            state_after,
+            EnvelopeState::Attack,
+            "Legato second note must not retrigger envelope to Attack (got {:?})",
+            state_after
+        );
         // Note must have changed to the new pitch.
-        assert!(synth.voices.iter().any(|v| v.is_active && v.note == 64),
-            "Active voice should now be playing note 64");
+        assert!(
+            synth.voices.iter().any(|v| v.is_active && v.note == 64),
+            "Active voice should now be playing note 64"
+        );
     }
 
     // ─── Preset JSON round-trip ────────────────────────────────────────────
@@ -4914,11 +5247,17 @@ false
 "Bass""#;
 
         let synth = Synthesizer::new();
-        let restored = synth.json_to_preset(legacy).expect("legacy 45-line preset must load");
+        let restored = synth
+            .json_to_preset(legacy)
+            .expect("legacy 45-line preset must load");
 
         assert_eq!(restored.name, "LegacyPatch");
         assert_eq!(restored.category, "Bass");
-        assert_eq!(restored.lfo.waveform, LfoWaveform::Triangle, "legacy defaults to Triangle");
+        assert_eq!(
+            restored.lfo.waveform,
+            LfoWaveform::Triangle,
+            "legacy defaults to Triangle"
+        );
         assert!(!restored.lfo.sync, "legacy sync defaults to false");
         // Chorus defaults come from EffectsParams::default() — chorus_mix=0 keeps legacy
         // presets dry, matching the original pre-chorus behaviour.
@@ -5054,8 +5393,10 @@ false
 
     #[test]
     fn test_decimate_biquad_dc_gain_unity() {
-        let mut x1 = 0.0f32; let mut x2 = 0.0f32;
-        let mut y1 = 0.0f32; let mut y2 = 0.0f32;
+        let mut x1 = 0.0f32;
+        let mut x2 = 0.0f32;
+        let mut y1 = 0.0f32;
+        let mut y2 = 0.0f32;
         let mut out = 0.0f32;
         for _ in 0..2000 {
             out = Synthesizer::decimate_biquad(1.0, &mut x1, &mut x2, &mut y1, &mut y2);
@@ -5065,8 +5406,10 @@ false
 
     #[test]
     fn test_decimate_biquad_nyquist_attenuated() {
-        let mut x1 = 0.0f32; let mut x2 = 0.0f32;
-        let mut y1 = 0.0f32; let mut y2 = 0.0f32;
+        let mut x1 = 0.0f32;
+        let mut x2 = 0.0f32;
+        let mut y1 = 0.0f32;
+        let mut y2 = 0.0f32;
         let mut out = 0.0f32;
         for i in 0..2000 {
             let x = if i % 2 == 0 { 1.0f32 } else { -1.0f32 };
