@@ -2,7 +2,7 @@ use crate::audio_engine::AudioEngine;
 use crate::lock_free::{
     LockFreeSynth, MidiEvent, MidiEventQueue, SynthParameters, UiEvent, UiEventQueue,
 };
-use crate::midi_handler::MidiHandler;
+use crate::midi_handler::{CC_BINDINGS, MidiHandler};
 use crate::synthesizer::{ArpPattern, LfoWaveform, Synthesizer, WaveType};
 use eframe::egui;
 use std::sync::{Arc, Mutex};
@@ -1678,28 +1678,6 @@ impl SynthApp {
     }
 
     fn draw_midi_learn_panel(&mut self, ui: &mut egui::Ui) {
-        let learnable_params: &[(&str, &str)] = &[
-            ("filter_cutoff", "Filter Cutoff"),
-            ("filter_resonance", "Filter Resonance"),
-            ("filter_envelope_amount", "Filter Env Amount"),
-            ("amp_attack", "Amp Attack"),
-            ("amp_decay", "Amp Decay"),
-            ("amp_sustain", "Amp Sustain"),
-            ("amp_release", "Amp Release"),
-            ("filter_attack", "Filter Attack"),
-            ("filter_decay", "Filter Decay"),
-            ("filter_sustain", "Filter Sustain"),
-            ("filter_release", "Filter Release"),
-            ("lfo_rate", "LFO Rate"),
-            ("lfo_amount", "LFO Amount"),
-            ("master_volume", "Master Volume"),
-            ("reverb_amount", "Reverb Amount"),
-            ("delay_feedback", "Delay Feedback"),
-            ("delay_amount", "Delay Amount"),
-            ("osc1_detune", "Osc A Detune"),
-            ("osc2_detune", "Osc B Detune"),
-        ];
-
         if let Some(ref learn_arc) = self.learn_state {
             // Status line
             {
@@ -1726,19 +1704,19 @@ impl SynthApp {
             egui::ScrollArea::vertical()
                 .max_height(250.0)
                 .show(ui, |ui| {
-                    for (param_key, param_label) in learnable_params {
-                        // Collect binding info before mutable ops
+                    for binding in CC_BINDINGS {
+                        let param_key = binding.name;
                         let bound_cc: Option<u8> = learn_arc.try_lock().ok().and_then(|state| {
                             state
                                 .custom_map
                                 .iter()
-                                .find(|(_, v)| v.as_str() == *param_key)
+                                .find(|(_, v)| v.as_str() == param_key)
                                 .map(|(cc, _)| *cc)
                         });
 
                         ui.horizontal(|ui| {
                             ui.set_min_width(200.0);
-                            ui.label(*param_label);
+                            ui.label(binding.label);
                             if ui.small_button("Learn").clicked()
                                 && let Ok(mut state) = learn_arc.try_lock()
                             {
@@ -1749,10 +1727,10 @@ impl SynthApp {
                                 if ui.small_button("x").clicked()
                                     && let Ok(mut state) = learn_arc.try_lock()
                                 {
-                                    state.custom_map.retain(|_, v| v.as_str() != *param_key);
+                                    state.custom_map.retain(|_, v| v.as_str() != param_key);
                                 }
                             } else {
-                                ui.colored_label(egui::Color32::GRAY, "-");
+                                ui.colored_label(egui::Color32::GRAY, format!("CC {}", binding.cc));
                             }
                         });
                     }

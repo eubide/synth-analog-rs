@@ -4,7 +4,7 @@ Sintetizador analógico tipo Prophet-5 en Rust. Trabajo pendiente, priorizado po
 
 ## Refactor arquitectónico
 
-> Análisis completo: `synthesizer.rs` (5077 líneas) era un God Object con 79 campos. L1–L4 completos; `Synthesizer` queda con 63 campos y un `process_block` de ~130 líneas. Pendiente: L5 (GUI) + L6 (CC).
+> Análisis completo: `synthesizer.rs` (5077 líneas) era un God Object con 79 campos. L1–L4 + L6 completos; `Synthesizer` queda con 63 campos y un `process_block` de ~130 líneas. Pendiente: L5 (GUI).
 
 ### L1 — Extraer `EffectsChain` _(bajo riesgo, primer paso)_ ✅
 - [x] Crear struct `EffectsChain` con los 12 campos de reverb/delay/chorus
@@ -34,10 +34,12 @@ Sintetizador analógico tipo Prophet-5 en Rust. Trabajo pendiente, priorizado po
 - [ ] Builder pattern para los 11 paneles con estructura repetitiva (`draw_xxx_panel`)
 - [ ] Mover parámetros A/B comparison fuera de la capa de presentación
 
-### L6 — Abstracción CC (`midi_handler.rs`)
-- [ ] Crear `CcMap` — fuente única de verdad para CC→parámetro (elimina switch de 55 líneas)
-- [ ] Unificar: `midi_handler.rs`, lista de `midi_learn`, campos de `SynthParameters`
-- [ ] Agregar nuevo parámetro editando solo 1 lugar (actualmente 5 archivos)
+### L6 — Abstracción CC (`midi_handler.rs`) ✅
+- [x] Crear `CC_BINDINGS: &[CcBinding]` — fuente única de verdad (39 entradas) con `{cc, name, label, apply}`
+- [x] `handle_cc_message` reducido de ~55 arms a `binding_by_cc(cc)` + 3 especiales (64 sustain, 120/123 notes-off); custom learn via `binding_by_name`
+- [x] `draw_midi_learn_panel` itera `CC_BINDINGS` (antes lista hardcodeada de 19) — Learn cubre ahora los 39 parámetros
+- [x] Bug de escala corregido de paso: `filter_resonance` (0..10 → 0..4) y detunes (±12 → ±24) alineados con los sliders canónicos del GUI
+- [x] `apply_named_param` eliminado (absorbido por el closure `apply` de cada binding)
 
 ### Deuda técnica crítica
 - [x] **I/O en hilo de audio** — Program Change (0xC0) y SysEx (F0 7D 01/02) ruteados vía `UiEventQueue` al hilo GUI; el callback de audio ya no toca disco ni parsea JSON. `UiEventQueue` es además un `EventQueue<T>` genérico candidato a `synth-core/ipc/`.
