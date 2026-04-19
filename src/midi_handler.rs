@@ -1,4 +1,4 @@
-use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue};
+use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue, UiEvent, UiEventQueue};
 use midir::{Ignore, MidiInput};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -29,6 +29,7 @@ impl MidiHandler {
     pub fn new(
         lock_free_synth: Arc<LockFreeSynth>,
         midi_events: Arc<MidiEventQueue>,
+        ui_events: Arc<UiEventQueue>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let message_history = Arc::new(Mutex::new(VecDeque::new()));
         let learn_state: Arc<Mutex<MidiLearnState>> = Arc::new(Mutex::new(MidiLearnState::default()));
@@ -72,6 +73,7 @@ impl MidiHandler {
                     message,
                     &lock_free_synth,
                     &midi_events,
+                    &ui_events,
                     &history_clone,
                     &learn_state_clone,
                 );
@@ -90,6 +92,7 @@ impl MidiHandler {
         message: &[u8],
         lock_free_synth: &Arc<LockFreeSynth>,
         midi_events: &Arc<MidiEventQueue>,
+        ui_events: &Arc<UiEventQueue>,
         history: &Arc<Mutex<VecDeque<MidiMessage>>>,
         learn_state: &Arc<Mutex<MidiLearnState>>,
     ) {
@@ -110,7 +113,7 @@ impl MidiHandler {
             if message[1] == 0x7D {
                 match message[2] {
                     0x01 => {
-                        midi_events.push(MidiEvent::SysExRequest);
+                        ui_events.push(UiEvent::SysExRequest);
                         if let Ok(mut hist) = history.lock() {
                             hist.push_back(MidiMessage {
                                 timestamp: std::time::Instant::now(),
@@ -128,7 +131,7 @@ impl MidiHandler {
                                 description: format!("Patch load ({} bytes)", data.len()),
                             });
                         }
-                        midi_events.push(MidiEvent::SysExPatch { data });
+                        ui_events.push(UiEvent::SysExPatch { data });
                     }
                     _ => {}
                 }
@@ -186,7 +189,7 @@ impl MidiHandler {
                     )
                 }
                 0xC0 => {
-                    midi_events.push(MidiEvent::ProgramChange { program: data1 });
+                    ui_events.push(UiEvent::ProgramChange { program: data1 });
                     (
                         "Program".to_string(),
                         format!("Program: {} Ch: {}", data1, channel),

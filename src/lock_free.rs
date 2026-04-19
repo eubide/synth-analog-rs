@@ -354,14 +354,15 @@ impl LockFreeSynth {
     }
 }
 
-/// Discrete MIDI events that need guaranteed delivery (not continuous params)
+/// Discrete MIDI events consumed by the audio thread. Only real-time
+/// playback events live here — anything requiring disk I/O or large
+/// allocations (preset load, SysEx dumps) goes through `UiEventQueue`
+/// instead so the audio callback stays allocation- and I/O-free.
 #[derive(Debug, Clone)]
 pub enum MidiEvent {
     NoteOn { note: u8, velocity: u8 },
     NoteOff { note: u8 },
     SustainPedal { pressed: bool },
-    /// Program Change: load preset at position `program` (0-indexed) in sorted list
-    ProgramChange { program: u8 },
     /// MIDI clock tick (0xF8) — 24 pulses per quarter note
     MidiClock,
     /// MIDI clock start (0xFA)
@@ -370,10 +371,6 @@ pub enum MidiEvent {
     MidiClockContinue,
     /// MIDI clock stop (0xFC)
     MidiClockStop,
-    /// SysEx request dump (F0 7D 01 F7)
-    SysExRequest,
-    /// SysEx patch load (F0 7D 02 [json] F7)
-    SysExPatch { data: Vec<u8> },
     /// PANIC: silence every active voice and clear all held-note state.
     /// Triggered by MIDI CC 120/123, the GUI PANIC button, Esc key, or focus loss.
     AllNotesOff,
@@ -406,6 +403,59 @@ impl MidiEventQueue {
         } else {
             Vec::new()
         }
+    }
+}
+
+/// Events that must be handled on the GUI thread: anything that does disk
+/// I/O, large allocation, or JSON parsing. The MIDI thread pushes these
+/// straight to the GUI; the audio thread never touches them.
+///
+/// This is the primitive that would live in `synth-core/ipc/` — every synth
+/// needs the same separation between "play this note" (audio-thread-safe)
+/// and "load a preset" (GUI/disk-thread).
+#[derive(Debug, Clone)]
+pub enum UiEvent {
+    /// Program Change: load preset at position `program` (0-indexed) in sorted list
+    ProgramChange { program: u8 },
+    /// SysEx request dump (F0 7D 01 F7): snapshot current patch to `sysex_dump.json`
+    SysExRequest,
+    /// SysEx patch load (F0 7D 02 [json] F7): apply JSON payload as new patch
+    SysExPatch { data: Vec<u8> },
+}
+
+/// GUI-thread event queue. Same lock-shape as `MidiEventQueue` — the events
+/// arrive at human speed so the Mutex is effectively uncontested.
+pub struct UiEventQueue {
+    events: std::sync::Mutex<Vec<UiEvent>>,
+}
+
+impl UiEventQueue {
+    pub fn new() -> Self {
+        Self {
+            events: std::sync::Mutex::new(Vec::with_capacity(8)),
+        }
+    }
+
+    /// Push an event (called from MIDI thread)
+    pub fn push(&self, event: UiEvent) {
+        if let Ok(mut events) = self.events.lock() {
+            events.push(event);
+        }
+    }
+
+    /// Drain all events (called from GUI thread once per frame)
+    pub fn drain(&self) -> Vec<UiEvent> {
+        if let Ok(mut events) = self.events.lock() {
+            std::mem::take(&mut *events)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+impl Default for UiEventQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

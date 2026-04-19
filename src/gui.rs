@@ -1,5 +1,5 @@
 use crate::audio_engine::AudioEngine;
-use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue, SynthParameters};
+use crate::lock_free::{LockFreeSynth, MidiEvent, MidiEventQueue, SynthParameters, UiEvent, UiEventQueue};
 use crate::midi_handler::MidiHandler;
 use crate::synthesizer::{ArpPattern, LfoWaveform, Synthesizer, WaveType};
 use eframe::egui;
@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 pub struct SynthApp {
     lock_free_synth: Arc<LockFreeSynth>,
     midi_events: Arc<MidiEventQueue>,
+    ui_events: Arc<UiEventQueue>,
     _audio_engine: AudioEngine,
     _midi_handler: Option<MidiHandler>,
     /// Para cada tecla QWERTY pulsada, guarda (nota MIDI enviada, timestamp).
@@ -164,6 +165,7 @@ impl SynthApp {
     pub fn new(
         lock_free_synth: Arc<LockFreeSynth>,
         midi_events: Arc<MidiEventQueue>,
+        ui_events: Arc<UiEventQueue>,
         audio_engine: AudioEngine,
         midi_handler: Option<MidiHandler>,
     ) -> Self {
@@ -172,6 +174,7 @@ impl SynthApp {
         Self {
             lock_free_synth,
             midi_events,
+            ui_events,
             _audio_engine: audio_engine,
             _midi_handler: midi_handler,
             last_key_times: std::collections::HashMap::new(),
@@ -190,6 +193,61 @@ impl SynthApp {
             params_a: None,
             params_b: None,
             peak_level: 0.0,
+        }
+    }
+
+    /// Consume `UiEvent`s queued by the MIDI thread. The audio callback never
+    /// sees these — all paths involve disk I/O or JSON parsing.
+    fn drain_ui_events(&mut self) {
+        for event in self.ui_events.drain() {
+            match event {
+                UiEvent::ProgramChange { program } => {
+                    let presets = Synthesizer::list_presets();
+                    if presets.is_empty() {
+                        continue;
+                    }
+                    let name = &presets[(program as usize) % presets.len()];
+                    let mut temp = Synthesizer::new();
+                    match temp.load_preset(name) {
+                        Ok(_) => {
+                            self.params = temp.to_synth_params();
+                            self.current_preset_name = name.clone();
+                            log::info!("Program Change {}: loaded '{}'", program, name);
+                        }
+                        Err(e) => log::warn!(
+                            "Program Change {}: failed to load '{}': {}",
+                            program,
+                            name,
+                            e,
+                        ),
+                    }
+                }
+                UiEvent::SysExRequest => {
+                    // Snapshot current patch to presets/sysex_dump.json.
+                    let mut temp = Synthesizer::new();
+                    temp.apply_params(&self.params);
+                    if let Err(e) = temp.save_preset("sysex_dump") {
+                        log::warn!("SysEx dump failed: {}", e);
+                    } else {
+                        log::info!("SysEx: patch saved as sysex_dump");
+                    }
+                }
+                UiEvent::SysExPatch { data } => {
+                    match std::str::from_utf8(&data) {
+                        Ok(json_str) => {
+                            let mut temp = Synthesizer::new();
+                            match temp.load_preset_from_json(json_str) {
+                                Ok(_) => {
+                                    self.params = temp.to_synth_params();
+                                    log::info!("SysEx patch applied ({} bytes)", data.len());
+                                }
+                                Err(e) => log::warn!("SysEx patch load failed: {}", e),
+                            }
+                        }
+                        Err(_) => log::warn!("SysEx: payload is not valid UTF-8"),
+                    }
+                }
+            }
         }
     }
 
@@ -1140,6 +1198,12 @@ impl eframe::App for SynthApp {
         self.params = *self.lock_free_synth.get_params();
         let peak_bits = self.lock_free_synth.peak_level.load(std::sync::atomic::Ordering::Relaxed);
         self.peak_level = f32::from_bits(peak_bits);
+
+        // Handle UI-layer MIDI events (Program Change, SysEx) here on the GUI
+        // thread — they all touch disk or parse JSON, either of which would
+        // stall the audio callback. Apply results by updating `self.params`
+        // which gets pushed to the lock-free buffer at end-of-frame.
+        self.drain_ui_events();
 
         // PANIC on focus loss: si la ventana pierde el foco mientras hay teclas
         // pulsadas, los key_released nunca llegan y las voces quedan enganchadas.

@@ -10,7 +10,7 @@ mod synthesizer;
 
 use audio_engine::AudioEngine;
 use gui::SynthApp;
-use lock_free::{LockFreeSynth, MidiEventQueue};
+use lock_free::{LockFreeSynth, MidiEventQueue, UiEventQueue};
 use midi_handler::MidiHandler;
 
 fn main() -> Result<(), eframe::Error> {
@@ -41,6 +41,9 @@ fn main() -> Result<(), eframe::Error> {
     // Create lock-free shared state
     let lock_free_synth = Arc::new(LockFreeSynth::new());
     let midi_events = Arc::new(MidiEventQueue::new());
+    // GUI-thread queue for patch management events (Program Change, SysEx)
+    // that must not run on the audio thread because they touch the filesystem.
+    let ui_events = Arc::new(UiEventQueue::new());
 
     // Initialize audio engine (owns the Synthesizer)
     let audio_engine = match AudioEngine::new(lock_free_synth.clone(), midi_events.clone()) {
@@ -56,7 +59,11 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     // Initialize MIDI input
-    let midi_handler = match MidiHandler::new(lock_free_synth.clone(), midi_events.clone()) {
+    let midi_handler = match MidiHandler::new(
+        lock_free_synth.clone(),
+        midi_events.clone(),
+        ui_events.clone(),
+    ) {
         Ok(handler) => {
             log::info!("MIDI input initialized successfully");
             Some(handler)
@@ -75,6 +82,7 @@ fn main() -> Result<(), eframe::Error> {
             Ok(Box::new(SynthApp::new(
                 lock_free_synth,
                 midi_events,
+                ui_events,
                 audio_engine,
                 midi_handler,
             )))
