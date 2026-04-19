@@ -37,7 +37,7 @@ El sintetizador tiene 2 osciladores (A y B).
 
 ### Controles
 
-- **Detune**: Afinación en semitonos (−12 a +12)
+- **Detune**: Afinación en semitonos (−24 a +24)
 - **Pulse Width**: Ancho de pulso en ondas Square (0.1 a 0.9)
 - **Level**: Nivel del oscilador en el Mixer (0.0 a 1.0)
 - **Sync** *(solo Osc B)*: Sincroniza la fase de B con A, creando timbres complejos
@@ -181,6 +181,52 @@ Dos LFO en cuadratura modulan un delay corto (centro ≈10 ms) — firma clásic
 
 ---
 
+## Stereo Spread
+
+Cada voz recibe una posición panorámica aleatoria al activarse, distribuida según el **Stereo Spread** global:
+
+- **0.0**: todas las voces en el centro (mono)
+- **1.0**: distribución máxima — voces repartidas de izquierda a derecha con ley de igual potencia
+
+La señal pasa además por una etapa M/S en el bus master: el canal *side* (diferencia L/R) se preserva mientras los efectos (chorus, delay, reverb) procesan únicamente el canal *mid*, manteniendo la cohesión del espacio estéreo.
+
+---
+
+## Micro-Tuning
+
+Permite cambiar el temperamento de afinación del teclado completo:
+
+| Temperamento | Descripción |
+|---|---|
+| **Equal** | Temperamento igual estándar — 100 cents por semitono |
+| **Just Intonation** | Ratios de números enteros puros — consonancias perfectas en la tonalidad raíz |
+| **Pythagorean** | Basado en quintas puras (3:2) — brillante, quintas perfectas, terceras tensas |
+| **Werckmeister III** | Temperamento bien temperado del s. XVIII — cada tonalidad tiene carácter propio |
+
+El temperamento afecta a todas las voces activas en tiempo real.
+
+---
+
+## Oversampling
+
+Reduce el aliasing de los osciladores procesando la síntesis a una frecuencia de muestreo múltiplo y luego decimando con un filtro Butterworth:
+
+| Modo | Frecuencia interna | Uso |
+|---|---|---|
+| **1×** | 44.1 kHz | Por defecto — bajo consumo de CPU |
+| **2×** | 88.2 kHz | Reducción notable de aliasing en agudos |
+| **4×** | 176.4 kHz | Máxima calidad — requiere CPU más potente |
+
+El filtro de decimación es un Butterworth de 2º orden con corte en `fs/4`, en cascada (dos etapas en modo 4×).
+
+---
+
+## Tono de Referencia A-440
+
+Activa un oscilador sinusoidal puro a 440 Hz para afinar instrumentos externos o calibrar el sistema de audio. Es estado de la GUI exclusivamente — no se guarda en presets.
+
+---
+
 ## VU Meter
 
 La barra de nivel en el encabezado muestra el pico de salida en tiempo real:
@@ -309,6 +355,9 @@ C  C# D  D# E  F  F# G  G# A  A# B  C  C# D  D# E
 - **Sustain Pedal**: CC 64 — mantiene notas
 - **Modulation Wheel**: CC 1 — escala profundidad del LFO
 - **Expression Pedal**: CC 11 — volumen expresivo multiplicativo
+- **Program Change**: Carga el preset en la posición indicada (0-indexed, lista ordenada alfabéticamente)
+- **SysEx dump** (`F0 7D 01 F7`): guarda el parche actual en `sysex_dump.json`
+- **SysEx load** (`F0 7D 02 [json] F7`): aplica un parche JSON recibido vía SysEx
 
 ### Mapeo de Control Change (CC)
 
@@ -324,8 +373,8 @@ C  C# D  D# E  F  F# G  G# A  A# B  C  C# D  D# E
 | CC | Parámetro | Rango |
 |----|-----------|-------|
 | 2 | Nivel Osc B | 0.0 – 1.0 |
-| 3 | Detune Osc A | −12 a +12 st |
-| 4 | Detune Osc B | −12 a +12 st |
+| 3 | Detune Osc A | −24 a +24 st |
+| 4 | Detune Osc B | −24 a +24 st |
 | 5 | Pulse Width Osc A | 0.1 – 0.9 |
 | 6 | Pulse Width Osc B | 0.1 – 0.9 |
 
