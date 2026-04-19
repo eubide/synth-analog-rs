@@ -12,6 +12,10 @@ Software de síntesis analógica inspirado en los sintetizadores clásicos de lo
 - **8-Voice Polyphony** with Poly / Mono / Legato / Unison voice modes
 - **Poly Mod** — filter envelope and Osc B as modulation sources (FM, PWM, filter sweep)
 - **Effects Section** with Freeverb reverb, tape-style delay, and quadrature-LFO chorus/ensemble
+- **True Stereo** — per-voice equal-power panning with M/S widening on the master bus
+- **Micro-tuning** — selectable temperaments: Equal, Just Intonation, Pythagorean, Werckmeister III
+- **Oversampling** — 1×/2×/4× with biquad Butterworth decimation to reduce aliasing
+- **A-440 Reference Tone** — sine generator for quick tuning checks
 
 ### Expressive Controls
 - **Velocity Curves** — Linear, Soft (√), and Hard (²) response shapes
@@ -96,6 +100,9 @@ The synthesizer maps your computer keyboard to musical notes. See [MANUAL.md](MA
 The synthesizer automatically detects and connects to the first available MIDI input device. Supported MIDI messages:
 
 - **Note On/Off**: Play notes with velocity
+- **Program Change**: Load preset by index (0-indexed, sorted list)
+- **SysEx patch dump** (F0 7D 01 F7): snapshot current patch to `sysex_dump.json`
+- **SysEx patch load** (F0 7D 02 …): apply JSON payload as new patch
 - **Sustain Pedal**: Hold notes (CC 64)
 - **Modulation Wheel**: Additional modulation (CC 1)
 
@@ -146,7 +153,7 @@ See [ARQUITECTURA.md](ARQUITECTURA.md) for detailed technical documentation and 
 
 1. **Sample Rate**: Fixed at 44.1kHz (typical for most audio interfaces)
 2. **Polyphony**: Limited to 8 voices (authentic to many vintage synthesizers)
-3. **Output**: Mono output duplicated to stereo channels
+3. **Output**: Stereo via per-voice panning + M/S master bus (not multi-channel)
 4. **Platform**: Requires Rust build environment
 
 ## Documentation
