@@ -1,28 +1,28 @@
 mod keyboard;
+mod midi_windows;
 mod panels;
 mod preset_browser;
 
 use crate::audio_engine::AudioEngine;
 use crate::lock_free::{LockFreeSynth, MidiEventQueue, SynthParameters, UiEvent, UiEventQueue};
-use crate::midi_handler::{CC_BINDINGS, MidiHandler};
+use crate::midi_handler::MidiHandler;
 use crate::synthesizer::Synthesizer;
 use eframe::egui;
 use keyboard::KeyboardController;
 use preset_browser::PresetBrowser;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub struct SynthApp {
     lock_free_synth: Arc<LockFreeSynth>,
     midi_events: Arc<MidiEventQueue>,
     ui_events: Arc<UiEventQueue>,
     _audio_engine: AudioEngine,
-    _midi_handler: Option<MidiHandler>,
+    midi_handler: Option<MidiHandler>,
     keyboard: KeyboardController,
     presets: PresetBrowser,
     show_midi_monitor: bool,
     show_midi_learn: bool,
     show_presets_window: bool,
-    learn_state: Option<Arc<Mutex<crate::midi_handler::MidiLearnState>>>,
     params: SynthParameters,
     peak_level: f32,
 }
@@ -36,19 +36,17 @@ impl SynthApp {
         midi_handler: Option<MidiHandler>,
     ) -> Self {
         let params = *lock_free_synth.get_params();
-        let learn_state = midi_handler.as_ref().map(|h| h.learn_state.clone());
         Self {
             lock_free_synth,
             midi_events,
             ui_events,
             _audio_engine: audio_engine,
-            _midi_handler: midi_handler,
+            midi_handler,
             keyboard: KeyboardController::new(),
             presets: PresetBrowser::new(),
             show_midi_monitor: false,
             show_midi_learn: false,
             show_presets_window: false,
-            learn_state,
             params,
             peak_level: 0.0,
         }
@@ -194,7 +192,7 @@ impl eframe::App for SynthApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self._midi_handler.is_some() {
+                    if self.midi_handler.is_some() {
                         if ui
                             .small_button("MIDI")
                             .on_hover_text("Toggle MIDI message monitor window")
@@ -208,7 +206,7 @@ impl eframe::App for SynthApp {
                             .on_hover_text("No MIDI device detected at startup");
                     }
 
-                    if self.learn_state.is_some() {
+                    if self.midi_handler.is_some() {
                         let btn_text = if self.show_midi_learn {
                             "MIDI Learn *"
                         } else {
@@ -396,19 +394,21 @@ impl eframe::App for SynthApp {
 
         // MIDI Monitor Window
         if self.show_midi_monitor {
+            let handler = self.midi_handler.as_ref();
             egui::Window::new("MIDI Monitor")
                 .default_size([400.0, 300.0])
                 .show(ui.ctx(), |ui| {
-                    self.draw_midi_monitor(ui);
+                    midi_windows::draw_midi_monitor(ui, handler);
                 });
         }
 
         // MIDI Learn Window
         if self.show_midi_learn {
+            let learn = self.midi_handler.as_ref().map(|h| &h.learn_state);
             egui::Window::new("MIDI Learn")
                 .default_size([280.0, 380.0])
                 .show(ui.ctx(), |ui| {
-                    self.draw_midi_learn_panel(ui);
+                    midi_windows::draw_midi_learn_panel(ui, learn);
                 });
         }
 
@@ -429,124 +429,3 @@ impl eframe::App for SynthApp {
     }
 }
 
-impl SynthApp {
-    fn draw_midi_monitor(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("recent MIDI messages:");
-            if ui.button("clear").clicked()
-                && let Some(ref midi_handler) = self._midi_handler
-                && let Ok(mut history) = midi_handler.message_history.lock()
-            {
-                history.clear();
-            }
-        });
-
-        ui.separator();
-
-        if let Some(ref midi_handler) = self._midi_handler {
-            if let Ok(history) = midi_handler.message_history.lock() {
-                egui::ScrollArea::vertical()
-                    .max_height(250.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for msg in history.iter().rev().take(20) {
-                            // Show last 20 messages
-                            let elapsed = msg.timestamp.elapsed().as_millis();
-                            let time_color = if elapsed < 100 {
-                                egui::Color32::GREEN
-                            } else if elapsed < 1000 {
-                                egui::Color32::YELLOW
-                            } else {
-                                egui::Color32::GRAY
-                            };
-
-                            ui.horizontal(|ui| {
-                                ui.colored_label(time_color, format!("{:4}ms", elapsed));
-
-                                let type_color = match msg.message_type.as_str() {
-                                    "Note On" => egui::Color32::from_rgb(100, 255, 100),
-                                    "Note Off" => egui::Color32::from_rgb(255, 100, 100),
-                                    "CC" => egui::Color32::from_rgb(100, 200, 255),
-                                    "Pitch Bend" => egui::Color32::from_rgb(255, 200, 100),
-                                    _ => egui::Color32::WHITE,
-                                };
-
-                                ui.colored_label(type_color, format!("{:10}", msg.message_type));
-                                ui.label(&msg.description);
-                            });
-                        }
-
-                        if history.is_empty() {
-                            ui.label("no MIDI messages received yet...");
-                            ui.label("connect a MIDI device and play some notes!");
-                        }
-                    });
-            }
-        } else {
-            ui.label("no MIDI handler available");
-        }
-    }
-
-    fn draw_midi_learn_panel(&mut self, ui: &mut egui::Ui) {
-        if let Some(ref learn_arc) = self.learn_state {
-            // Status line
-            {
-                if let Ok(state) = learn_arc.try_lock() {
-                    if let Some(ref pending) = state.pending_param {
-                        ui.colored_label(
-                            egui::Color32::YELLOW,
-                            format!("Waiting for CC... ({})", pending),
-                        );
-                    } else {
-                        ui.label("Click 'Learn' then move a CC on your controller.");
-                    }
-                    if !state.custom_map.is_empty() {
-                        ui.separator();
-                        ui.label("Active custom bindings:");
-                        for (cc, param) in &state.custom_map {
-                            ui.label(format!("  CC {} -> {}", cc, param));
-                        }
-                    }
-                }
-            }
-            ui.separator();
-
-            egui::ScrollArea::vertical()
-                .max_height(250.0)
-                .show(ui, |ui| {
-                    for binding in CC_BINDINGS {
-                        let param_key = binding.name;
-                        let bound_cc: Option<u8> = learn_arc.try_lock().ok().and_then(|state| {
-                            state
-                                .custom_map
-                                .iter()
-                                .find(|(_, v)| v.as_str() == param_key)
-                                .map(|(cc, _)| *cc)
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.set_min_width(200.0);
-                            ui.label(binding.label);
-                            if ui.small_button("Learn").clicked()
-                                && let Ok(mut state) = learn_arc.try_lock()
-                            {
-                                state.pending_param = Some(param_key.to_string());
-                            }
-                            if let Some(cc) = bound_cc {
-                                ui.colored_label(egui::Color32::GREEN, format!("CC {}", cc));
-                                if ui.small_button("x").clicked()
-                                    && let Ok(mut state) = learn_arc.try_lock()
-                                {
-                                    state.custom_map.retain(|_, v| v.as_str() != param_key);
-                                }
-                            } else {
-                                ui.colored_label(egui::Color32::GRAY, format!("CC {}", binding.cc));
-                            }
-                        });
-                    }
-                });
-        } else {
-            ui.label("No MIDI device connected.");
-        }
-    }
-}

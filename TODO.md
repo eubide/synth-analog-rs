@@ -4,7 +4,7 @@ Sintetizador analógico tipo Prophet-5 en Rust. Trabajo pendiente, priorizado po
 
 ## Refactor arquitectónico
 
-> Análisis completo: `synthesizer.rs` (5077 líneas) era un God Object con 79 campos. L1–L4 + L6 completos; `Synthesizer` queda con 63 campos y un `process_block` de ~130 líneas. Pendiente: L5 (GUI) — decisión de diseño tomada (Opción B, ver sección L5).
+> Análisis completo: `synthesizer.rs` (5077 líneas) era un God Object con 79 campos. L1–L6 completos; `Synthesizer` queda con 63 campos y `process_block` ~130 líneas. L5 (GUI) ejecutado en Opción B: `gui.rs` (1742 L) descompuesto en `gui/{mod,keyboard,preset_browser,panels,midi_windows}.rs`; `SynthApp` pasa de 22 → 12 campos con rol explícito.
 
 ### L1 — Extraer `EffectsChain` _(bajo riesgo, primer paso)_ ✅
 - [x] Crear struct `EffectsChain` con los 12 campos de reverb/delay/chorus
@@ -28,34 +28,41 @@ Sintetizador analógico tipo Prophet-5 en Rust. Trabajo pendiente, priorizado po
 - [x] `process_block` reducido a orquestador: smooth → build bus → per-sample (arp + LFO + voces + master stage)
 - [x] Frontera timbre/infra explícita: master stage (M/S + effects + tanh + DC blocker) queda inline como Prophet-5 specific
 
-### L5 — Refactor GUI (`gui.rs`, 1742 líneas) — **Opción B: componentes con estado**
+### L5 — Refactor GUI (`gui.rs`, 1742 líneas) — **Opción B: componentes con estado** ✅
 
 > Decisión (2026-04-19): sesión de brainstorming descartó el builder pattern
 > (YAGNI para 11 paneles fijos) y la partición por columna visual (acopla
-> código al layout, que es volátil). Se adopta **Opción B**: sólo se convierte
+> código al layout, que es volátil). Se adoptó **Opción B**: sólo se convierte
 > en `struct` aquello con estado no trivial; los paneles planos quedan como
-> funciones libres. `SynthApp` pasa de 22 a ~9 campos con roles explícitos
-> (handles externos · componentes · snapshot de frame). Prepara la frontera
-> timbre/infra también en la GUI de cara a `synth-core`.
+> funciones libres.
 
-- [ ] **Scaffolding** — convertir `src/gui.rs` en módulo `src/gui/mod.rs`
-- [ ] **`KeyboardController`** (`gui/keyboard.rs`) — absorbe `last_key_times`,
-      `current_octave`; método `process(ctx, &queue)` con focus-loss panic y Esc
-- [ ] **`PresetBrowser`** (`gui/preset_browser.rs`) — absorbe `preset_search`,
-      `preset_category_filter`, `current_preset_name`, `new_preset_name`,
-      `preset_category`, `show_preset_editor`, `params_a`, `params_b`; incluye
-      el A/B comparison (vive en el mismo panel, no justifica struct aparte)
-- [ ] **Paneles puros** (`gui/panels.rs`) — funciones libres
-      `draw_oscillator`, `draw_mixer`, `draw_filter`, `draw_lfo`,
-      `draw_lfo_mod`, `draw_master`, `draw_effects`, `draw_analog`,
-      `draw_arpeggiator`, `draw_voice_mode`, `draw_poly_mod`,
-      `draw_adsr_curve`. Helpers `section`/`labeled`/`labeled_check` migran
-      aquí como `pub(crate)`
-- [ ] **Ventanas MIDI** (`gui/midi_windows.rs`) — `draw_midi_monitor` y
-      `draw_midi_learn` como funciones libres que reciben los handles
-- [ ] **`SynthApp` resultante**: handles (5 Arc/externos) + 2 componentes
-      (`keyboard`, `presets`) + snapshot de frame (`params`, `peak_level`) +
-      3 flags de ventanas = **11 campos** con rol legible
+- [x] **Scaffolding** — `src/gui.rs` → módulo `src/gui/mod.rs`
+- [x] **`KeyboardController`** (`gui/keyboard.rs`, 144 L) — absorbe
+      `last_key_times`, `current_octave`; `process(ctx, &queue)` con
+      focus-loss panic, Esc, octave Up/Down y filtro de auto-repeat
+- [x] **`PresetBrowser`** (`gui/preset_browser.rs`, 343 L) — absorbe
+      `search`, `category_filter`, `save_category`, `new_name`,
+      `editor_open`, `current_name`, `slot_a`, `slot_b`. Incluye A/B
+      comparison (mismo panel, mismo flow). `random_params()` migra aquí
+- [x] **Paneles puros** (`gui/panels.rs`, 747 L) — `draw_oscillator`,
+      `draw_mixer`, `draw_filter`, `draw_lfo`, `draw_lfo_mod`, `draw_master`,
+      `draw_effects`, `draw_analog`, `draw_arpeggiator`, `draw_voice_mode`,
+      `draw_poly_mod`, `draw_envelope`, `draw_adsr_curve`,
+      `draw_keyboard_legend` como funciones libres con
+      `&mut SynthParameters`. Helpers `section`/`labeled`/`labeled_check`
+      y constantes `LABEL_WIDTH`/`WIDGET_WIDTH` aquí
+- [x] **Ventanas MIDI** (`gui/midi_windows.rs`, 135 L) —
+      `draw_midi_monitor(ui, Option<&MidiHandler>)` y
+      `draw_midi_learn_panel(ui, Option<&Arc<Mutex<MidiLearnState>>>)`
+      como funciones libres
+- [x] **`SynthApp` resultante**: 3 handles externos (`lock_free_synth`,
+      `midi_events`, `ui_events`) · 1 keep-alive (`_audio_engine`) ·
+      1 handle opcional (`midi_handler`, fuente de `learn_state`) ·
+      2 componentes (`keyboard`, `presets`) · 3 flags de ventana
+      (`show_midi_monitor`, `show_midi_learn`, `show_presets_window`) ·
+      2 snapshot de frame (`params`, `peak_level`) = **12 campos** con rol
+      legible (antes 22). `mod.rs` queda en ~430 L: orquestador del layout
+      de 5 columnas + `drain_ui_events` + header/VU meter.
 
 ### L6 — Abstracción CC (`midi_handler.rs`) ✅
 - [x] Crear `CC_BINDINGS: &[CcBinding]` — fuente única de verdad (39 entradas) con `{cc, name, label, apply}`
