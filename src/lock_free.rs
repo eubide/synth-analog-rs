@@ -193,6 +193,21 @@ pub struct SynthParameters {
     pub reference_tone: bool, // bypasses synthesis; outputs pure 440 Hz sine
     pub tuning_mode: u8,      // 0=Equal Temp, 1=JI 5-limit, 2=Pythagorean, 3=Werckmeister III
     pub oversampling: u8,     // 1, 2, or 4 — CPU scales proportionally
+
+    // Osc octave: 0=16' (×0.5), 1=8' (×1.0), 2=4' (×2.0)
+    pub osc1_octave: i8,
+    pub osc2_octave: i8,
+
+    // Osc B special modes (Prophet-5)
+    pub osc2_lfo_mode: bool,        // true → Osc B sub-audio (freq × 0.01)
+    pub osc2_keyboard_track: bool,  // false → pitch fijo, no sigue MIDI note
+
+    // LFO → Pulse Width routes
+    pub lfo_target_osc1_pw: bool,
+    pub lfo_target_osc2_pw: bool,
+
+    // VCA initial level: vca = amp_initial + (1 - amp_initial) * env
+    pub amp_initial_amount: f32,
 }
 
 impl Default for SynthParameters {
@@ -323,6 +338,14 @@ impl Default for SynthParameters {
             reference_tone: false,
             tuning_mode: 0,
             oversampling: 1,
+
+            osc1_octave: 1,
+            osc2_octave: 1,
+            osc2_lfo_mode: false,
+            osc2_keyboard_track: true,
+            lfo_target_osc1_pw: false,
+            lfo_target_osc2_pw: false,
+            amp_initial_amount: 0.0,
         }
     }
 }
