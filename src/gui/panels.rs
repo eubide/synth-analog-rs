@@ -15,12 +15,107 @@ use eframe::egui;
 pub const LABEL_WIDTH: f32 = 95.0;
 pub const WIDGET_WIDTH: f32 = 105.0;
 
-/// Renderiza un grupo con título uniforme.
+const AMBER: egui::Color32 = egui::Color32::from_rgb(0xe8, 0x97, 0x1a);
+const DARK_GRAY: egui::Color32 = egui::Color32::from_rgb(0x2a, 0x2a, 0x2a);
+const DIM: egui::Color32 = egui::Color32::from_gray(0xaa);
+
+/// Slider horizontal compacto: etiqueta small (fija 28px) + slider + valor.
+/// Diseñado para secciones estrechas donde labeled() (200px) no cabe.
+pub fn compact_hslider(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(28.0, ui.spacing().interact_size.y),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| ui.label(egui::RichText::new(label).size(9.5).color(DIM)),
+        );
+        ui.add(egui::Slider::new(value, range).step_by(0.01).fixed_decimals(2))
+    })
+    .inner
+}
+
+/// Fila LFO target: [LED toggle ámbar] + [slider amount].
+/// Permite encender/apagar el target y ajustar la profundidad en la misma fila.
+pub fn lfo_target_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    active: &mut bool,
+    amount: &mut f32,
+) {
+    ui.horizontal(|ui| {
+        let color = if *active { AMBER } else { DARK_GRAY };
+        let text_col = if *active { egui::Color32::BLACK } else { DIM };
+        if ui
+            .add(
+                egui::Button::new(egui::RichText::new(label).size(9.0).color(text_col))
+                    .fill(color)
+                    .rounding(egui::Rounding::same(2))
+                    .min_size(egui::vec2(30.0, 16.0)),
+            )
+            .clicked()
+        {
+            *active = !*active;
+        }
+        ui.add(egui::Slider::new(amount, 0.0..=1.0).step_by(0.01).show_value(false));
+        ui.label(egui::RichText::new(format!("{:.2}", *amount)).size(9.0).color(DIM));
+    });
+}
+
+/// Slider vertical con etiqueta debajo. Devuelve la respuesta del slider.
+pub fn vslider(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    label: &str,
+    height: f32,
+) -> egui::Response {
+    ui.vertical(|ui| {
+        ui.spacing_mut().slider_width = height;
+        let resp = ui.add(egui::Slider::new(value, range).vertical().show_value(false));
+        ui.label(
+            egui::RichText::new(label)
+                .size(9.0)
+                .color(egui::Color32::from_gray(0xcc)),
+        );
+        resp
+    })
+    .inner
+}
+
+/// Renderiza un grupo con título uniforme estilo dark amber.
 pub fn section(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.group(|ui| {
-        ui.label(egui::RichText::new(title).size(11.0).strong());
+        ui.label(
+            egui::RichText::new(title)
+                .size(11.0)
+                .strong()
+                .color(egui::Color32::WHITE),
+        );
         add_contents(ui);
     });
+}
+
+/// LED button: amber cuando activo, gris oscuro cuando inactivo.
+pub fn led_button(ui: &mut egui::Ui, label: &str, active: &mut bool) -> egui::Response {
+    let color = if *active { AMBER } else { DARK_GRAY };
+    let text_color = if *active {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::from_gray(0xaa)
+    };
+    let resp = ui.add(
+        egui::Button::new(egui::RichText::new(label).size(9.5).color(text_color))
+            .fill(color)
+            .rounding(egui::Rounding::same(3)),
+    );
+    if resp.clicked() {
+        *active = !*active;
+    }
+    resp
 }
 
 /// Fila etiquetada: etiqueta de ancho fijo right-aligned + widget en slot de
@@ -89,7 +184,7 @@ pub fn labeled_check<R>(
     .inner
 }
 
-/// Panel ADSR compacto sin título. Unifica filter/amp envelope.
+/// Panel ADSR: 4 sliders verticales con etiqueta + valor numérico.
 pub fn draw_envelope(
     ui: &mut egui::Ui,
     attack: &mut f32,
@@ -97,38 +192,31 @@ pub fn draw_envelope(
     sustain: &mut f32,
     release: &mut f32,
 ) {
-    ui.spacing_mut().item_spacing = egui::vec2(4.0, 1.0);
-    ui.spacing_mut().interact_size.y = 14.0;
-
-    labeled(ui, "attack (s):", |ui| {
-        ui.add(
-            egui::Slider::new(attack, 0.001..=2.0)
-                .logarithmic(true)
-                .step_by(0.001),
-        )
-    })
-    .on_hover_text("Attack — time from note-on to peak level");
-    labeled(ui, "decay (s):", |ui| {
-        ui.add(
-            egui::Slider::new(decay, 0.001..=3.0)
-                .logarithmic(true)
-                .step_by(0.001),
-        )
-    })
-    .on_hover_text("Decay — time to fall from peak down to the sustain level");
-    labeled(ui, "sustain:", |ui| {
-        ui.add(egui::Slider::new(sustain, 0.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("Sustain — level held while the note is pressed");
-    labeled(ui, "release (s):", |ui| {
-        ui.add(
-            egui::Slider::new(release, 0.001..=5.0)
-                .logarithmic(true)
-                .step_by(0.001),
-        )
-    })
-    .on_hover_text("Release — time to fade to silence after note-off");
+    ui.spacing_mut().item_spacing = egui::vec2(5.0, 2.0);
+    ui.horizontal(|ui| {
+        adsr_col(ui, attack,  0.001..=5.0, "A", "Attack");
+        adsr_col(ui, decay,   0.001..=5.0, "D", "Decay");
+        adsr_col(ui, sustain, 0.0..=1.0,   "S", "Sustain");
+        adsr_col(ui, release, 0.001..=5.0, "R", "Release");
+    });
 }
+
+fn adsr_col(
+    ui: &mut egui::Ui,
+    val: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    label: &str,
+    hint: &str,
+) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().slider_width = 88.0;
+        ui.add(egui::Slider::new(val, range).vertical().show_value(false))
+            .on_hover_text(hint);
+        ui.label(egui::RichText::new(label).size(10.0).strong().color(DIM));
+        ui.label(egui::RichText::new(format!("{:.2}", *val)).size(8.5).color(egui::Color32::from_gray(0x77)));
+    });
+}
+
 
 /// Mini ADSR curve — 32px alto, actualiza en tiempo real con los sliders.
 pub fn draw_adsr_curve(
@@ -190,14 +278,40 @@ pub fn draw_oscillator(ui: &mut egui::Ui, params: &mut SynthParameters, osc_num:
         )
     };
 
-    labeled(ui, "tune (st):", |ui| {
-        ui.add(egui::Slider::new(detune, -24.0..=24.0).step_by(0.1))
-    })
-    .on_hover_text("Pitch detune in semitones (-24 to +24)");
+    // Octave switch: 0=16' 1=8' 2=4'
+    let octave_ref = if osc_num == 1 {
+        &mut params.osc1_octave
+    } else {
+        &mut params.osc2_octave
+    };
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("octave:").size(10.0).color(egui::Color32::from_gray(0xaa)));
+        for (val, lbl) in [(0i8, "16'"), (1, "8'"), (2, "4'")] {
+            let selected = *octave_ref == val;
+            let color = if selected { AMBER } else { DARK_GRAY };
+            let text_col = if selected { egui::Color32::BLACK } else { egui::Color32::from_gray(0xaa) };
+            if ui
+                .add(egui::Button::new(egui::RichText::new(lbl).size(9.0).color(text_col)).fill(color).rounding(egui::Rounding::same(2)))
+                .on_hover_text("Octave range: 16'=sub, 8'=normal, 4'=high")
+                .clicked()
+            {
+                *octave_ref = val;
+            }
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("tune:").size(10.0).color(egui::Color32::from_gray(0xaa)));
+        ui.spacing_mut().slider_width = 75.0;
+        ui.add(egui::Slider::new(detune, -24.0..=24.0).step_by(0.5))
+            .on_hover_text("Pitch detune in semitones");
+    });
 
     let mut wave_type = Synthesizer::u8_to_wave_type_pub(*waveform);
-    labeled(ui, "wave:", |ui| {
-        egui::ComboBox::from_id_salt(format!("wave_{}", osc_num))
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("wave:").size(10.0).color(egui::Color32::from_gray(0xaa)));
+        egui::ComboBox::from_id_salt(("wave", osc_num))
+            .width(80.0)
             .selected_text(match wave_type {
                 WaveType::Sawtooth => "Saw",
                 WaveType::Triangle => "Tri",
@@ -209,74 +323,96 @@ pub fn draw_oscillator(ui: &mut egui::Ui, params: &mut SynthParameters, osc_num:
                 ui.selectable_value(&mut wave_type, WaveType::Triangle, "Triangle");
                 ui.selectable_value(&mut wave_type, WaveType::Square, "Square");
                 ui.selectable_value(&mut wave_type, WaveType::Sine, "Sine");
-            })
-            .response
+            });
     })
+    .response
     .on_hover_text("Oscillator waveform shape");
     *waveform = Synthesizer::wave_type_to_u8_pub(wave_type);
 
     if wave_type == WaveType::Square {
-        labeled(ui, "pw:", |ui| {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("pw:").size(10.0).color(egui::Color32::from_gray(0xaa)));
+            ui.spacing_mut().slider_width = 75.0;
             ui.add(egui::Slider::new(pulse_width, 0.1..=0.9).step_by(0.01))
-        })
-        .on_hover_text("Pulse width — 0.5 = symmetric square, off-center = nasal/PWM");
+                .on_hover_text("Pulse width — 0.5 = symmetric square");
+        });
     }
 
     if osc_num == 2 {
-        labeled(ui, "sync:", |ui| ui.checkbox(&mut params.osc2_sync, "-> A"))
-            .on_hover_text(
-                "Hard sync osc B to osc A — every osc A cycle resets osc B (classic lead sound)",
-            );
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("sync:").size(10.0).color(egui::Color32::from_gray(0xaa)));
+            ui.checkbox(&mut params.osc2_sync, "-> A")
+                .on_hover_text("Hard sync osc B to osc A — every osc A cycle resets osc B");
+        });
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("lfo mode:").size(10.0).color(egui::Color32::from_gray(0xaa)));
+            ui.checkbox(&mut params.osc2_lfo_mode, "sub-audio")
+                .on_hover_text("Osc B in sub-audio range (freq x 0.01)");
+        });
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("kbd track:").size(10.0).color(egui::Color32::from_gray(0xaa)));
+            ui.checkbox(&mut params.osc2_keyboard_track, "on")
+                .on_hover_text("Keyboard tracking — off = fixed pitch");
+        });
     }
 }
 
+/// Mixer: 3 faders verticales con etiqueta + valor. Diseñado para caber en 90px.
 pub fn draw_mixer(ui: &mut egui::Ui, params: &mut SynthParameters) {
-    ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
-
-    labeled(ui, "osc A:", |ui| {
-        ui.add(egui::Slider::new(&mut params.mixer_osc1_level, 0.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("Oscillator A level into the filter");
-    labeled(ui, "osc B:", |ui| {
-        ui.add(egui::Slider::new(&mut params.mixer_osc2_level, 0.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("Oscillator B level into the filter");
-    labeled(ui, "noise:", |ui| {
-        ui.add(egui::Slider::new(&mut params.noise_level, 0.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("White noise generator level (great for percussion or wind effects)");
+    ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+    ui.horizontal(|ui| {
+        for (val, lbl, hint) in [
+            (&mut params.mixer_osc1_level, "A", "Oscillator A level"),
+            (&mut params.mixer_osc2_level, "B", "Oscillator B level"),
+            (&mut params.noise_level,      "N", "Noise generator level"),
+        ] {
+            ui.vertical(|ui| {
+                ui.spacing_mut().slider_width = 88.0;
+                ui.add(egui::Slider::new(val, 0.0..=1.0).vertical().show_value(false))
+                    .on_hover_text(hint);
+                ui.label(egui::RichText::new(lbl).size(10.0).strong().color(DIM));
+                ui.label(egui::RichText::new(format!("{:.2}", *val)).size(8.5).color(egui::Color32::from_gray(0x77)));
+            });
+        }
+    });
 }
 
 pub fn draw_filter(ui: &mut egui::Ui, params: &mut SynthParameters) {
     ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
 
-    labeled(ui, "cutoff (Hz):", |ui| {
-        ui.add(
-            egui::Slider::new(&mut params.filter_cutoff, 20.0..=20000.0)
-                .logarithmic(true)
-                .step_by(1.0),
-        )
-    })
-    .on_hover_text("Low-pass cutoff frequency — closes the filter to darken the sound");
-    labeled(ui, "resonance:", |ui| {
-        ui.add(egui::Slider::new(&mut params.filter_resonance, 0.0..=4.0).step_by(0.05))
-    })
-    .on_hover_text("Filter resonance / Q — emphasises cutoff frequency. >=3.8 self-oscillates");
+    ui.horizontal(|ui| {
+        // cutoff LOG: bottom=20Hz, middle≈632Hz, top=20kHz
+        ui.vertical(|ui| {
+            ui.spacing_mut().slider_width = 88.0;
+            ui.add(
+                egui::Slider::new(&mut params.filter_cutoff, 20.0..=20000.0)
+                    .vertical()
+                    .logarithmic(true)
+                    .show_value(false),
+            )
+            .on_hover_text(format!("Cutoff: {:.0} Hz", params.filter_cutoff));
+            ui.label(egui::RichText::new("cut").size(10.0).strong().color(DIM));
+            ui.label(egui::RichText::new(format!("{:.0}Hz", params.filter_cutoff)).size(8.5).color(egui::Color32::from_gray(0x77)));
+        });
+        adsr_col(ui, &mut params.filter_resonance,     0.0..=4.0,  "res", "Resonance (≥3.8 = self-osc)");
+        adsr_col(ui, &mut params.filter_envelope_amount, -1.0..=1.0, "env", "Envelope > cutoff mod");
+    });
     if params.filter_resonance >= 3.8 {
-        ui.colored_label(egui::Color32::from_rgb(255, 160, 60), "self-osc");
+        ui.colored_label(egui::Color32::from_rgb(255, 160, 60), "◉ self-osc");
     }
-    labeled(ui, "envelope:", |ui| {
-        ui.add(egui::Slider::new(&mut params.filter_envelope_amount, -1.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("How much the FILTER ENV modulates cutoff (negative inverts the envelope)");
-    labeled(ui, "keyboard:", |ui| {
-        ui.add(egui::Slider::new(&mut params.filter_keyboard_tracking, 0.0..=1.0).step_by(0.01))
-    })
+    ui.spacing_mut().slider_width = 80.0;
+    ui.add(
+        egui::Slider::new(&mut params.filter_keyboard_tracking, 0.0..=1.0)
+            .text("kbd")
+            .step_by(0.01),
+    )
     .on_hover_text("Keyboard tracking — higher notes open the filter more");
-    labeled(ui, "velocity:", |ui| {
-        ui.add(egui::Slider::new(&mut params.velocity_to_cutoff, 0.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("How much MIDI velocity opens the filter (harder = brighter)");
+    ui.add(
+        egui::Slider::new(&mut params.velocity_to_cutoff, 0.0..=1.0)
+            .text("vel")
+            .step_by(0.01),
+    )
+    .on_hover_text("Velocity → cutoff amount");
 }
 
 /// LFO timing — waveform, rate, amount, sync, delay. Pareja con `draw_lfo_mod`.
@@ -284,8 +420,10 @@ pub fn draw_lfo(ui: &mut egui::Ui, params: &mut SynthParameters) {
     ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
     let mut lfo_waveform = Synthesizer::u8_to_lfo_waveform_pub(params.lfo_waveform);
-    labeled(ui, "wave:", |ui| {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("wave:").size(10.0).color(egui::Color32::from_gray(0xaa)));
         egui::ComboBox::from_id_salt("lfo_waveform")
+            .width(95.0)
             .selected_text(match lfo_waveform {
                 LfoWaveform::Triangle => "Triangle",
                 LfoWaveform::Square => "Square",
@@ -299,67 +437,53 @@ pub fn draw_lfo(ui: &mut egui::Ui, params: &mut SynthParameters) {
                 ui.selectable_value(&mut lfo_waveform, LfoWaveform::Sawtooth, "Sawtooth");
                 ui.selectable_value(&mut lfo_waveform, LfoWaveform::ReverseSawtooth, "Reverse Saw");
                 ui.selectable_value(&mut lfo_waveform, LfoWaveform::SampleAndHold, "Sample & Hold");
-            })
-            .response
+            });
     })
+    .response
     .on_hover_text(
         "LFO waveform — Triangle/Square/Saw for periodic modulation, S&H for random steps",
     );
     params.lfo_waveform = Synthesizer::lfo_waveform_to_u8_pub(lfo_waveform);
 
-    labeled(ui, "rate (Hz):", |ui| {
-        ui.add(
-            egui::Slider::new(&mut params.lfo_rate, 0.05..=30.0)
-                .logarithmic(true)
-                .step_by(0.05),
-        )
-    })
-    .on_hover_text("LFO frequency (cycles per second)");
-    labeled(ui, "amount:", |ui| {
-        ui.add(egui::Slider::new(&mut params.lfo_amount, 0.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("Global LFO depth — multiplies all routing amounts in LFO MOD");
-    labeled(ui, "delay (s):", |ui| {
-        ui.add(egui::Slider::new(&mut params.lfo_delay, 0.0..=5.0).step_by(0.01))
-    })
-    .on_hover_text("Time after note-on before the LFO fades in (delayed vibrato)");
-    ui.checkbox(&mut params.lfo_sync, "key sync (reset on note)")
-        .on_hover_text("Reset LFO phase on every note (vs free-running across notes)");
+    ui.horizontal(|ui| {
+        vslider(ui, &mut params.lfo_rate, 0.05..=30.0, "rate", 60.0)
+            .on_hover_text("LFO frequency (Hz)");
+        vslider(ui, &mut params.lfo_amount, 0.0..=1.0, "amnt", 60.0)
+            .on_hover_text("Global LFO depth");
+        vslider(ui, &mut params.lfo_delay, 0.0..=5.0, "dly", 60.0)
+            .on_hover_text("Delayed vibrato fade-in (s)");
+    });
+    ui.checkbox(&mut params.lfo_sync, "key sync")
+        .on_hover_text("Reset LFO phase on every note");
 }
 
-/// LFO mod destinations — 5 rutas con toggle de target y amount.
+/// LFO mod — LED toggle + slider en la misma fila. Diseñado para 205px.
 pub fn draw_lfo_mod(ui: &mut egui::Ui, params: &mut SynthParameters) {
-    ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+    ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+    ui.spacing_mut().slider_width = 105.0;
 
-    labeled_check(ui, Some(&mut params.lfo_target_filter), "cutoff:", |ui| {
-        ui.add(egui::Slider::new(&mut params.lfo_to_cutoff, 0.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("LFO modulation depth on filter cutoff (wah-wah). Toggle enables routing");
-    labeled_check(ui, None, "res:", |ui| {
-        ui.add(egui::Slider::new(&mut params.lfo_to_resonance, 0.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("LFO depth on filter resonance (uses the filter target above)");
-    labeled_check(
-        ui,
-        Some(&mut params.lfo_target_osc1_pitch),
-        "osc A pitch:",
-        |ui| ui.add(egui::Slider::new(&mut params.lfo_to_osc1_pitch, 0.0..=1.0).step_by(0.01)),
-    )
-    .on_hover_text("LFO depth on osc A pitch (vibrato). Toggle enables routing");
-    labeled_check(
-        ui,
-        Some(&mut params.lfo_target_osc2_pitch),
-        "osc B pitch:",
-        |ui| ui.add(egui::Slider::new(&mut params.lfo_to_osc2_pitch, 0.0..=1.0).step_by(0.01)),
-    )
-    .on_hover_text("LFO depth on osc B pitch (vibrato). Toggle enables routing");
-    labeled_check(
-        ui,
-        Some(&mut params.lfo_target_amplitude),
-        "amplitude:",
-        |ui| ui.add(egui::Slider::new(&mut params.lfo_to_amplitude, 0.0..=1.0).step_by(0.01)),
-    )
-    .on_hover_text("LFO depth on amplitude (tremolo). Toggle enables routing");
+    lfo_target_row(ui, "fq A", &mut params.lfo_target_osc1_pitch, &mut params.lfo_to_osc1_pitch);
+    lfo_target_row(ui, "fq B", &mut params.lfo_target_osc2_pitch, &mut params.lfo_to_osc2_pitch);
+    lfo_target_row(ui, "filt", &mut params.lfo_target_filter,     &mut params.lfo_to_cutoff);
+    lfo_target_row(ui, "amp ", &mut params.lfo_target_amplitude,  &mut params.lfo_to_amplitude);
+
+    // res: sin target LED (siempre activo)
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("res ").size(9.0).color(DIM)
+            .background_color(DARK_GRAY));
+        ui.add(egui::Slider::new(&mut params.lfo_to_resonance, 0.0..=1.0).step_by(0.01).show_value(false));
+        ui.label(egui::RichText::new(format!("{:.2}", params.lfo_to_resonance)).size(9.0).color(DIM));
+    });
+
+    // PW targets: LED toggle sin slider (depth fija al 40% en DSP)
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        led_button(ui, "pw A", &mut params.lfo_target_osc1_pw)
+            .on_hover_text("LFO > Osc A pulse width (depth fija 40%)");
+        led_button(ui, "pw B", &mut params.lfo_target_osc2_pw)
+            .on_hover_text("LFO > Osc B pulse width (depth fija 40%)");
+    });
 }
 
 pub fn draw_master(ui: &mut egui::Ui, params: &mut SynthParameters) {
@@ -506,26 +630,19 @@ pub fn draw_effects(ui: &mut egui::Ui, params: &mut SynthParameters) {
     .on_hover_text("Delay dry/wet mix");
 }
 
-/// Analog character panel — las imperfecciones que rompen la limpieza digital.
+/// Analog character — sliders horizontales compactos. Diseñado para 130px.
 pub fn draw_analog(ui: &mut egui::Ui, params: &mut SynthParameters) {
-    ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+    ui.spacing_mut().item_spacing = egui::vec2(3.0, 4.0);
+    ui.spacing_mut().slider_width = 65.0;
 
-    labeled(ui, "tolerance:", |ui| {
-        ui.add(egui::Slider::new(&mut params.analog_component_tolerance, 0.0..=1.0).step_by(0.01))
-            .on_hover_text("Per-voice filter tolerance (±2% cutoff / ±3% Q)")
-    });
-    labeled(ui, "drift:", |ui| {
-        ui.add(egui::Slider::new(&mut params.analog_filter_drift, 0.0..=1.0).step_by(0.01))
-            .on_hover_text("Slow filter-temperature drift")
-    });
-    labeled(ui, "vca bleed:", |ui| {
-        ui.add(egui::Slider::new(&mut params.analog_vca_bleed, 0.0..=0.01).step_by(0.0001))
-            .on_hover_text("Oscillator leakage through closed VCA")
-    });
-    labeled(ui, "hiss:", |ui| {
-        ui.add(egui::Slider::new(&mut params.analog_noise_floor, 0.0..=0.01).step_by(0.0001))
-            .on_hover_text("Constant background noise floor")
-    });
+    compact_hslider(ui, "toler", &mut params.analog_component_tolerance, 0.0..=1.0)
+        .on_hover_text("Per-voice component tolerance (resistor/cap spread)");
+    compact_hslider(ui, "drift", &mut params.analog_filter_drift, 0.0..=1.0)
+        .on_hover_text("Slow thermal filter drift (temperature walk)");
+    compact_hslider(ui, "vca  ", &mut params.analog_vca_bleed, 0.0..=0.01)
+        .on_hover_text("VCA leakage through closed gate (bleed)");
+    compact_hslider(ui, "hiss ", &mut params.analog_noise_floor, 0.0..=0.01)
+        .on_hover_text("Background noise floor");
 }
 
 pub fn draw_arpeggiator(ui: &mut egui::Ui, params: &mut SynthParameters) {
@@ -633,58 +750,25 @@ pub fn draw_voice_mode(ui: &mut egui::Ui, params: &mut SynthParameters) {
     params.max_voices = max_v as u8;
 }
 
-/// Poly Mod section — rutas de modulación clásicas del Prophet-5.
+/// Poly Mod — sliders horizontales compactos. Diseñado para 120px.
 pub fn draw_poly_mod(ui: &mut egui::Ui, params: &mut SynthParameters) {
-    ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+    ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+    ui.spacing_mut().slider_width = 60.0;
 
-    ui.label(
-        egui::RichText::new("Filter Env ->")
-            .size(10.0)
-            .color(egui::Color32::GRAY),
-    );
-    labeled(ui, "freq A:", |ui| {
-        ui.add(
-            egui::Slider::new(&mut params.poly_mod_filter_env_to_osc_a_freq, -1.0..=1.0)
-                .step_by(0.01),
-        )
-    })
-    .on_hover_text("FILTER ENV modulates osc A pitch (negative = inverted envelope)");
-    labeled(ui, "pw A:", |ui| {
-        ui.add(
-            egui::Slider::new(&mut params.poly_mod_filter_env_to_osc_a_pw, -1.0..=1.0)
-                .step_by(0.01),
-        )
-    })
-    .on_hover_text("FILTER ENV modulates osc A pulse width (PWM via envelope)");
+    ui.label(egui::RichText::new("FiltEnv >").size(9.5).color(DIM));
+    compact_hslider(ui, "fqA", &mut params.poly_mod_filter_env_to_osc_a_freq, -1.0..=1.0)
+        .on_hover_text("Filter ENV > Osc A pitch");
+    compact_hslider(ui, "pwA", &mut params.poly_mod_filter_env_to_osc_a_pw, -1.0..=1.0)
+        .on_hover_text("Filter ENV > Osc A pulse width");
 
-    ui.separator();
-
-    ui.label(
-        egui::RichText::new("Osc B ->")
-            .size(10.0)
-            .color(egui::Color32::GRAY),
-    );
-    labeled(ui, "freq A:", |ui| {
-        ui.add(
-            egui::Slider::new(&mut params.poly_mod_osc_b_to_osc_a_freq, -1.0..=1.0).step_by(0.01),
-        )
-    })
-    .on_hover_text(
-        "Cross-modulation: osc B modulates osc A pitch (audio-rate FM, classic Prophet sound)",
-    );
-    labeled(ui, "pw A:", |ui| {
-        ui.add(egui::Slider::new(&mut params.poly_mod_osc_b_to_osc_a_pw, -1.0..=1.0).step_by(0.01))
-    })
-    .on_hover_text("Osc B modulates osc A pulse width at audio rate");
-    labeled(ui, "cutoff:", |ui| {
-        ui.add(
-            egui::Slider::new(&mut params.poly_mod_osc_b_to_filter_cutoff, -1.0..=1.0)
-                .step_by(0.01),
-        )
-    })
-    .on_hover_text(
-        "Osc B modulates filter cutoff at audio rate (creates harmonics / metallic timbres)",
-    );
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Osc B >").size(9.5).color(DIM));
+    compact_hslider(ui, "fqA", &mut params.poly_mod_osc_b_to_osc_a_freq, -1.0..=1.0)
+        .on_hover_text("Osc B > Osc A pitch (FM)");
+    compact_hslider(ui, "pwA", &mut params.poly_mod_osc_b_to_osc_a_pw, -1.0..=1.0)
+        .on_hover_text("Osc B > Osc A pulse width");
+    compact_hslider(ui, "flt", &mut params.poly_mod_osc_b_to_filter_cutoff, -1.0..=1.0)
+        .on_hover_text("Osc B > Filter cutoff");
 }
 
 pub fn draw_keyboard_legend(ui: &mut egui::Ui, octave: i32) {

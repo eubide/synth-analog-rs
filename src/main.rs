@@ -7,6 +7,7 @@ mod lock_free;
 mod midi_handler;
 mod optimization;
 mod synthesizer;
+mod widgets;
 
 use audio_engine::AudioEngine;
 use gui::SynthApp;
@@ -78,8 +79,9 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Rust Synthesizer",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
             Ok(Box::new(SynthApp::new(
+                cc,
                 lock_free_synth,
                 midi_events,
                 ui_events,
