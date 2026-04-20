@@ -32,6 +32,7 @@ Software de síntesis analógica inspirado en los sintetizadores clásicos de lo
 - **Preset System** with categories and one-click random patch generation
 - **VU Meter** with peak hold and clip indicator
 - **MIDI Monitor** window for diagnosing MIDI input
+- **Visualizer** — floating window with oscilloscope (zoom slider, hysteresis trigger) and spectrum analyzer (log-frequency bars, dB grid, frequency markers)
 
 ## Installation & Requirements
 
@@ -94,6 +95,13 @@ The synthesizer maps your computer keyboard to musical notes. See [MANUAL.md](MA
 - **Amount**: Global LFO modulation depth
 - **Keyboard Sync**: Reset LFO phase on every note trigger
 - **Destinations**: Route LFO to filter cutoff, resonance, oscillator pitch, amplitude
+
+#### Visualizer
+
+Click **Visualizer** in the toolbar to open the floating analysis window:
+
+- **Oscilloscope** — live waveform with hysteresis trigger (stable on periodic signals). Drag the zoom slider left to zoom into high-frequency waves, right to see full low-frequency cycles. The vertical scale auto-adjusts to the signal amplitude.
+- **Spectrum** — real-time FFT spectrum with EMA smoothing (fast attack, slow decay). Log-frequency axis from 20 Hz to 20 kHz, with reference lines at 100 Hz, 1 kHz, and 10 kHz.
 
 ### MIDI Setup
 
