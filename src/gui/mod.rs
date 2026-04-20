@@ -308,7 +308,7 @@ impl eframe::App for SynthApp {
                     }
 
                     if ui
-                        .small_button("Scope")
+                        .small_button("Visualizer")
                         .on_hover_text("Open the waveform / spectrum visualiser")
                         .clicked()
                     {
@@ -517,7 +517,7 @@ impl eframe::App for SynthApp {
             let sample_rate = current_sample_rate(&self.lock_free_synth);
             let viz = &mut self.visualiser;
             egui::Window::new("Visualizer")
-                .default_size([360.0, 160.0])
+                .default_size([360.0, 280.0])
                 .resizable(true)
                 .open(&mut show)
                 .show(ui.ctx(), |ui| {
