@@ -62,12 +62,14 @@ pub struct SynthApp {
 
 impl SynthApp {
     pub fn new(
+        cc: &eframe::CreationContext<'_>,
         lock_free_synth: Arc<LockFreeSynth>,
         midi_events: Arc<MidiEventQueue>,
         ui_events: Arc<UiEventQueue>,
         audio_engine: AudioEngine,
         midi_handler: Option<MidiHandler>,
     ) -> Self {
+        apply_dark_amber_theme(&cc.egui_ctx);
         let params = *lock_free_synth.get_params();
         Self {
             lock_free_synth,
@@ -142,9 +144,35 @@ impl SynthApp {
     }
 }
 
+fn apply_dark_amber_theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    let panel_bg = egui::Color32::from_rgb(0x12, 0x12, 0x12);
+    let section_bg = egui::Color32::from_rgb(0x1e, 0x1e, 0x1e);
+    let section_stroke = egui::Color32::from_rgb(0x33, 0x33, 0x33);
+    let amber = egui::Color32::from_rgb(0xe8, 0x97, 0x1a);
+    let text_dim = egui::Color32::from_gray(0xaa);
+
+    visuals.panel_fill = panel_bg;
+    visuals.window_fill = section_bg;
+    visuals.widgets.noninteractive.bg_fill = section_bg;
+    visuals.widgets.noninteractive.weak_bg_fill = section_bg;
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text_dim);
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x2a, 0x2a, 0x2a);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text_dim);
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x3a, 0x3a, 0x3a);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, amber);
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x50, 0x50, 0x50);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.5, amber);
+    visuals.selection.bg_fill = egui::Color32::from_rgba_unmultiplied(0xe8, 0x97, 0x1a, 80);
+    visuals.selection.stroke = egui::Stroke::new(1.0, amber);
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, section_stroke);
+    visuals.window_stroke = egui::Stroke::new(1.0, section_stroke);
+
+    ctx.set_visuals(visuals);
+}
+
 impl eframe::App for SynthApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Read current params at start of frame
         self.params = *self.lock_free_synth.get_params();
         let peak_bits = self
             .lock_free_synth
@@ -152,14 +180,11 @@ impl eframe::App for SynthApp {
             .load(std::sync::atomic::Ordering::Relaxed);
         self.peak_db = linear_to_db(f32::from_bits(peak_bits));
 
-        // Advance peak-hold: snap upward on a new peak, else decay at a fixed
-        // dB/sec rate (linear-in-dB decay feels more uniform than scalar).
+        // linear-in-dB decay feels more uniform than scalar decay
         let dt = ctx.input(|i| i.stable_dt).min(0.1);
         self.peak_hold_db =
             (self.peak_hold_db.max(self.peak_db) - VU_HOLD_DECAY_DB_PER_SEC * dt).max(VU_FLOOR_DB);
 
-        // Only force 60 fps while something is actually moving. Idle UI then
-        // falls back to input-driven repaints (near-zero CPU).
         if self.peak_db > VU_FLOOR_DB + 0.5
             || self.peak_hold_db > VU_FLOOR_DB + 0.5
             || self.show_visualiser
@@ -326,58 +351,76 @@ impl eframe::App for SynthApp {
             });
             ui.separator();
 
-            // Ventana de tamaño fijo — no se necesita ScrollArea
+            // ── Layout 8 secciones horizontales Prophet-5 ──────────────────
             {
-                // Layout 5 cols × 220 px todas iguales.
-                // slider_width compacto (55 px vs default 100) para que el track
-                // del slider + valor numérico quepan en `WIDGET_WIDTH=105` sin que
-                // el valor se corte por la derecha.
-                ui.spacing_mut().slider_width = 55.0;
+                ui.spacing_mut().slider_width = 48.0;
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.y = 2.0;
+
+                // ── FILA PRINCIPAL: 8 secciones ─────────────────────────────────
                 ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().item_spacing.x = 3.0;
 
-                    // ── COL 1: FUENTES (220 px) ─────────────────────────────
+                    // POLY MOD — 120px
                     ui.vertical(|ui| {
-                        ui.set_min_width(220.0);
-                        ui.set_max_width(220.0);
-                        panels::section(ui, "OSCILLATOR A", |ui| {
-                            panels::draw_oscillator(ui, &mut self.params, 1)
-                        });
-                        ui.add_space(4.0);
-                        panels::section(ui, "OSCILLATOR B", |ui| {
-                            panels::draw_oscillator(ui, &mut self.params, 2)
-                        });
-                        ui.add_space(4.0);
-                        panels::section(ui, "ANALOG", |ui| panels::draw_analog(ui, &mut self.params));
-                    });
-
-                    // ── COL 2: CADENA DE SEÑAL (220 px) ────────────────────
-                    ui.vertical(|ui| {
-                        ui.set_min_width(220.0);
-                        ui.set_max_width(220.0);
-                        panels::section(ui, "MIXER", |ui| panels::draw_mixer(ui, &mut self.params));
-                        ui.add_space(4.0);
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("FILTER").size(11.0).strong());
-                                ui.label(
-                                    egui::RichText::new("24dB")
-                                        .size(9.0)
-                                        .color(egui::Color32::GRAY),
-                                );
-                            });
-                            panels::draw_filter(ui, &mut self.params);
-                        });
-                        ui.add_space(4.0);
+                        ui.set_min_width(120.0);
+                        ui.set_max_width(120.0);
                         panels::section(ui, "POLY MOD", |ui| {
                             panels::draw_poly_mod(ui, &mut self.params)
                         });
                     });
 
-                    // ── COL 3: ENV/LFO/VOICE (220 px) ───────────────────────
+                    // OSC A — 155px
                     ui.vertical(|ui| {
-                        ui.set_min_width(220.0);
-                        ui.set_max_width(220.0);
+                        ui.set_min_width(155.0);
+                        ui.set_max_width(155.0);
+                        panels::section(ui, "OSCILLATOR A", |ui| {
+                            panels::draw_oscillator(ui, &mut self.params, 1)
+                        });
+                    });
+
+                    // OSC B — 165px
+                    ui.vertical(|ui| {
+                        ui.set_min_width(165.0);
+                        ui.set_max_width(165.0);
+                        panels::section(ui, "OSCILLATOR B", |ui| {
+                            panels::draw_oscillator(ui, &mut self.params, 2)
+                        });
+                    });
+
+                    // MIXER — 90px
+                    ui.vertical(|ui| {
+                        ui.set_min_width(90.0);
+                        ui.set_max_width(90.0);
+                        panels::section(ui, "MIXER", |ui| panels::draw_mixer(ui, &mut self.params));
+                    });
+
+                    // FILTER — 145px
+                    ui.vertical(|ui| {
+                        ui.set_min_width(145.0);
+                        ui.set_max_width(145.0);
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("FILTER")
+                                        .size(11.0)
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                );
+                                ui.label(
+                                    egui::RichText::new("24dB")
+                                        .size(9.0)
+                                        .color(egui::Color32::from_gray(0x55)),
+                                );
+                            });
+                            panels::draw_filter(ui, &mut self.params);
+                        });
+                    });
+
+                    // FILTER ENV — 145px
+                    ui.vertical(|ui| {
+                        ui.set_min_width(145.0);
+                        ui.set_max_width(145.0);
                         panels::section(ui, "FILTER ENV", |ui| {
                             panels::draw_envelope(
                                 ui,
@@ -394,18 +437,12 @@ impl eframe::App for SynthApp {
                                 self.params.filter_release,
                             );
                         });
-                        ui.add_space(4.0);
-                        panels::section(ui, "LFO", |ui| panels::draw_lfo(ui, &mut self.params));
-                        ui.add_space(4.0);
-                        panels::section(ui, "VOICE MODE", |ui| {
-                            panels::draw_voice_mode(ui, &mut self.params)
-                        });
                     });
 
-                    // ── COL 4: ENV/LFO MOD/ARP (220 px) ─────────────────────
+                    // AMP ENV — 130px
                     ui.vertical(|ui| {
-                        ui.set_min_width(220.0);
-                        ui.set_max_width(220.0);
+                        ui.set_min_width(130.0);
+                        ui.set_max_width(130.0);
                         panels::section(ui, "AMP ENV", |ui| {
                             panels::draw_envelope(
                                 ui,
@@ -421,46 +458,96 @@ impl eframe::App for SynthApp {
                                 self.params.amp_sustain,
                                 self.params.amp_release,
                             );
-                        });
-                        ui.add_space(4.0);
-                        panels::section(ui, "LFO MOD", |ui| {
-                            panels::draw_lfo_mod(ui, &mut self.params)
-                        });
-                        ui.add_space(4.0);
-                        panels::section(ui, "ARP", |ui| {
-                            panels::draw_arpeggiator(ui, &mut self.params)
+                            ui.add_space(2.0);
+                            ui.spacing_mut().slider_width = 60.0;
+                            ui.add(
+                                egui::Slider::new(&mut self.params.amp_initial_amount, 0.0..=1.0)
+                                    .text("init")
+                                    .step_by(0.01),
+                            )
+                            .on_hover_text("VCA initial level — >0 lets sound through without envelope");
                         });
                     });
 
-                    // ── COL 5: SALIDA (220 px) ──────────────────────────────
+                    // LFO — 205px
                     ui.vertical(|ui| {
-                        ui.set_min_width(220.0);
-                        ui.set_max_width(220.0);
-                        panels::section(ui, "MASTER", |ui| {
-                            panels::draw_master(ui, &mut self.params)
+                        ui.set_min_width(205.0);
+                        ui.set_max_width(205.0);
+                        panels::section(ui, "LFO", |ui| {
+                            panels::draw_lfo(ui, &mut self.params);
+                            ui.add_space(4.0);
+                            panels::draw_lfo_mod(ui, &mut self.params);
                         });
-                        ui.add_space(4.0);
+                    });
+                });
+
+                ui.add_space(4.0);
+
+                // ── BARRA INFERIOR: efectos, voice, arp, master, analog, presets ───
+                // Cada sección va envuelta en ui.vertical() para que el group()
+                // herede layout vertical, no el horizontal_top del padre.
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+
+                    ui.vertical(|ui| {
+                        ui.set_min_width(260.0);
+                        ui.set_max_width(260.0);
                         panels::section(ui, "EFFECTS", |ui| {
-                            panels::draw_effects(ui, &mut self.params)
+                            panels::draw_effects(ui, &mut self.params);
                         });
-                        ui.add_space(4.0);
+                    });
+
+                    ui.vertical(|ui| {
+                        ui.set_min_width(155.0);
+                        ui.set_max_width(155.0);
+                        panels::section(ui, "VOICE MODE", |ui| {
+                            panels::draw_voice_mode(ui, &mut self.params);
+                        });
+                    });
+
+                    ui.vertical(|ui| {
+                        ui.set_min_width(170.0);
+                        ui.set_max_width(170.0);
+                        panels::section(ui, "ARP", |ui| {
+                            panels::draw_arpeggiator(ui, &mut self.params);
+                        });
+                    });
+
+                    ui.vertical(|ui| {
+                        ui.set_min_width(175.0);
+                        ui.set_max_width(175.0);
+                        panels::section(ui, "MASTER", |ui| {
+                            panels::draw_master(ui, &mut self.params);
+                        });
+                    });
+
+                    ui.vertical(|ui| {
+                        ui.set_min_width(130.0);
+                        ui.set_max_width(130.0);
+                        panels::section(ui, "ANALOG", |ui| {
+                            panels::draw_analog(ui, &mut self.params);
+                        });
+                    });
+
+                    ui.vertical(|ui| {
+                        ui.set_min_width(95.0);
+                        ui.set_max_width(95.0);
                         ui.group(|ui| {
-                            ui.label(egui::RichText::new("PRESET").size(11.0).strong());
+                            ui.label(
+                                egui::RichText::new("PRESET")
+                                    .size(11.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            );
                             let current = self.presets.current_name();
                             ui.label(
-                                egui::RichText::new(if current.is_empty() {
-                                    "default"
-                                } else {
-                                    current
-                                })
-                                .size(10.0)
-                                .color(egui::Color32::from_rgb(100, 220, 100)),
+                                egui::RichText::new(if current.is_empty() { "default" } else { current })
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(0xe8, 0x97, 0x1a)),
                             );
                             if ui
                                 .small_button("manage...")
-                                .on_hover_text(
-                                    "Open preset manager — save/load patches by category",
-                                )
+                                .on_hover_text("Open preset manager")
                                 .clicked()
                             {
                                 self.show_presets_window = !self.show_presets_window;

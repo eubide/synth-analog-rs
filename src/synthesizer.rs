@@ -145,6 +145,8 @@ pub struct LfoParams {
     pub target_osc2_pitch: bool,
     pub target_filter: bool,
     pub target_amplitude: bool,
+    pub target_osc1_pw: bool,
+    pub target_osc2_pw: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -560,7 +562,20 @@ struct ModulationBus {
     lfo_target_osc2: bool,
     lfo_target_filter: bool,
     lfo_target_amplitude: bool,
+    lfo_target_osc1_pw: bool,
+    lfo_target_osc2_pw: bool,
     lfo_delay: f32,
+
+    // Oscillator octave multipliers (0.5 / 1.0 / 2.0)
+    osc1_octave_mult: f32,
+    osc2_octave_mult: f32,
+
+    // Osc B special modes
+    osc2_lfo_mode: bool,
+    osc2_keyboard_track: bool,
+
+    // VCA initial level
+    amp_initial_amount: f32,
 
     // Global modulation
     modulation_matrix: ModulationMatrix,
@@ -838,6 +853,14 @@ pub struct Synthesizer {
     pub stereo_spread: f32,
     // Tuning mode: 0=Equal Temperament, 1=Just Intonation, 2=Pythagorean, 3=Werckmeister III
     pub tuning_mode: u8,
+    // Osc octave: 0=16'(×0.5), 1=8'(×1.0), 2=4'(×2.0)
+    pub osc1_octave: i8,
+    pub osc2_octave: i8,
+    // Osc B special modes
+    pub osc2_lfo_mode: bool,
+    pub osc2_keyboard_track: bool,
+    // VCA initial level
+    pub amp_initial_amount: f32,
     // Biquad LP decimation filter state (two cascaded stages for 4× support)
     pub decim_x1_l: f32,
     pub decim_x2_l: f32,
@@ -903,6 +926,8 @@ impl Default for LfoParams {
             target_osc2_pitch: false,
             target_filter: false,
             target_amplitude: false,
+            target_osc1_pw: false,
+            target_osc2_pw: false,
         }
     }
 }
@@ -1097,6 +1122,11 @@ impl Synthesizer {
             master_noise_b2: 0.0,
             stereo_spread: 0.0,
             tuning_mode: 0,
+            osc1_octave: 1,
+            osc2_octave: 1,
+            osc2_lfo_mode: false,
+            osc2_keyboard_track: true,
+            amp_initial_amount: 0.0,
             decim_x1_l: 0.0,
             decim_x2_l: 0.0,
             decim_y1_l: 0.0,
@@ -1612,7 +1642,14 @@ impl Synthesizer {
             lfo_target_osc2: self.lfo.target_osc2_pitch,
             lfo_target_filter: self.lfo.target_filter,
             lfo_target_amplitude: self.lfo.target_amplitude,
+            lfo_target_osc1_pw: self.lfo.target_osc1_pw,
+            lfo_target_osc2_pw: self.lfo.target_osc2_pw,
             lfo_delay: self.lfo_engine.delay,
+            osc1_octave_mult: Self::octave_to_mult(self.osc1_octave),
+            osc2_octave_mult: Self::octave_to_mult(self.osc2_octave),
+            osc2_lfo_mode: self.osc2_lfo_mode,
+            osc2_keyboard_track: self.osc2_keyboard_track,
+            amp_initial_amount: self.amp_initial_amount,
 
             modulation_matrix: self.modulation_matrix,
             pitch_bend_ratio,
@@ -1681,9 +1718,11 @@ impl Synthesizer {
         let drift_ratio =
             1.0 + DRIFT_FREQ_FACTOR * OPTIMIZATION_TABLES.fast_sin(voice.drift_phase * 2.0 * PI);
 
-        // Calculate frequencies with detune, drift, and modulation matrix
-        let mut freq1 = base_freq * bus.osc1_detune_ratio * drift_ratio;
-        let mut freq2 = base_freq * bus.osc2_detune_ratio * drift_ratio;
+        // Calculate frequencies with detune, drift, octave switch, and modulation matrix
+        let osc2_base = if bus.osc2_keyboard_track { base_freq } else { 440.0 };
+        let osc2_freq_mult = if bus.osc2_lfo_mode { 0.01 } else { 1.0 };
+        let mut freq1 = base_freq * bus.osc1_detune_ratio * drift_ratio * bus.osc1_octave_mult;
+        let mut freq2 = osc2_base * bus.osc2_detune_ratio * drift_ratio * bus.osc2_octave_mult * osc2_freq_mult;
 
         // Apply modulation matrix to oscillator pitch (gated by lfo_target booleans)
         if bus.lfo_target_osc1 {
@@ -1718,6 +1757,18 @@ impl Synthesizer {
             osc1_pw_voice = (osc1_pw_voice + pw_shift).clamp(0.05, 0.95);
         }
 
+        // LFO → Pulse Width modulation
+        if bus.lfo_target_osc1_pw {
+            let pw_shift = lfo_value_voice * 0.4;
+            osc1_pw_voice = (osc1_pw_voice + pw_shift).clamp(0.05, 0.95);
+        }
+        let osc2_pw_voice = if bus.lfo_target_osc2_pw {
+            let pw_shift = lfo_value_voice * 0.4;
+            (bus.osc2_pulse_width + pw_shift).clamp(0.05, 0.95)
+        } else {
+            bus.osc2_pulse_width
+        };
+
         // Pitch bend: applied globally to both oscillators
         freq1 *= bus.pitch_bend_ratio;
         freq2 *= bus.pitch_bend_ratio;
@@ -1749,7 +1800,7 @@ impl Synthesizer {
             Self::generate_oscillator_static(bus.osc1_wave_type, phase1, dt1, osc1_pw_voice)
                 * bus.osc1_amplitude;
         let osc2_out =
-            Self::generate_oscillator_static(bus.osc2_wave_type, phase2, dt2, bus.osc2_pulse_width)
+            Self::generate_oscillator_static(bus.osc2_wave_type, phase2, dt2, osc2_pw_voice)
                 * bus.osc2_amplitude;
 
         // Pink noise via per-voice xorshift32 PRNG + Paul Kellett 3-stage IIR.
@@ -1850,9 +1901,10 @@ impl Synthesizer {
         let velocity_amplitude_mod =
             0.5 + (voice.velocity * bus.modulation_matrix.velocity_to_amplitude * 0.5);
 
-        // A real analog VCA never fully shuts — a constant offset lets a
-        // sliver of oscillator signal escape, giving notes an "alive" taper.
-        let amp_gain = envelope_value + bus.vca_bleed;
+        // VCA: initial level allows sound without env trigger (Prophet-5 style).
+        // amp_initial_amount > 0 means a base level persists independently of the envelope.
+        let effective_env = bus.amp_initial_amount + (1.0 - bus.amp_initial_amount) * envelope_value;
+        let amp_gain = effective_env + bus.vca_bleed;
         mixed *=
             amp_gain * lfo_amplitude_mod * velocity_amplitude_mod * bus.aftertouch_amplitude_mod;
 
@@ -1933,6 +1985,15 @@ impl Synthesizer {
     #[inline(always)]
     fn semitones_to_ratio(semitones: f32) -> f32 {
         2.0_f32.powf(semitones / 12.0)
+    }
+
+    #[inline]
+    fn octave_to_mult(octave: i8) -> f32 {
+        match octave {
+            0 => 0.5,
+            2 => 2.0,
+            _ => 1.0,
+        }
     }
 
     /// Padé approximant for tanh — accurate to <0.1 % for |x| ≤ 3, clamped to ±1 beyond.
@@ -2558,6 +2619,8 @@ impl Synthesizer {
                 target_osc2_pitch: lfo_osc2,
                 target_filter: lfo_filter,
                 target_amplitude: lfo_amplitude,
+                target_osc1_pw: false,
+                target_osc2_pw: false,
             },
             modulation_matrix: ModulationMatrix {
                 lfo_to_cutoff: mod_lfo_cut,
@@ -3747,6 +3810,8 @@ impl Synthesizer {
             lfo_target_osc2_pitch: self.lfo.target_osc2_pitch,
             lfo_target_filter: self.lfo.target_filter,
             lfo_target_amplitude: self.lfo.target_amplitude,
+            lfo_target_osc1_pw: self.lfo.target_osc1_pw,
+            lfo_target_osc2_pw: self.lfo.target_osc2_pw,
             lfo_to_cutoff: self.modulation_matrix.lfo_to_cutoff,
             lfo_to_resonance: self.modulation_matrix.lfo_to_resonance,
             lfo_to_osc1_pitch: self.modulation_matrix.lfo_to_osc1_pitch,
@@ -3806,6 +3871,11 @@ impl Synthesizer {
             reference_tone: false,
             tuning_mode: self.tuning_mode,
             oversampling: self.oversampling,
+            osc1_octave: self.osc1_octave,
+            osc2_octave: self.osc2_octave,
+            osc2_lfo_mode: self.osc2_lfo_mode,
+            osc2_keyboard_track: self.osc2_keyboard_track,
+            amp_initial_amount: self.amp_initial_amount,
         }
     }
 
@@ -3844,6 +3914,8 @@ impl Synthesizer {
         self.lfo.target_osc2_pitch = params.lfo_target_osc2_pitch;
         self.lfo.target_filter = params.lfo_target_filter;
         self.lfo.target_amplitude = params.lfo_target_amplitude;
+        self.lfo.target_osc1_pw = params.lfo_target_osc1_pw;
+        self.lfo.target_osc2_pw = params.lfo_target_osc2_pw;
         self.modulation_matrix.lfo_to_cutoff = params.lfo_to_cutoff;
         self.modulation_matrix.lfo_to_resonance = params.lfo_to_resonance;
         self.modulation_matrix.lfo_to_osc1_pitch = params.lfo_to_osc1_pitch;
@@ -3901,6 +3973,11 @@ impl Synthesizer {
         self.stereo_spread = params.stereo_spread;
         self.tuning_mode = params.tuning_mode;
         self.oversampling = params.oversampling.max(1);
+        self.osc1_octave = params.osc1_octave;
+        self.osc2_octave = params.osc2_octave;
+        self.osc2_lfo_mode = params.osc2_lfo_mode;
+        self.osc2_keyboard_track = params.osc2_keyboard_track;
+        self.amp_initial_amount = params.amp_initial_amount;
     }
 
     pub fn wave_type_to_u8_pub(wt: WaveType) -> u8 {
