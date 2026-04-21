@@ -146,7 +146,7 @@ impl SynthApp {
 
 fn apply_dark_amber_theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
-    let panel_bg = egui::Color32::from_rgb(0x12, 0x12, 0x12);
+    let panel_bg = egui::Color32::BLACK;
     let section_bg = egui::Color32::from_rgb(0x1e, 0x1e, 0x1e);
     let section_stroke = egui::Color32::from_rgb(0x33, 0x33, 0x33);
     let amber = egui::Color32::from_rgb(0xe8, 0x97, 0x1a);
@@ -173,6 +173,7 @@ fn apply_dark_amber_theme(ctx: &egui::Context) {
 
 impl eframe::App for SynthApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        apply_dark_amber_theme(ctx);
         self.params = *self.lock_free_synth.get_params();
         let peak_bits = self
             .lock_free_synth
