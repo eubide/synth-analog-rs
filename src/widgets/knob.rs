@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use eframe::egui::{self, Color32, Pos2, Response, Sense, Stroke, Ui};
 use std::ops::RangeInclusive;
 use std::f32::consts::TAU;
