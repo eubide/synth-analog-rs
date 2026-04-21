@@ -53,7 +53,7 @@ pub fn lfo_target_row(
             .add(
                 egui::Button::new(egui::RichText::new(label).size(9.0).color(text_col))
                     .fill(color)
-                    .rounding(egui::Rounding::same(2))
+                    .corner_radius(2.0)
                     .min_size(egui::vec2(30.0, 16.0)),
             )
             .clicked()
@@ -110,7 +110,7 @@ pub fn led_button(ui: &mut egui::Ui, label: &str, active: &mut bool) -> egui::Re
     let resp = ui.add(
         egui::Button::new(egui::RichText::new(label).size(9.5).color(text_color))
             .fill(color)
-            .rounding(egui::Rounding::same(3)),
+            .corner_radius(3.0),
     );
     if resp.clicked() {
         *active = !*active;
@@ -147,6 +147,7 @@ pub fn labeled<R>(
 /// Variante con checkbox prefijo (LFO MOD). El slot del checkbox se reserva
 /// siempre — si `target` es `None`, queda en blanco para alinear filas con y
 /// sin toggle.
+#[allow(dead_code)]
 pub fn labeled_check<R>(
     ui: &mut egui::Ui,
     target: Option<&mut bool>,
@@ -291,7 +292,7 @@ pub fn draw_oscillator(ui: &mut egui::Ui, params: &mut SynthParameters, osc_num:
             let color = if selected { AMBER } else { DARK_GRAY };
             let text_col = if selected { egui::Color32::BLACK } else { egui::Color32::from_gray(0xaa) };
             if ui
-                .add(egui::Button::new(egui::RichText::new(lbl).size(9.0).color(text_col)).fill(color).rounding(egui::Rounding::same(2)))
+                .add(egui::Button::new(egui::RichText::new(lbl).size(9.0).color(text_col)).fill(color).corner_radius(2.0))
                 .on_hover_text("Octave range: 16'=sub, 8'=normal, 4'=high")
                 .clicked()
             {
@@ -309,24 +310,29 @@ pub fn draw_oscillator(ui: &mut egui::Ui, params: &mut SynthParameters, osc_num:
 
     let mut wave_type = Synthesizer::u8_to_wave_type_pub(*waveform);
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("wave:").size(10.0).color(egui::Color32::from_gray(0xaa)));
-        egui::ComboBox::from_id_salt(("wave", osc_num))
-            .width(80.0)
-            .selected_text(match wave_type {
-                WaveType::Sawtooth => "Saw",
-                WaveType::Triangle => "Tri",
-                WaveType::Square => "Sqr",
-                WaveType::Sine => "Sin",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut wave_type, WaveType::Sawtooth, "Sawtooth");
-                ui.selectable_value(&mut wave_type, WaveType::Triangle, "Triangle");
-                ui.selectable_value(&mut wave_type, WaveType::Square, "Square");
-                ui.selectable_value(&mut wave_type, WaveType::Sine, "Sine");
-            });
-    })
-    .response
-    .on_hover_text("Oscillator waveform shape");
+        for (wt, lbl, hint) in [
+            (WaveType::Sawtooth, "Saw", "Sawtooth"),
+            (WaveType::Triangle, "Tri", "Triangle"),
+            (WaveType::Square, "Sqr", "Square / Pulse"),
+            (WaveType::Sine, "Sin", "Sine"),
+        ] {
+            let selected = wave_type == wt;
+            let color = if selected { AMBER } else { DARK_GRAY };
+            let text_col = if selected { egui::Color32::BLACK } else { DIM };
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new(lbl).size(9.0).color(text_col))
+                        .fill(color)
+                        .corner_radius(2.0)
+                        .min_size(egui::vec2(26.0, 16.0)),
+                )
+                .on_hover_text(hint)
+                .clicked()
+            {
+                wave_type = wt;
+            }
+        }
+    });
     *waveform = Synthesizer::wave_type_to_u8_pub(wave_type);
 
     if wave_type == WaveType::Square {
@@ -340,18 +346,11 @@ pub fn draw_oscillator(ui: &mut egui::Ui, params: &mut SynthParameters, osc_num:
 
     if osc_num == 2 {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("sync:").size(10.0).color(egui::Color32::from_gray(0xaa)));
-            ui.checkbox(&mut params.osc2_sync, "-> A")
+            led_button(ui, "sync→A", &mut params.osc2_sync)
                 .on_hover_text("Hard sync osc B to osc A — every osc A cycle resets osc B");
-        });
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("lfo mode:").size(10.0).color(egui::Color32::from_gray(0xaa)));
-            ui.checkbox(&mut params.osc2_lfo_mode, "sub-audio")
+            led_button(ui, "sub-osc", &mut params.osc2_lfo_mode)
                 .on_hover_text("Osc B in sub-audio range (freq x 0.01)");
-        });
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("kbd track:").size(10.0).color(egui::Color32::from_gray(0xaa)));
-            ui.checkbox(&mut params.osc2_keyboard_track, "on")
+            led_button(ui, "kbd", &mut params.osc2_keyboard_track)
                 .on_hover_text("Keyboard tracking — off = fixed pitch");
         });
     }
@@ -421,28 +420,30 @@ pub fn draw_lfo(ui: &mut egui::Ui, params: &mut SynthParameters) {
 
     let mut lfo_waveform = Synthesizer::u8_to_lfo_waveform_pub(params.lfo_waveform);
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("wave:").size(10.0).color(egui::Color32::from_gray(0xaa)));
-        egui::ComboBox::from_id_salt("lfo_waveform")
-            .width(95.0)
-            .selected_text(match lfo_waveform {
-                LfoWaveform::Triangle => "Triangle",
-                LfoWaveform::Square => "Square",
-                LfoWaveform::Sawtooth => "Sawtooth",
-                LfoWaveform::ReverseSawtooth => "Rev Saw",
-                LfoWaveform::SampleAndHold => "S&H",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut lfo_waveform, LfoWaveform::Triangle, "Triangle");
-                ui.selectable_value(&mut lfo_waveform, LfoWaveform::Square, "Square");
-                ui.selectable_value(&mut lfo_waveform, LfoWaveform::Sawtooth, "Sawtooth");
-                ui.selectable_value(&mut lfo_waveform, LfoWaveform::ReverseSawtooth, "Reverse Saw");
-                ui.selectable_value(&mut lfo_waveform, LfoWaveform::SampleAndHold, "Sample & Hold");
-            });
-    })
-    .response
-    .on_hover_text(
-        "LFO waveform — Triangle/Square/Saw for periodic modulation, S&H for random steps",
-    );
+        for (wf, lbl, hint) in [
+            (LfoWaveform::Triangle, "Tri", "Triangle"),
+            (LfoWaveform::Square, "Sqr", "Square"),
+            (LfoWaveform::Sawtooth, "Saw", "Sawtooth"),
+            (LfoWaveform::ReverseSawtooth, "Rev", "Reverse Sawtooth"),
+            (LfoWaveform::SampleAndHold, "S&H", "Sample & Hold — random steps"),
+        ] {
+            let selected = lfo_waveform == wf;
+            let color = if selected { AMBER } else { DARK_GRAY };
+            let text_col = if selected { egui::Color32::BLACK } else { DIM };
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new(lbl).size(9.0).color(text_col))
+                        .fill(color)
+                        .corner_radius(2.0)
+                        .min_size(egui::vec2(22.0, 16.0)),
+                )
+                .on_hover_text(hint)
+                .clicked()
+            {
+                lfo_waveform = wf;
+            }
+        }
+    });
     params.lfo_waveform = Synthesizer::lfo_waveform_to_u8_pub(lfo_waveform);
 
     ui.horizontal(|ui| {
@@ -453,7 +454,7 @@ pub fn draw_lfo(ui: &mut egui::Ui, params: &mut SynthParameters) {
         vslider(ui, &mut params.lfo_delay, 0.0..=5.0, "dly", 60.0)
             .on_hover_text("Delayed vibrato fade-in (s)");
     });
-    ui.checkbox(&mut params.lfo_sync, "key sync")
+    led_button(ui, "key sync", &mut params.lfo_sync)
         .on_hover_text("Reset LFO phase on every note");
 }
 
@@ -648,7 +649,7 @@ pub fn draw_analog(ui: &mut egui::Ui, params: &mut SynthParameters) {
 pub fn draw_arpeggiator(ui: &mut egui::Ui, params: &mut SynthParameters) {
     ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
 
-    ui.checkbox(&mut params.arp_enabled, "enable")
+    led_button(ui, "ENABLE", &mut params.arp_enabled)
         .on_hover_text("Activate the arpeggiator — held notes play as a sequence");
 
     labeled(ui, "rate (BPM):", |ui| {
@@ -657,26 +658,30 @@ pub fn draw_arpeggiator(ui: &mut egui::Ui, params: &mut SynthParameters) {
     .on_hover_text("Arpeggiator tempo (steps per minute)");
 
     let mut arp_pattern = Synthesizer::u8_to_arp_pattern_pub(params.arp_pattern);
-    labeled(ui, "pattern:", |ui| {
-        let pattern_text = match arp_pattern {
-            ArpPattern::Up => "Up",
-            ArpPattern::Down => "Down",
-            ArpPattern::UpDown => "Up-Down",
-            ArpPattern::Random => "Random",
-        };
-        egui::ComboBox::from_id_salt("arp_pattern")
-            .selected_text(pattern_text)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut arp_pattern, ArpPattern::Up, "Up");
-                ui.selectable_value(&mut arp_pattern, ArpPattern::Down, "Down");
-                ui.selectable_value(&mut arp_pattern, ArpPattern::UpDown, "Up-Down");
-                ui.selectable_value(&mut arp_pattern, ArpPattern::Random, "Random");
-            })
-            .response
-    })
-    .on_hover_text(
-        "Note order: Up = ascending, Down = descending, Up-Down = bounce, Random = shuffle",
-    );
+    ui.horizontal(|ui| {
+        for (pat, lbl, hint) in [
+            (ArpPattern::Up,     "Up",  "Ascending"),
+            (ArpPattern::Down,   "Dn",  "Descending"),
+            (ArpPattern::UpDown, "U-D", "Bounce up then down"),
+            (ArpPattern::Random, "Rnd", "Random shuffle"),
+        ] {
+            let selected = arp_pattern == pat;
+            let color = if selected { AMBER } else { DARK_GRAY };
+            let text_col = if selected { egui::Color32::BLACK } else { DIM };
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new(lbl).size(9.0).color(text_col))
+                        .fill(color)
+                        .corner_radius(2.0)
+                        .min_size(egui::vec2(24.0, 16.0)),
+                )
+                .on_hover_text(hint)
+                .clicked()
+            {
+                arp_pattern = pat;
+            }
+        }
+    });
     params.arp_pattern = Synthesizer::arp_pattern_to_u8_pub(arp_pattern);
 
     let mut octaves_f32 = params.arp_octaves as f32;
@@ -692,47 +697,63 @@ pub fn draw_arpeggiator(ui: &mut egui::Ui, params: &mut SynthParameters) {
     .on_hover_text("Note duration as a fraction of one step (1.0 = legato, 0.1 = staccato)");
 
     ui.separator();
-    ui.checkbox(&mut params.arp_sync_to_midi, "sync to MIDI clock")
+    led_button(ui, "sync MIDI clk", &mut params.arp_sync_to_midi)
         .on_hover_text("Lock arpeggiator rate to incoming MIDI clock instead of internal BPM");
 }
 
 pub fn draw_voice_mode(ui: &mut egui::Ui, params: &mut SynthParameters) {
     ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
 
-    labeled(ui, "mode:", |ui| {
-        egui::ComboBox::from_id_salt("voice_mode")
-            .selected_text(match params.voice_mode {
-                1 => "Mono",
-                2 => "Legato",
-                3 => "Unison",
-                _ => "Poly",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut params.voice_mode, 0, "Poly");
-                ui.selectable_value(&mut params.voice_mode, 1, "Mono");
-                ui.selectable_value(&mut params.voice_mode, 2, "Legato");
-                ui.selectable_value(&mut params.voice_mode, 3, "Unison");
-            })
-            .response
-    })
-    .on_hover_text("Poly: chords / Mono: 1 voice retrigs / Legato: 1 voice slides / Unison: all voices stacked on one note");
+    ui.horizontal(|ui| {
+        for (mode, lbl, hint) in [
+            (0u8, "Poly",   "Polyphonic — chords"),
+            (1u8, "Mono",   "Monophonic — single voice, retriggers"),
+            (2u8, "Legato", "Legato — single voice, slides"),
+            (3u8, "Unison", "Unison — all voices on one note"),
+        ] {
+            let selected = params.voice_mode == mode;
+            let color = if selected { AMBER } else { DARK_GRAY };
+            let text_col = if selected { egui::Color32::BLACK } else { DIM };
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new(lbl).size(9.0).color(text_col))
+                        .fill(color)
+                        .corner_radius(2.0)
+                        .min_size(egui::vec2(34.0, 16.0)),
+                )
+                .on_hover_text(hint)
+                .clicked()
+            {
+                params.voice_mode = mode;
+            }
+        }
+    });
 
     if params.voice_mode == 1 || params.voice_mode == 2 {
-        labeled(ui, "priority:", |ui| {
-            egui::ComboBox::from_id_salt("note_priority")
-                .selected_text(match params.note_priority {
-                    1 => "Low",
-                    2 => "High",
-                    _ => "Last",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut params.note_priority, 0, "Last");
-                    ui.selectable_value(&mut params.note_priority, 1, "Low");
-                    ui.selectable_value(&mut params.note_priority, 2, "High");
-                })
-                .response
-        })
-        .on_hover_text("Which note wins when several are held — Last/Low/High pitch");
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("prio:").size(9.5).color(DIM));
+            for (prio, lbl, hint) in [
+                (0u8, "Last", "Last-played note wins"),
+                (1u8, "Low",  "Lowest pitch wins"),
+                (2u8, "High", "Highest pitch wins"),
+            ] {
+                let selected = params.note_priority == prio;
+                let color = if selected { AMBER } else { DARK_GRAY };
+                let text_col = if selected { egui::Color32::BLACK } else { DIM };
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new(lbl).size(9.0).color(text_col))
+                            .fill(color)
+                            .corner_radius(2.0)
+                            .min_size(egui::vec2(28.0, 16.0)),
+                    )
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    params.note_priority = prio;
+                }
+            }
+        });
     }
 
     if params.voice_mode == 3 {
